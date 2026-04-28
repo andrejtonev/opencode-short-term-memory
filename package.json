@@ -1,0 +1,72 @@
+{
+  "name": "@atonev/opencode-short-term-memory",
+  "version": "1.0.0",
+  "description": "OpenCode plugin that automatically summarizes conversation context into structured session memory and injects it back into the system prompt every few turns.",
+  "author": "andrejtonev <29177572+andrejtonev@users.noreply.github.com>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/andrejtonev/opencode-short-term-memory.git"
+  },
+  "keywords": [
+    "opencode",
+    "plugin",
+    "session-memory",
+    "summarization",
+    "context",
+    "compaction"
+  ],
+  "type": "module",
+  "engines": {
+    "bun": ">=1.0.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist/",
+    "README.md",
+    "LICENSE",
+    "stm.example.jsonc"
+  ],
+  "scripts": {
+    "clean": "bun -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
+    "build": "npm run clean && tsup && tsc --emitDeclarationOnly",
+    "check:package": "bun run build && bun run typecheck && bun test",
+    "prepublishOnly": "bun run check:package",
+    "dev": "opencode plugin dev",
+    "test": "bun test",
+    "typecheck": "bun --bun run tsc --noEmit",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "link:global": "bun link",
+    "prepare": "bunx husky"
+  },
+  "devDependencies": {
+    "@opencode-ai/sdk": "1.14.25",
+    "@tarquinen/opencode-dcp": "^3.1.9",
+    "@types/bun": "1.3.13",
+    "husky": "^9.1.7",
+    "lint-staged": "^17.0.2",
+    "prettier": "^3.8.3",
+    "tsup": "^8.5.1",
+    "typescript": "^5"
+  },
+  "lint-staged": {
+    "*.{ts,tsx,js,jsx,json,jsonc,md}": [
+      "prettier --write"
+    ]
+  },
+  "dependencies": {
+    "@opencode-ai/plugin": "1.14.25",
+    "jsonc-parser": "^3.3.1"
+  }
+}

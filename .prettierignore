@@ -1,0 +1,7 @@
+node_modules/
+.opencode/
+dist/
+.husky/
+bun.lock
+*.tgz
+*.tar.gz

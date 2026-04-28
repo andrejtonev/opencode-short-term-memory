@@ -1,0 +1,6 @@
+node_modules/
+.opencode/
+dist/
+*.tgz
+*.tar.gz
+package-lock.json

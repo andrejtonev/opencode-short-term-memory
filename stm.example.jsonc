@@ -1,0 +1,55 @@
+{
+  // Session memory plugin on/off
+  "enabled": true,
+
+  // Model used by the summarizer
+  "memoryModel": "opencode/minimax-m2.5-free",
+
+  // clean | active
+  "summarizerMode": "clean",
+
+  // If true, clean-mode failures will call active-session prompt fallback.
+  // Keep false to prevent side-session prompts from appearing in desktop chat.
+  "cleanFallbackToActiveSession": false,
+
+  // If true, include AGENTS.md content in the first memory update prompt per session
+  "includeAgentsMdOnFirstUpdate": false,
+
+  // If true, inject parent session memory into sub-agent (fork) sessions
+  "injectInSubagents": true,
+
+  // Absolute path is safest on Windows desktop installs
+  "opencodeExecutable": "/path/to/opencode",
+
+  // Number of retries for clean side-session summarizer failures (0 = no retry)
+  "sideSessionRetries": 1,
+
+  // Interval at which to inject memory summarization into chat (every N prompts from user)
+  "remindEveryN": 4,
+
+  // Max chars stored in session memory markdown
+  "maxMemoryLength": 10000,
+
+  // Max chars from recent conversation sent to summarizer
+  "maxUpdateInputLength": 20000,
+
+  // Max number of recent messages processed per update cycle (limits look-back on stale checkpoints)
+  "maxDeltaMessages": 200,
+
+  // Collapse consecutive assistant messages between user turns into the last reply
+  // true = lower token usage, may drop intermediate reasoning
+  // false = keep every assistant turn (default)
+  "collapseAssistantBursts": false,
+
+  // Debounce for scheduled updates (ms)
+  "debounceMs": 1200,
+
+  // Debug logging
+  "debug": false,
+
+  // Max JSONL lines kept in .opencode/memory/session-memory.log
+  "logMaxLines": 300,
+
+  // Directory where memory files, checkpoints, and logs are stored (relative to project root)
+  "memoryDir": ".opencode/memory",
+}
