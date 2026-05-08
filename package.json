@@ -1,6 +1,6 @@
 {
   "name": "@atonev/opencode-short-term-memory",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "OpenCode plugin that automatically summarizes conversation context into structured session memory and injects it back into the system prompt every few turns.",
   "author": "andrejtonev <29177572+andrejtonev@users.noreply.github.com>",
   "license": "MIT",

@@ -4,45 +4,13 @@ Automatically summarizes conversation context into structured session memory and
 
 ## Installation
 
-### From npm (recommended)
+Install the plugin globally using the OpenCode CLI:
 
-Add the package to your `opencode.json`:
-
-```json
-{
-  "$schema": "https://opencode.ai/config.json",
-  "plugin": ["@atonev/opencode-short-term-memory"]
-}
+```bash
+opencode plugin @atonev/opencode-short-term-memory@latest --global
 ```
 
 OpenCode installs npm plugins automatically using Bun at startup. Packages and their dependencies are cached in `~/.cache/opencode/node_modules/`.
-
-### From local files (local development)
-
-Place the plugin file in the OpenCode plugins directory:
-
-- `.opencode/plugins/` — project-level plugins
-- `~/.config/opencode/plugins/` — global plugins
-
-Files in these directories are loaded automatically at startup.
-
-For example, clone the repo and symlink the entry point:
-
-```bash
-git clone https://github.com/<your-user>/opencode-short-term-memory.git
-cd opencode-short-term-memory
-bun install
-
-# Linux/macOS
-mkdir -p ~/.config/opencode/plugins
-ln -sf "$PWD/index.ts" ~/.config/opencode/plugins/opencode-short-term-memory.ts
-
-# Windows (PowerShell, admin)
-New-Item -ItemType Directory -Force "$env:LOCALAPPDATA\OpenCode\plugins"
-New-Item -ItemType SymbolicLink -Path "$env:LOCALAPPDATA\OpenCode\plugins\opencode-short-term-memory.ts" -Target "$PWD\index.ts"
-```
-
-If your local plugin uses external npm packages, add a `package.json` to your config directory (e.g. `.opencode/package.json`) with the dependencies you need. OpenCode runs `bun install` at startup to install them.
 
 ### Post-install
 
