@@ -262,6 +262,40 @@ async function findFirstExistingConfig(baseDir: string) {
   return undefined;
 }
 
+export async function ensureDefaultConfigFile(projectOpencodeDir: string) {
+  for (const fileName of CONFIG_FILE_CANDIDATES) {
+    const fullPath = join(projectOpencodeDir, fileName);
+    try {
+      const info = await stat(fullPath);
+      if (info.isFile()) return; // Config already exists
+    } catch {}
+  }
+
+  const defaultContent = `{
+  // Session memory plugin on/off
+  "enabled": true,
+
+  // Model used by the summarizer (provider/model)
+  "memoryModel": "${DEFAULT_CONFIG.memoryModel}",
+
+  // clean | active
+  "summarizerMode": "${DEFAULT_CONFIG.summarizerMode}",
+
+  // Interval at which to inject memory summarization into chat (every N user turns)
+  "remindEveryN": ${DEFAULT_CONFIG.remindEveryN},
+
+  // Max chars stored in session memory markdown
+  "maxMemoryLength": ${DEFAULT_CONFIG.maxMemoryLength},
+
+  // Debug logging
+  "debug": ${DEFAULT_CONFIG.debug},
+}
+`;
+
+  await ensureDir(projectOpencodeDir);
+  await writeFile(join(projectOpencodeDir, "stm.jsonc"), defaultContent, "utf8");
+}
+
 async function findOpencodeDir(startDir: string): Promise<string | undefined> {
   let current = startDir;
   while (true) {
@@ -276,7 +310,7 @@ async function findOpencodeDir(startDir: string): Promise<string | undefined> {
   }
 }
 
-async function resolveProjectOpencodeDir(baseDir?: string) {
+export async function resolveProjectOpencodeDir(baseDir?: string) {
   const cwd = baseDir || process.cwd();
   if (cwd.endsWith(".opencode")) return cwd;
   const found = await findOpencodeDir(cwd);

@@ -9,6 +9,7 @@ import {
   appendText,
   clampText,
   ensureMemoryFile,
+  ensureDefaultConfigFile,
   getMessageText,
   getMessageTextFromParts,
   getSessionID,
@@ -224,5 +225,29 @@ describe("memory-utils general behavior", () => {
     const final = await readText(target, "");
     const acceptable = new Set(chunks.map((text) => text).concat(chunks.map((text) => `${text}\n`)));
     expect(acceptable.has(final)).toBe(true);
+  });
+
+  test("ensureDefaultConfigFile creates stm.jsonc when no config exists", async () => {
+    const opencodeDir = join(testDir, "new-project", ".opencode");
+    await ensureDefaultConfigFile(opencodeDir);
+
+    const created = await readText(join(opencodeDir, "stm.jsonc"), "");
+    expect(created).toContain('"enabled": true');
+    expect(created).toContain('"memoryModel":');
+    expect(created).toContain('"summarizerMode": "clean"');
+    expect(created).toContain('"remindEveryN": 4');
+  });
+
+  test("ensureDefaultConfigFile does nothing when config already exists", async () => {
+    const opencodeDir = join(testDir, "existing-project", ".opencode");
+    await writeText(join(opencodeDir, "stm.json"), JSON.stringify({ debug: true }, null, 2));
+
+    await ensureDefaultConfigFile(opencodeDir);
+
+    const existing = await readText(join(opencodeDir, "stm.json"), "");
+    expect(JSON.parse(existing).debug).toBe(true);
+
+    const jsonc = await readText(join(opencodeDir, "stm.jsonc"), "");
+    expect(jsonc).toBe("");
   });
 });

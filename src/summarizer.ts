@@ -184,6 +184,27 @@ export function compactMemoryForInjection(memory: string): string {
   return kept.length ? kept.join("\n") : "";
 }
 
+function parseJsonSummarizerOutput(stdout: string): { text: string; sessionID?: string } {
+  let text = "";
+  let sessionID: string | undefined;
+  for (const line of stdout.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    try {
+      const event = JSON.parse(trimmed) as Record<string, unknown>;
+      if (typeof event.sessionID === "string" && !sessionID) {
+        sessionID = event.sessionID;
+      }
+      if (event.type === "text" && event.part && typeof (event.part as Record<string, unknown>).text === "string") {
+        text += (event.part as Record<string, unknown>).text;
+      }
+    } catch {
+      // ignore non-JSON lines
+    }
+  }
+  return { text: text.trim(), sessionID };
+}
+
 export async function runCleanOpencodeSummarizer(prompt: string, config: SessionMemoryConfig) {
   const baseDir = join(tmpdir(), "opencode-session-memory-clean-");
   const tempRoot = await mkdtemp(baseDir);
@@ -198,10 +219,11 @@ export async function runCleanOpencodeSummarizer(prompt: string, config: Session
   }
 
   const executable = await resolveCleanExecutable(config);
+  let sessionID: string | undefined;
 
   try {
     const proc = Bun.spawn({
-      cmd: [executable, "run", "--pure", "--model", config.memoryModel],
+      cmd: [executable, "run", "--pure", "--format", "json", "--model", config.memoryModel],
       cwd: cleanDir,
       env,
       stdin: "pipe",
@@ -218,12 +240,15 @@ export async function runCleanOpencodeSummarizer(prompt: string, config: Session
       proc.exited,
     ]);
 
+    // Extract session ID even on failure so we can clean it up.
+    const parsed = parseJsonSummarizerOutput(String(stdout || ""));
+    sessionID = parsed.sessionID;
+
     if (code !== 0) {
       throw new Error(`opencode run failed with code ${code}: ${stderr || stdout}`);
     }
 
-    const trimmedStdout = String(stdout || "").trim();
-    if (trimmedStdout) return trimmedStdout;
+    if (parsed.text) return parsed.text;
 
     const cleanedStderr = stripAnsi(String(stderr || ""));
     const headerAt = cleanedStderr.indexOf(MEMORY_HEADER);
@@ -239,6 +264,20 @@ export async function runCleanOpencodeSummarizer(prompt: string, config: Session
       )}, stderrPreview=${JSON.stringify(stderrPreview)})`,
     );
   } finally {
+    // Delete the side session so it doesn't clutter the user's session list.
+    if (sessionID && executable) {
+      try {
+        const deleteProc = Bun.spawn({
+          cmd: [executable, "session", "delete", sessionID],
+          stdout: "pipe",
+          stderr: "pipe",
+        });
+        await deleteProc.exited;
+      } catch {
+        // Best-effort cleanup; don't let session deletion failures mask summarizer results.
+      }
+    }
+
     let lastRmError: unknown;
     for (let attempt = 0; attempt < 3; attempt++) {
       try {

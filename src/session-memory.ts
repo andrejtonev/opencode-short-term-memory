@@ -20,6 +20,8 @@ import { join } from "node:path";
 import {
   createRuntimeState,
   ensureMemoryFile,
+  ensureDefaultConfigFile,
+  resolveProjectOpencodeDir,
   getMessageRole,
   getMessageText,
   getSessionID,
@@ -98,6 +100,8 @@ export const SessionMemoryPlugin = async ({
 
   // ── Initialisation helpers inside factory ────────────────
   await reloadConfig(configCtx, true);
+  const projectOpencodeDir = await resolveProjectOpencodeDir(directory);
+  await ensureDefaultConfigFile(projectOpencodeDir);
   let config = configCtx.config;
   const cmdCtx: CommandContext = { config, sessionStates, globalState };
   await mkdir(config.memoryDir, { recursive: true });
