@@ -212,9 +212,19 @@ export async function runCleanOpencodeSummarizer(prompt: string, config: Session
   await mkdir(cleanDir, { recursive: true });
   await writeText(join(cleanDir, "README.md"), "Clean-room scratch directory for the session-memory summarizer.\n");
 
+  const STRIPPED_ENV_VARS = new Set([
+    "OPENCODE",
+    "OPENCODE_CLIENT",
+    "OPENCODE_PID",
+    "OPENCODE_PROCESS_ROLE",
+    "OPENCODE_RUN_ID",
+    "OPENCODE_SERVER_PASSWORD",
+    "OPENCODE_SERVER_USERNAME",
+  ]);
+
   const env: Record<string, string> = {};
   for (const [key, value] of Object.entries(process.env)) {
-    if (String(key).toUpperCase().startsWith("OPENCODE")) continue;
+    if (STRIPPED_ENV_VARS.has(key)) continue;
     if (typeof value === "string") env[key] = value;
   }
 
@@ -223,16 +233,12 @@ export async function runCleanOpencodeSummarizer(prompt: string, config: Session
 
   try {
     const proc = Bun.spawn({
-      cmd: [executable, "run", "--pure", "--format", "json", "--model", config.memoryModel],
-      cwd: cleanDir,
+      cmd: [executable, "run", "--pure", "--format", "json", "--model", config.memoryModel, "--dir", cleanDir, prompt],
       env,
-      stdin: "pipe",
+      stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",
     });
-
-    proc.stdin.write(prompt);
-    proc.stdin.end();
 
     const [stdout, stderr, code] = await Promise.all([
       new Response(proc.stdout).text(),

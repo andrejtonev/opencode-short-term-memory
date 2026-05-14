@@ -262,9 +262,9 @@ async function findFirstExistingConfig(baseDir: string) {
   return undefined;
 }
 
-export async function ensureDefaultConfigFile(projectOpencodeDir: string) {
+export async function ensureDefaultConfigFile(configDir: string) {
   for (const fileName of CONFIG_FILE_CANDIDATES) {
-    const fullPath = join(projectOpencodeDir, fileName);
+    const fullPath = join(configDir, fileName);
     try {
       const info = await stat(fullPath);
       if (info.isFile()) return; // Config already exists
@@ -292,8 +292,8 @@ export async function ensureDefaultConfigFile(projectOpencodeDir: string) {
 }
 `;
 
-  await ensureDir(projectOpencodeDir);
-  await writeFile(join(projectOpencodeDir, "stm.jsonc"), defaultContent, "utf8");
+  await ensureDir(configDir);
+  await writeFile(join(configDir, "stm.jsonc"), defaultContent, "utf8");
 }
 
 async function findOpencodeDir(startDir: string): Promise<string | undefined> {
@@ -331,6 +331,10 @@ function candidateGlobalConfigDirs() {
   dirs.push(join(homedir(), ".opencode"));
 
   return Array.from(new Set(dirs));
+}
+
+export function resolveGlobalOpencodeDir() {
+  return candidateGlobalConfigDirs()[0];
 }
 
 export async function readConfig(

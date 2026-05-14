@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
 import {
   DEFAULT_CONFIG,
@@ -24,6 +24,7 @@ import {
   trimLog,
   writeText,
   writeTextAtomic,
+  resolveGlobalOpencodeDir,
 } from "../src/memory-utils";
 
 describe("memory-utils general behavior", () => {
@@ -249,5 +250,16 @@ describe("memory-utils general behavior", () => {
 
     const jsonc = await readText(join(opencodeDir, "stm.jsonc"), "");
     expect(jsonc).toBe("");
+  });
+
+  test("resolveGlobalOpencodeDir returns XDG_CONFIG_HOME/opencode when set", () => {
+    const dir = resolveGlobalOpencodeDir();
+    expect(dir).toBe(join(xdgConfigHome, "opencode"));
+  });
+
+  test("resolveGlobalOpencodeDir falls back to ~/.config/opencode when XDG not set", () => {
+    delete process.env.XDG_CONFIG_HOME;
+    const dir = resolveGlobalOpencodeDir();
+    expect(dir).toBe(join(homedir(), ".config", "opencode"));
   });
 });

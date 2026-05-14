@@ -87,7 +87,7 @@ if (!cleanModePreflight.ok) {
 beforeEach(async () => {
   testDir = await mkdtemp(join(tmpdir(), "opencode-integration-memory-test-"));
   process.env.XDG_CONFIG_HOME = join(testDir, ".xdg");
-  process.env.OPENCODE_CONFIG_DIR = join(testDir, ".config-dir");
+  delete process.env.OPENCODE_CONFIG_DIR;
   delete process.env.LOCALAPPDATA;
   process.chdir(testDir);
 });
@@ -161,7 +161,7 @@ for (const scenario of SCENARIOS) {
         expect(transformOutput.system[0]).toContain(token);
       }
     },
-    60000,
+    120000,
   ); // Real clean-mode integration can be slow; keep timeout generous to avoid flakes.
 }
 
@@ -197,5 +197,5 @@ test.serial.skipIf(!cleanModePreflight.ok)(
     expect(client.calls.prompt.length).toBe(1);
     expect(logText).toContain("memory_update_clean_failed_fallback");
   },
-  60000,
+  120000,
 );

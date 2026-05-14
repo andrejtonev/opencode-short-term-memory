@@ -38,7 +38,7 @@ if (!cleanModePreflight.ok) {
 beforeEach(async () => {
   testDir = await mkdtemp(join(tmpdir(), "opencode-compaction-test-"));
   process.env.XDG_CONFIG_HOME = join(testDir, ".xdg");
-  process.env.OPENCODE_CONFIG_DIR = join(testDir, ".config-dir");
+  delete process.env.OPENCODE_CONFIG_DIR;
   delete process.env.LOCALAPPDATA;
   process.chdir(testDir);
 });

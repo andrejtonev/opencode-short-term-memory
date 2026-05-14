@@ -21,7 +21,7 @@ import {
   createRuntimeState,
   ensureMemoryFile,
   ensureDefaultConfigFile,
-  resolveProjectOpencodeDir,
+  resolveGlobalOpencodeDir,
   getMessageRole,
   getMessageText,
   getSessionID,
@@ -100,8 +100,8 @@ export const SessionMemoryPlugin = async ({
 
   // ── Initialisation helpers inside factory ────────────────
   await reloadConfig(configCtx, true);
-  const projectOpencodeDir = await resolveProjectOpencodeDir(directory);
-  await ensureDefaultConfigFile(projectOpencodeDir);
+  const globalOpencodeDir = resolveGlobalOpencodeDir();
+  await ensureDefaultConfigFile(globalOpencodeDir);
   let config = configCtx.config;
   const cmdCtx: CommandContext = { config, sessionStates, globalState };
   await mkdir(config.memoryDir, { recursive: true });
