@@ -8,12 +8,16 @@ type TestPlugin = Awaited<ReturnType<typeof SessionMemoryPlugin>>;
 
 type FakeClient = {
   session: {
+    create: (args?: unknown) => Promise<unknown>;
     messages: (args?: unknown) => Promise<unknown>;
     prompt: (args?: unknown) => Promise<unknown>;
+    delete: (args?: unknown) => Promise<unknown>;
   };
   calls: {
+    create: unknown[];
     messages: unknown[];
     prompt: unknown[];
+    delete: unknown[];
   };
 };
 
@@ -24,8 +28,10 @@ export function createFakeClient(options?: {
   promptShouldThrow?: boolean;
 }) {
   const calls = {
+    create: [] as unknown[],
     messages: [] as unknown[],
     prompt: [] as unknown[],
+    delete: [] as unknown[],
   };
 
   const messagesRows = options?.messagesRows ?? [];
@@ -35,6 +41,10 @@ export function createFakeClient(options?: {
 
   const client: FakeClient = {
     session: {
+      create: async (args?: unknown) => {
+        calls.create.push(args);
+        return { data: { id: `side-${Date.now()}-${Math.random().toString(36).slice(2, 8)}` } };
+      },
       messages: async (args?: unknown) => {
         calls.messages.push(args);
         const a = args as Record<string, unknown>;
@@ -47,10 +57,14 @@ export function createFakeClient(options?: {
       prompt: async (args?: unknown) => {
         calls.prompt.push(args);
         if (promptShouldThrow) {
-          throw new Error("session.prompt fallback is disabled for this test");
+          throw new Error("session.prompt is disabled for this test");
         }
         const resolvedPromptText = promptResponder ? await promptResponder(args) : promptText;
         return { data: { parts: [{ type: "text", text: resolvedPromptText }] } };
+      },
+      delete: async (args?: unknown) => {
+        calls.delete.push(args);
+        return { data: true };
       },
     },
     calls,

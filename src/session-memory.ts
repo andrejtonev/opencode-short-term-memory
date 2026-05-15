@@ -184,7 +184,6 @@ export const SessionMemoryPlugin = async ({
           reason,
           mode: config.summarizerMode,
           model: config.memoryModel,
-          executable: config.opencodeExecutable,
           deltaEntries: recent.entries.length,
         });
 

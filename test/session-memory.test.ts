@@ -305,21 +305,19 @@ describe("SessionMemoryPlugin general functionality", () => {
     expect(capturedPrompts[0]).not.toContain("Should not be included when disabled");
   });
 
-  test("memory update falls back to active-session prompt when clean run fails", async () => {
-    const sessionID = `fallback-${Date.now()}`;
+  test("memory update clean mode creates side session via SDK API", async () => {
+    const sessionID = `sdk-clean-${Date.now()}`;
     const fakeClient = createFakeClient({
       messagesRows: [
-        { role: "user", content: "Use fallback summarizer" },
-        { role: "assistant", content: "Fallback should succeed" },
+        { role: "user", content: "Test clean summarizer via SDK" },
+        { role: "assistant", content: "OK" },
       ],
-      promptText: "## Session Memory\n\n### Current Context\n- fallback path used\n",
+      promptText: "## Session Memory\n\n### Current Context\n- sdk path used\n",
     });
 
     const { plugin, client } = await createPlugin(
       {
         summarizerMode: "clean",
-        cleanFallbackToActiveSession: true,
-        opencodeExecutable: "this-binary-does-not-exist-for-tests",
         debug: false,
       },
       fakeClient,
@@ -329,19 +327,26 @@ describe("SessionMemoryPlugin general functionality", () => {
     await plugin.tool.short_term_memory.execute({ action: "update" }, { sessionID });
 
     const memory = await readText(memoryPathFor(sessionID), "");
-    expect(memory).toContain("fallback path used");
+    expect(memory).toContain("sdk path used");
     expect(client.calls.messages.length).toBe(1);
+    expect(client.calls.create.length).toBe(1);
     expect(client.calls.prompt.length).toBe(1);
+    expect(client.calls.delete.length).toBe(1);
   });
 
   test("memory update retries clean side-session before fallback", async () => {
     const sessionID = `retry-fallback-${Date.now()}`;
+    let promptCallCount = 0;
     const fakeClient = createFakeClient({
       messagesRows: [
         { role: "user", content: "Retry side-session execution" },
         { role: "assistant", content: "Retry and then fallback" },
       ],
-      promptText: "## Session Memory\n\n### Current Context\n- retried then fell back\n",
+      promptResponder: () => {
+        promptCallCount++;
+        if (promptCallCount <= 3) throw new Error("Simulated clean prompt failure");
+        return "## Session Memory\n\n### Current Context\n- retried then fell back\n";
+      },
     });
 
     const { plugin, client } = await createPlugin(
@@ -349,7 +354,6 @@ describe("SessionMemoryPlugin general functionality", () => {
         summarizerMode: "clean",
         cleanFallbackToActiveSession: true,
         sideSessionRetries: 2,
-        opencodeExecutable: "this-binary-does-not-exist-for-tests",
         debug: false,
       },
       fakeClient,
@@ -361,7 +365,10 @@ describe("SessionMemoryPlugin general functionality", () => {
     const memory = await readText(memoryPathFor(sessionID), "");
     expect(memory).toContain("retried then fell back");
     expect(client.calls.messages.length).toBe(1);
-    expect(client.calls.prompt.length).toBe(1);
+    // 3 clean attempts all fail → fallback to active summarizer succeeds
+    expect(client.calls.create.length).toBe(3);
+    expect(client.calls.prompt.length).toBe(4);
+    expect(client.calls.delete.length).toBe(3);
 
     const logText = await readText(join(".opencode", "memory", "session-memory.log"), "");
     expect(logText).toContain('"event":"memory_update_clean_retry_failed"');
@@ -1084,7 +1091,6 @@ describe("SessionMemoryPlugin general functionality", () => {
       {
         summarizerMode: "clean",
         cleanFallbackToActiveSession: false,
-        opencodeExecutable: "this-binary-definitely-does-not-exist",
         sideSessionRetries: 0,
         debug: false,
       },
@@ -1094,7 +1100,10 @@ describe("SessionMemoryPlugin general functionality", () => {
     await plugin.tool.short_term_memory.execute({ action: "update" }, { sessionID });
     const memory = await readText(memoryPathFor(sessionID), "");
     expect(memory).toContain("None captured yet.");
-    expect(client.calls.prompt.length).toBe(0);
+    // Side session was created and prompt was attempted (but threw)
+    expect(client.calls.create.length).toBe(1);
+    expect(client.calls.prompt.length).toBe(1);
+    expect(client.calls.delete.length).toBe(1);
     const logText = await readText(join(".opencode", "memory", "session-memory.log"), "");
     expect(logText).toContain("memory_update_clean_failed_no_fallback");
   });

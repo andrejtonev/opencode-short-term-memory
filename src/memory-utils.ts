@@ -11,7 +11,6 @@ export type SessionMemoryConfig = {
   cleanFallbackToActiveSession: boolean;
   includeAgentsMdOnFirstUpdate: boolean;
   injectInSubagents: boolean;
-  opencodeExecutable: string;
   sideSessionRetries: number;
   remindEveryN: number;
   maxMemoryLength: number;
@@ -36,8 +35,7 @@ export const DEFAULT_CONFIG: SessionMemoryConfig = {
   summarizerMode: "clean",
   cleanFallbackToActiveSession: false,
   includeAgentsMdOnFirstUpdate: false,
-  injectInSubagents: true, // default: inject parent memory into sub-agents
-  opencodeExecutable: "opencode",
+  injectInSubagents: true,
   sideSessionRetries: 1,
   remindEveryN: 4,
   maxMemoryLength: 10000,
@@ -217,7 +215,6 @@ function normalizeConfig(merged: Record<string, unknown>): SessionMemoryConfig {
       DEFAULT_CONFIG.includeAgentsMdOnFirstUpdate,
     ),
     injectInSubagents: normalizeBoolean(merged.injectInSubagents, DEFAULT_CONFIG.injectInSubagents),
-    opencodeExecutable: normalizeString(merged.opencodeExecutable, DEFAULT_CONFIG.opencodeExecutable),
     sideSessionRetries: normalizeInteger(merged.sideSessionRetries, DEFAULT_CONFIG.sideSessionRetries, 0, 10),
     remindEveryN: normalizeInteger(merged.remindEveryN, DEFAULT_CONFIG.remindEveryN, 1, 1000),
     maxMemoryLength: normalizeInteger(merged.maxMemoryLength, DEFAULT_CONFIG.maxMemoryLength, 200, 50000),
@@ -363,11 +360,6 @@ export async function readConfig(
 
   const projectConfig = await findFirstExistingConfig(projectOpencodeDir);
   if (projectConfig) merged = { ...merged, ...projectConfig };
-
-  const envExecutable = process.env.OPENCODE_EXECUTABLE?.trim();
-  if (envExecutable) {
-    merged = { ...merged, opencodeExecutable: envExecutable };
-  }
 
   return normalizeConfig(merged);
 }

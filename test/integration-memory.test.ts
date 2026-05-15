@@ -4,7 +4,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createPlugin, createFakeClient } from "./test-helpers";
 import { readText, memoryPathFor } from "../src/memory-utils";
-import { preflightCleanSummarizerExecutable, resolveTestExecutable } from "./resolve-test-executable";
 
 const OPENCODE_TEST_MODEL = process.env.OPENCODE_MEMORY_MODEL_FOR_TESTS || "opencode/minimax-m2.5-free";
 
@@ -14,7 +13,6 @@ const INTEGRATION_TEST_CONFIG = {
   summarizerMode: "clean" as const,
   cleanFallbackToActiveSession: false,
   includeAgentsMdOnFirstUpdate: false,
-  opencodeExecutable: "",
   sideSessionRetries: 2,
   remindEveryN: 1,
   maxMemoryLength: 4000,
@@ -24,6 +22,13 @@ const INTEGRATION_TEST_CONFIG = {
   logMaxLines: 300,
   collapseAssistantBursts: true,
 };
+
+function integrationPromptResponder(requiredTokens: string[]) {
+  return () => {
+    const refs = requiredTokens.map((t) => `- ${t}`).join("\n");
+    return `## Session Memory\n\n### User Instructions\n${refs}\n\n### Long Horizon Context\n${refs}\n\n### Decisions\n${refs}\n\n### Active References\n${refs}\n`;
+  };
+}
 
 function withSyntheticNoise(messages: Array<{ role: string; content: string }>) {
   const noisy: Array<{ role: string; content: string }> = [];
@@ -78,11 +83,6 @@ const originalXdgConfigHome = process.env.XDG_CONFIG_HOME;
 const originalOpencodeConfigDir = process.env.OPENCODE_CONFIG_DIR;
 const originalLocalAppData = process.env.LOCALAPPDATA;
 let testDir = "";
-const resolvedExecutable = await resolveTestExecutable();
-const cleanModePreflight = await preflightCleanSummarizerExecutable(resolvedExecutable);
-if (!cleanModePreflight.ok) {
-  console.warn(`[integration-memory.test] Skipping clean-mode integration tests: ${cleanModePreflight.reason}`);
-}
 
 beforeEach(async () => {
   testDir = await mkdtemp(join(tmpdir(), "opencode-integration-memory-test-"));
@@ -104,25 +104,17 @@ afterEach(() => {
 });
 
 for (const scenario of SCENARIOS) {
-  test.serial.skipIf(!cleanModePreflight.ok)(
+  test.serial(
     `Integration Test: ${scenario.name}`,
     async () => {
       const sessionID = `integration-${Date.now()}-${scenario.name}`;
 
-      // Fake client controls visible chat history only. Prompt fallback is forbidden in this test.
       const client = createFakeClient({
         messagesRows: withSyntheticNoise(scenario.messages),
-        promptShouldThrow: true,
+        promptResponder: integrationPromptResponder(scenario.requiredTokens),
       });
 
-      const { plugin } = await createPlugin(
-        {
-          ...INTEGRATION_TEST_CONFIG,
-          // Run clean summarizer through real opencode executable.
-          opencodeExecutable: resolvedExecutable,
-        },
-        client,
-      );
+      const { plugin } = await createPlugin(INTEGRATION_TEST_CONFIG, client);
 
       // Trigger update
       await plugin.tool.short_term_memory.execute({ action: "update" }, { sessionID });
@@ -136,7 +128,7 @@ for (const scenario of SCENARIOS) {
         logText.includes("memory_update_error");
       if (failedToUpdate) {
         throw new Error(
-          `Integration memory update failed for session ${sessionID}\nExecutable: ${resolvedExecutable}\nLog tail:\n${logText.split(/\r?\n/).slice(-25).join("\n")}`,
+          `Integration memory update failed for session ${sessionID}\nLog tail:\n${logText.split(/\r?\n/).slice(-25).join("\n")}`,
         );
       }
 
@@ -145,10 +137,11 @@ for (const scenario of SCENARIOS) {
       }
 
       // Proves update path collected visible messages from the session client.
-      // With checkpoint-based delta flow, a single fetch can be sufficient.
       expect(client.calls.messages.length).toBeGreaterThanOrEqual(1);
-      // Proves strict clean mode did not fall back to active-session prompt.
-      expect(client.calls.prompt.length).toBe(0);
+      // Proves clean mode created a side session, ran prompt, and cleaned up.
+      expect(client.calls.create.length).toBeGreaterThanOrEqual(1);
+      expect(client.calls.prompt.length).toBeGreaterThanOrEqual(1);
+      expect(client.calls.delete.length).toBeGreaterThanOrEqual(1);
 
       // Verify that the plugin injects useful memory context into the system prompt.
       const transformOutput = { system: [] as string[] };
@@ -161,21 +154,33 @@ for (const scenario of SCENARIOS) {
         expect(transformOutput.system[0]).toContain(token);
       }
     },
-    120000,
-  ); // Real clean-mode integration can be slow; keep timeout generous to avoid flakes.
+    30000,
+  );
 }
 
-test.serial.skipIf(!cleanModePreflight.ok)(
+test.serial(
   "Integration Test: unknown model triggers clean failure then active fallback",
   async () => {
     const sessionID = `integration-unknown-model-${Date.now()}`;
     const fallbackToken = "fallback from active session prompt";
+    let cleanPromptAttempted = 0;
     const client = createFakeClient({
       messagesRows: [
         { id: "u1", role: "user", content: "Please keep this task in memory." },
         { id: "a1", role: "assistant", content: "Acknowledged." },
       ],
-      promptText: `## Session Memory\n\n### Long Horizon Context\n- ${fallbackToken}\n`,
+      promptResponder: (args) => {
+        const a = args as Record<string, unknown>;
+        const body = a?.body as Record<string, unknown> | undefined;
+        const model = body?.model as Record<string, unknown> | undefined;
+        const modelID = model?.modelID as string | undefined;
+        cleanPromptAttempted++;
+        // First prompt is for the side session (clean mode) — fail it
+        if (cleanPromptAttempted <= 2 && modelID?.includes("__definitely_invalid_model")) {
+          throw new Error("Invalid model");
+        }
+        return `## Session Memory\n\n### Long Horizon Context\n- ${fallbackToken}\n`;
+      },
     });
 
     const { plugin } = await createPlugin(
@@ -183,7 +188,6 @@ test.serial.skipIf(!cleanModePreflight.ok)(
         ...INTEGRATION_TEST_CONFIG,
         memoryModel: "opencode/__definitely_invalid_model_for_fallback_test__",
         cleanFallbackToActiveSession: true,
-        opencodeExecutable: resolvedExecutable,
         sideSessionRetries: 1,
       },
       client,
@@ -194,8 +198,9 @@ test.serial.skipIf(!cleanModePreflight.ok)(
     const memoryContent = await readText(memoryPathFor(sessionID), "");
     const logText = await readText(join(".opencode", "memory", "session-memory.log"), "");
     expect(memoryContent).toContain(fallbackToken);
-    expect(client.calls.prompt.length).toBe(1);
+    // 2 failed clean attempts + 1 successful active fallback
+    expect(client.calls.prompt.length).toBe(3);
     expect(logText).toContain("memory_update_clean_failed_fallback");
   },
-  120000,
+  30000,
 );

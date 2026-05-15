@@ -18,9 +18,6 @@
   // If true, inject parent session memory into sub-agent (fork) sessions
   "injectInSubagents": true,
 
-  // Absolute path is safest on Windows desktop installs
-  "opencodeExecutable": "/path/to/opencode",
-
   // Number of retries for clean side-session summarizer failures (0 = no retry)
   "sideSessionRetries": 1,
 

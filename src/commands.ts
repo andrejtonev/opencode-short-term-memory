@@ -11,7 +11,6 @@ import {
   checkpointPathFor,
 } from "./memory-utils";
 import { type SessionRuntimeState } from "./session-state";
-import { resolveCleanExecutable } from "./config";
 
 export function parseMemoryActionFromCommandArgument(argument: unknown): string {
   const raw = String(argument || "")
@@ -31,7 +30,6 @@ export async function statusText(sessionID: string | undefined, ctx: CommandCont
   const { config, globalState } = ctx;
   const sid = sessionID || globalState.lastActiveSessionID;
   const memory = sid ? await readText(memoryPathFor(sid, config.memoryDir), "") : "";
-  const resolvedExecutable = await resolveCleanExecutable(config);
   return [
     "# Session Memory Plugin Status",
     `- enabled: ${config.enabled}`,
@@ -41,9 +39,7 @@ export async function statusText(sessionID: string | undefined, ctx: CommandCont
     `- cleanFallbackToActiveSession: ${config.cleanFallbackToActiveSession}`,
     `- includeAgentsMdOnFirstUpdate: ${config.includeAgentsMdOnFirstUpdate}`,
     `- injectInSubagents: ${config.injectInSubagents}`,
-    `- opencodeExecutable: ${config.opencodeExecutable}`,
     `- sideSessionRetries: ${config.sideSessionRetries}`,
-    `- cleanExecutableResolved: ${resolvedExecutable}`,
     `- remindEveryN: ${config.remindEveryN}`,
     `- maxDeltaMessages: ${config.maxDeltaMessages}`,
     `- memoryDir: ${config.memoryDir}`,

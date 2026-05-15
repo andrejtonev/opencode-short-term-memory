@@ -4,7 +4,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createPlugin, createFakeClient } from "./test-helpers";
 import { memoryPathFor, readText } from "../src/memory-utils";
-import { preflightCleanSummarizerExecutable, resolveTestExecutable } from "./resolve-test-executable";
 
 const OPENCODE_TEST_MODEL = process.env.OPENCODE_MEMORY_MODEL_FOR_TESTS || "opencode/minimax-m2.5-free";
 
@@ -14,7 +13,6 @@ const COMPACTION_TEST_CONFIG = {
   summarizerMode: "clean" as const,
   cleanFallbackToActiveSession: false,
   includeAgentsMdOnFirstUpdate: false,
-  opencodeExecutable: "",
   sideSessionRetries: 2,
   remindEveryN: 1,
   maxMemoryLength: 4000,
@@ -29,11 +27,6 @@ const originalXdgConfigHome = process.env.XDG_CONFIG_HOME;
 const originalOpencodeConfigDir = process.env.OPENCODE_CONFIG_DIR;
 const originalLocalAppData = process.env.LOCALAPPDATA;
 let testDir = "";
-const resolvedExecutable = await resolveTestExecutable();
-const cleanModePreflight = await preflightCleanSummarizerExecutable(resolvedExecutable);
-if (!cleanModePreflight.ok) {
-  console.warn(`[compaction.test] Skipping clean-mode compaction integration: ${cleanModePreflight.reason}`);
-}
 
 beforeEach(async () => {
   testDir = await mkdtemp(join(tmpdir(), "opencode-compaction-test-"));
@@ -54,7 +47,7 @@ afterEach(() => {
   rm(testDir, { recursive: true, force: true }).catch(() => {});
 });
 
-test.serial.skipIf(!cleanModePreflight.ok)(
+test.serial(
   "predefined memory survives compaction and is injected into system prompt",
   async () => {
     const sessionID = `compact-predefined-${Date.now()}`;
@@ -65,15 +58,11 @@ test.serial.skipIf(!cleanModePreflight.ok)(
       { role: "assistant", content: "Tracking /lib/parser-v2.ts." },
       { role: "user", content: "Use Zod for validation and keep logging minimal." },
     ];
-    const client = createFakeClient({ messagesRows: messages, promptShouldThrow: true });
-    const { plugin } = await createPlugin(
-      {
-        ...COMPACTION_TEST_CONFIG,
-        // Strict clean-mode integration: use real opencode executable and do not allow fallback.
-        opencodeExecutable: resolvedExecutable,
-      },
-      client,
-    );
+    const client = createFakeClient({
+      messagesRows: messages,
+      promptText: `## Session Memory\n\n### User Instructions\n- Use TypeScript.\n- Parser at /lib/parser-v2.ts.\n- Use Zod for validation.\n- Keep logging minimal.\n\n### Long Horizon Context\n- TypeScript project.\n- /lib/parser-v2.ts.\n- Zod.\n- logging minimal.\n\n### Active References\n- /lib/parser-v2.ts\n`,
+    });
+    const { plugin } = await createPlugin(COMPACTION_TEST_CONFIG, client);
 
     const compactionOutput = { context: [] as string[], system: [] as string[] };
     await plugin["experimental.session.compacting"]({ sessionID }, compactionOutput);
@@ -86,7 +75,7 @@ test.serial.skipIf(!cleanModePreflight.ok)(
       logText.includes("memory_update_error");
     if (failedToUpdate) {
       throw new Error(
-        `Compaction update failed for session ${sessionID}\nExecutable: ${resolvedExecutable}\nLog tail:\n${logText.split(/\r?\n/).slice(-25).join("\n")}`,
+        `Compaction update failed for session ${sessionID}\nLog tail:\n${logText.split(/\r?\n/).slice(-25).join("\n")}`,
       );
     }
     expect(memoryContent).toContain("TypeScript");
@@ -106,9 +95,11 @@ test.serial.skipIf(!cleanModePreflight.ok)(
     expect(systemOutput.system[0]).toContain("/lib/parser-v2.ts");
     expect(systemOutput.system[0]).toContain("TypeScript");
 
-    // Prove strict clean mode did not fall back to active-session prompt.
+    // Proves clean mode used the SDK API.
     expect(client.calls.messages.length).toBe(1);
-    expect(client.calls.prompt.length).toBe(0);
+    expect(client.calls.create.length).toBeGreaterThanOrEqual(1);
+    expect(client.calls.prompt.length).toBeGreaterThanOrEqual(1);
+    expect(client.calls.delete.length).toBeGreaterThanOrEqual(1);
   },
-  60000,
+  30000,
 );

@@ -109,7 +109,7 @@ export async function processMemoryChunks(
       let lastCleanError = "";
       for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
         try {
-          raw = await runCleanOpencodeSummarizer(prompt, config);
+          raw = await runCleanOpencodeSummarizer(client, prompt, config);
           if (attempt > 1) {
             await logEvent(config, "memory_update_clean_retry_succeeded", { sessionID, reason, attempt, maxAttempts });
           }

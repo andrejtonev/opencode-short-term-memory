@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-05-15
+
+### Changed
+
+- Clean summarizer now uses the OpenCode SDK API instead of spawning external `opencode` binaries for side sessions.
+- Side sessions are created, prompted, and deleted via `client.session.create/prompt/delete` — no temp directories or shell processes.
+
+### Removed
+
+- **Breaking:** Removed `opencodeExecutable` config option — no longer needed when using the SDK API.
+- Removed binary discovery (`resolveCleanExecutable`), validation (`validateRuntimeConfig`), and output parsing utilities (`stripAnsi`, `parseJsonSummarizerOutput`).
+
 ## [1.1.1] - 2026-05-14
 
 ### Changed

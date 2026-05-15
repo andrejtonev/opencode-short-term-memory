@@ -1,6 +1,3 @@
-import { mkdir, mkdtemp } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import {
   type SessionMemoryConfig,
   sanitizeMessage,
@@ -9,23 +6,8 @@ import {
   logEvent,
   parseModel,
   getMessageTextFromParts,
-  writeText,
-  removePath,
 } from "./memory-utils";
-import { resolveCleanExecutable } from "./config";
 import type { Client } from "./types";
-
-const ANSI_REGEX = (() => {
-  const ST = "(?:\\u0007|\\u001B\\u005C|\\u009C)";
-  const osc = `(?:\\u001B\\u005D[\\s\\S]*?${ST})`;
-  const csi = "[\\u001B\\u009B][[\\]()#;?]*(?:\\d{1,4}(?:[;:]\\d{0,4})*)?[\\dA-PR-TZcf-nq-uy=><~]";
-  return new RegExp(`${osc}|${csi}`, "g");
-})();
-
-export function stripAnsi(text: string) {
-  if (!text.includes("\u001B") && !text.includes("\u009B")) return text.trim();
-  return text.replace(ANSI_REGEX, "").trim();
-}
 
 export function buildMemoryPrompt(
   existingMemory: string,
@@ -184,120 +166,59 @@ export function compactMemoryForInjection(memory: string): string {
   return kept.length ? kept.join("\n") : "";
 }
 
-function parseJsonSummarizerOutput(stdout: string): { text: string; sessionID?: string } {
-  let text = "";
+export async function runCleanOpencodeSummarizer(client: Client, prompt: string, config: SessionMemoryConfig) {
+  const parsed = parseModel(config.memoryModel);
+
+  // 1. Create a fresh side session for isolated summarization
   let sessionID: string | undefined;
-  for (const line of stdout.split(/\r?\n/)) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    try {
-      const event = JSON.parse(trimmed) as Record<string, unknown>;
-      if (typeof event.sessionID === "string" && !sessionID) {
-        sessionID = event.sessionID;
-      }
-      if (event.type === "text" && event.part && typeof (event.part as Record<string, unknown>).text === "string") {
-        text += (event.part as Record<string, unknown>).text;
-      }
-    } catch {
-      // ignore non-JSON lines
-    }
-  }
-  return { text: text.trim(), sessionID };
-}
-
-export async function runCleanOpencodeSummarizer(prompt: string, config: SessionMemoryConfig) {
-  const baseDir = join(tmpdir(), "opencode-session-memory-clean-");
-  const tempRoot = await mkdtemp(baseDir);
-  const cleanDir = join(tempRoot, "workspace");
-  await mkdir(cleanDir, { recursive: true });
-  await writeText(join(cleanDir, "README.md"), "Clean-room scratch directory for the session-memory summarizer.\n");
-
-  const STRIPPED_ENV_VARS = new Set([
-    "OPENCODE",
-    "OPENCODE_CLIENT",
-    "OPENCODE_PID",
-    "OPENCODE_PROCESS_ROLE",
-    "OPENCODE_RUN_ID",
-    "OPENCODE_SERVER_PASSWORD",
-    "OPENCODE_SERVER_USERNAME",
-  ]);
-
-  const env: Record<string, string> = {};
-  for (const [key, value] of Object.entries(process.env)) {
-    if (STRIPPED_ENV_VARS.has(key)) continue;
-    if (typeof value === "string") env[key] = value;
-  }
-
-  const executable = await resolveCleanExecutable(config);
-  let sessionID: string | undefined;
-
   try {
-    const proc = Bun.spawn({
-      cmd: [executable, "run", "--pure", "--format", "json", "--model", config.memoryModel, "--dir", cleanDir, prompt],
-      env,
-      stdin: "ignore",
-      stdout: "pipe",
-      stderr: "pipe",
+    const createResult = await client.session.create({
+      body: { title: "Session Memory Summarizer" },
+    });
+    const createRow =
+      (createResult as { data?: Record<string, unknown> })?.data || (createResult as Record<string, unknown>);
+    sessionID = createRow?.id as string | undefined;
+    if (!sessionID) {
+      throw new Error("Failed to create side session: no session ID returned");
+    }
+    await logEvent(config, "side_session_created", { sessionID });
+
+    // 2. Execute the summarization prompt in the fresh session
+    const result = await client.session.prompt({
+      path: { id: sessionID },
+      body: {
+        noReply: true,
+        ...(parsed ? { model: parsed } : {}),
+        system: "You are a clean short-term memory summarizer. Return only the updated Session Memory markdown.",
+        parts: [{ type: "text" as const, text: prompt }],
+      },
     });
 
-    const [stdout, stderr, code] = await Promise.all([
-      new Response(proc.stdout).text(),
-      new Response(proc.stderr).text(),
-      proc.exited,
-    ]);
+    // 3. Extract text from response parts
+    const row = (result as { data?: unknown })?.data || result;
+    const r = row as Record<string, unknown> | undefined;
+    const rawParts = Array.isArray(r?.parts) ? (r.parts as unknown[]) : Array.isArray(row) ? (row as unknown[]) : [];
+    const text = getMessageTextFromParts(rawParts) || "";
 
-    // Extract session ID even on failure so we can clean it up.
-    const parsed = parseJsonSummarizerOutput(String(stdout || ""));
-    sessionID = parsed.sessionID;
-
-    if (code !== 0) {
-      throw new Error(`opencode run failed with code ${code}: ${stderr || stdout}`);
+    if (!text.trim()) {
+      throw new Error("Side session summarizer returned empty output");
     }
 
-    if (parsed.text) return parsed.text;
+    await logEvent(config, "side_session_summarize_done", {
+      sessionID,
+      resultChars: text.length,
+      resultPreview: text.slice(0, 120),
+    });
 
-    const cleanedStderr = stripAnsi(String(stderr || ""));
-    const headerAt = cleanedStderr.indexOf(MEMORY_HEADER);
-    if (headerAt >= 0) {
-      return cleanedStderr.slice(headerAt).trim();
-    }
-
-    const stdoutPreview = String(stdout || "").slice(0, 1000);
-    const stderrPreview = cleanedStderr.slice(0, 1000);
-    throw new Error(
-      `opencode run returned no usable memory output (stdoutChars=${String(stdout || "").length}, stderrChars=${String(stderr || "").length}, stdoutPreview=${JSON.stringify(
-        stdoutPreview,
-      )}, stderrPreview=${JSON.stringify(stderrPreview)})`,
-    );
+    return text.trim();
   } finally {
-    // Delete the side session so it doesn't clutter the user's session list.
-    if (sessionID && executable) {
+    // 4. Clean up: delete the side session
+    if (sessionID) {
       try {
-        const deleteProc = Bun.spawn({
-          cmd: [executable, "session", "delete", sessionID],
-          stdout: "pipe",
-          stderr: "pipe",
-        });
-        await deleteProc.exited;
+        await client.session.delete({ path: { id: sessionID } });
       } catch {
         // Best-effort cleanup; don't let session deletion failures mask summarizer results.
       }
-    }
-
-    let lastRmError: unknown;
-    for (let attempt = 0; attempt < 3; attempt++) {
-      try {
-        await removePath(tempRoot);
-        break;
-      } catch (error) {
-        lastRmError = error;
-        if (attempt < 2) {
-          await new Promise((resolve) => setTimeout(resolve, 100));
-        }
-      }
-    }
-    if (lastRmError) {
-      logEvent(config, "clean_temp_cleanup_error", { error: (lastRmError as Error).message, tempRoot }).catch(() => {});
     }
   }
 }
