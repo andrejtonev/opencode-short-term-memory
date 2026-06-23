@@ -68,13 +68,11 @@ afterAll(() => {
 // ── 1. Plugin loads + smoke ──────────────────────────────────────────
 
 describe("plugin loads and /stm status works", () => {
-  test("opencode serve is up and serving HTTP", () => {
-    if (!ENABLED) return;
-    expect(isServeRunning(SERVE_PORT)).toBe(true);
-  });
-
   test("plugin_loaded log entry was written by the background init", () => {
     if (!ENABLED) return;
+    // The harness's `waitForStmLoaded` polls for this marker before
+    // the suite starts, so this test is a sanity check that the
+    // marker is the JSONL line the rest of the suite greps for.
     const log = readLog(ws);
     expect(log).toContain('"event":"plugin_loaded"');
   });
@@ -86,20 +84,12 @@ describe("plugin loads and /stm status works", () => {
     // tool is visible to the agent. This is the strongest signal we can
     // get from outside opencode that the plugin is wired in.
     expect(result.sessionID).toBeTruthy();
-    // If the configured model is reachable, the agent should also echo
-    // the /stm status output. The model may be unavailable in some
-    // environments (no API key, transient 500 from the provider); in
-    // that case the raw stream is the opencode error frame, which we
-    // accept as a soft pass — the plugin itself is still proven alive
-    // by the sessionID above.
-    if (/Session Memory Plugin Status/i.test(result.raw)) {
-      expect(result.raw).toMatch(/Session Memory Plugin Status/i);
-    } else {
-      console.log(
-        "  (warn) stm status chat round-trip skipped: model unavailable, " +
-          "but session was created (plugin is registered).",
-      );
-    }
+    // With the configured model reachable, the agent echoes the
+    // /stm status output. We assert on the extracted agent text
+    // (text events + tool output) — not on the raw NDJSON stream —
+    // so the test is model-agnostic.
+    expect(result.agentText).toMatch(/Session Memory Plugin Status/i);
+    expect(result.agentText).toContain("summarizerMode");
   });
 
   test("a chat produces a memory file in the project .opencode/memory/", async () => {

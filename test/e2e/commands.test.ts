@@ -8,8 +8,7 @@
 // Skipped unless OPENCODE_E2E=1 is set and the opencode binary is on $PATH.
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { mkdirSync } from "node:fs";
 
 import {
   cleanupE2EWorkspace,
@@ -44,14 +43,14 @@ beforeAll(async () => {
     debug: true,
     debounceMs: 500,
     remindEveryN: 1,
+    // Keep enough log history for the /stm logs test to find the
+    // plugin_loaded marker. The default 300 lines gets trimmed off
+    // after the summarizer runs a few chunks.
+    logMaxLines: 20000,
   });
-  // Pre-seed a memory file so /stm show has something to return.
+  // Ensure the memory dir exists so the plugin's ensureMemoryFile
+  // doesn't race with the first /stm command.
   mkdirSync(ws.memoryDir, { recursive: true });
-  writeFileSync(
-    join(ws.memoryDir, "session_seed.md"),
-    "## Session Memory\n\n### Active References\n- pre-seeded test memory\n",
-    "utf-8",
-  );
   await startServe(ws, SERVE_PORT);
   await waitForStmLoaded(ws);
 });
@@ -68,22 +67,18 @@ afterAll(() => {
 });
 
 describe("/stm show returns the memory file contents", () => {
-  test("show returns the seeded memory markdown", async () => {
+  test("show returns the memory markdown for the current session", async () => {
     if (!ENABLED) return;
+    // The plugin's command.execute.before sets output.stop=true and
+    // output.message=<memory contents>. The agent echoes that back.
+    // We assert on the agent's text response (extracted from events),
+    // not on the raw NDJSON stream.
     const result = runStmCommand(ws, "show", SERVE_PORT, { timeoutMs: 60_000 });
     expect(result.sessionID).toBeTruthy();
-    // The plugin's command.execute.before sets output.stop=true and
-    // output.message=<memory contents>. The session is created (proving
-    // the hook is registered); the body may be the memory text or a
-    // paraphrase depending on whether the model is reachable.
-    if (/Active References/i.test(result.raw)) {
-      expect(result.raw).toContain("pre-seeded test memory");
-    } else {
-      console.log(
-        "  (warn) /stm show chat round-trip skipped: model unavailable, " +
-          "but session was created (command hook is registered).",
-      );
-    }
+    // The session the agent ran in is a fresh session, so its memory
+    // file is the default skeleton: contains "## Session Memory" and
+    // "None captured yet". The agent should echo that.
+    expect(result.agentText).toContain("## Session Memory");
   });
 });
 
@@ -92,16 +87,11 @@ describe("/stm settings returns the config JSON", () => {
     if (!ENABLED) return;
     const result = runStmCommand(ws, "settings", SERVE_PORT, { timeoutMs: 60_000 });
     expect(result.sessionID).toBeTruthy();
-    if (/"memoryModel"/.test(result.raw)) {
-      // Direct hit: the JSON was returned verbatim by the command hook.
-      expect(result.raw).toContain("active");
-      expect(result.raw).toContain("maxMemoryLength");
-    } else {
-      console.log(
-        "  (warn) /stm settings chat round-trip skipped: model unavailable, " +
-          "but session was created (command hook is registered).",
-      );
-    }
+    // The plugin returns a JSON dump of the config; the agent echoes
+    // it back. The agent may add a sentence, so we just check for
+    // the key fields.
+    expect(result.agentText).toContain("memoryModel");
+    expect(result.agentText).toContain("maxMemoryLength");
   });
 });
 
@@ -110,14 +100,16 @@ describe("/stm logs returns log lines from session-memory.log", () => {
     if (!ENABLED) return;
     const result = runStmCommand(ws, "logs", SERVE_PORT, { timeoutMs: 60_000 });
     expect(result.sessionID).toBeTruthy();
-    if (/plugin_loaded/.test(result.raw)) {
-      expect(result.raw).toContain("plugin_loaded");
-    } else {
-      // Soft pass: the on-disk log already contains the entry, so the
-      // command hook is verified to be wired even if the model can't
-      // echo it back.
-      const log = readLog(ws);
-      expect(log).toContain("plugin_loaded");
+    // Soft pass: the plugin's log file is the source of truth, and the
+    // /stm logs command hook is verified to be wired by `runStmCommand`
+    // creating a session. The agent's echo of the log content is a
+    // nice-to-have — the model can paraphrase or trim the content.
+    const log = readLog(ws);
+    expect(log).toContain("plugin_loaded");
+    if (!result.agentText.includes("plugin_loaded")) {
+      console.log(
+        "  (warn) /stm logs chat round-trip: agent did not echo log content; " + "soft pass via direct log read.",
+      );
     }
   });
 });
@@ -127,49 +119,32 @@ describe("/stm status reports plugin state", () => {
     if (!ENABLED) return;
     const result = runStmCommand(ws, "status", SERVE_PORT, { timeoutMs: 60_000 });
     expect(result.sessionID).toBeTruthy();
-    if (/Session Memory Plugin Status/i.test(result.raw)) {
-      expect(result.raw).toMatch(/Session Memory Plugin Status/i);
-    } else {
-      // Soft pass: prove the command hook is wired and the status helper
-      // works in isolation by reading the underlying state.
-      const log = readLog(ws);
-      expect(log).toContain("plugin_loaded");
-      const memFile = readMemoryFile(ws, "session_seed.md");
-      expect(memFile).toContain("pre-seeded test memory");
-    }
+    expect(result.agentText).toMatch(/Session Memory Plugin Status/i);
+    expect(result.agentText).toContain("summarizerMode");
   });
 });
 
 describe("/stm reset clears the memory file", () => {
-  test("reset removes the seeded memory file and recreates a fresh one", async () => {
+  test("reset creates the default skeleton for the current session", async () => {
     if (!ENABLED) return;
     const result = runStmCommand(ws, "reset", SERVE_PORT, { timeoutMs: 60_000 });
     expect(result.sessionID).toBeTruthy();
-    // The reset path calls removePath + ensureMemoryFile. It doesn't
-    // require the model. We assert the effect on the seed file: it
-    // should still exist (recreated) but with the default skeleton.
-    const memFile = readMemoryFile(ws, "session_seed.md");
-    // Either the file is the default skeleton (reset worked) or the model
-    // couldn't process the command and the original is still there.
-    // We accept both and just confirm the plugin responded.
-    expect(memFile).not.toBeNull();
-    // The log should have a memory_reset entry if reset ran.
+    // The agent runs the command and returns. The reset path
+    // removePath + ensureMemoryFile, so the current session's
+    // memory file is the default skeleton.
+    expect(result.agentText).toContain("Reset memory");
+    // The log should have a memory_reset entry.
     const log = readLog(ws);
-    const hasReset = log.includes("memory_reset");
-    if (!hasReset) {
-      console.log(
-        "  (warn) /stm reset chat round-trip skipped: model unavailable, " +
-          "the reset path's effects were not triggered in this run.",
-      );
-    }
+    expect(log).toContain("memory_reset");
   });
 });
 
 describe("memory file is created for the session that triggered plugin load", () => {
-  test("a session_*.md file exists in the project memory dir", () => {
+  test("a session_*.md file exists with the default skeleton", () => {
     if (!ENABLED) return;
     // After waitForStmLoaded, the plugin has run for at least the warm-up
-    // session. There should be at least one session_*.md file.
+    // session. There should be at least one session_*.md file written
+    // by the plugin (not pre-seeded).
     const files = (() => {
       try {
         const { readdirSync } = require("node:fs");
@@ -179,14 +154,12 @@ describe("memory file is created for the session that triggered plugin load", ()
       }
     })();
     const memFiles = files.filter((f: string) => f.startsWith("session_") && f.endsWith(".md"));
-    // We seeded a session_seed.md, so the only "real" memory file may be
-    // empty if the model never completed. Soft assert.
-    if (memFiles.length > 0) {
-      expect(memFiles.length).toBeGreaterThan(0);
-    } else {
-      console.log("  (warn) no session_*.md created — model probably never completed a turn");
-    }
-    // The memory dir itself must exist.
-    expect(existsSync(ws.memoryDir)).toBe(true);
+    expect(memFiles.length).toBeGreaterThan(0);
+    // And the file should have the default skeleton, not be empty
+    // or stale. This catches a plugin that creates the file but
+    // leaves it blank.
+    const memFile = readMemoryFile(ws, memFiles[0]);
+    expect(memFile).toContain("## Session Memory");
+    expect(memFile).toContain("None captured yet");
   });
 });

@@ -146,15 +146,10 @@ describe("plugin event surface", () => {
         properties: { sessionID },
       },
     } as never);
-    // Either the event is logged (debug=true) or it's a no-op. Either
-    // way the hook should not throw. We assert the log contains the
-    // sdk_event entry (or the hook is silently gated by enabled=false,
-    // which we don't have here).
-    const saw = await waitForLogEntry("session.idle");
-    if (!saw) {
-      // The event may be debounced or skipped; just confirm no throw.
-      expect(true).toBe(true);
-    }
+    // Hard assert: with debug=true, the event MUST be logged. A
+    // silently-skipping handler is a real bug.
+    const saw = await waitForLogEntry("session.idle", 2_000);
+    expect(saw).toBe(true);
   });
 });
 
@@ -196,10 +191,10 @@ describe("concurrent updates for the same session are serialized", () => {
 
       const log = readLog(ws);
       const doneLines = (log.match(/"event":"memory_update_done"/g) ?? []).length;
-      // The exact count depends on whether the in-flight coalescing
-      // is on. We just assert that at least one update completed and
-      // that the file contains our content.
-      expect(doneLines).toBeGreaterThanOrEqual(1);
+      // Hard assert: exactly one update completed. If the
+      // `updateInFlight` coalescing is broken, both updates run
+      // and `doneLines` would be 2.
+      expect(doneLines).toBe(1);
       const memFile = readMemoryFile(ws, `session_${sessionID}.md`);
       expect(memFile).toContain("serialized");
     } finally {
@@ -278,13 +273,21 @@ describe("memory dir layout", () => {
     expect(existsSync(ws.memoryDir)).toBe(true);
   });
 
-  test("session files use the documented naming pattern", () => {
+  test("session files use the documented naming pattern", async () => {
     if (!ENABLED) return;
-    // We seeded a session above; its file should be session_<id>.md.
-    // Read the dir and check at least one file matches.
+    // Create a fresh session via the plugin (NOT a pre-seeded file
+    // from a previous test) and check that the plugin's write used
+    // the `session_<id>.md` naming convention.
+    const plugin = await buildLivePlugin();
+    const sessionID = `naming-${Date.now()}`;
+    await plugin["session.created"]({ sessionID });
     const { readdirSync } = require("node:fs") as typeof import("node:fs");
-    const files = readdirSync(ws.memoryDir);
-    const sessionFiles = files.filter((f: string) => f.startsWith("session_") && f.endsWith(".md"));
-    expect(sessionFiles.length).toBeGreaterThan(0);
+    const files = readdirSync(ws.memoryDir) as string[];
+    const expected = `session_${sessionID}.md`;
+    expect(files).toContain(expected);
+    // And the file content is the default skeleton, not a stale file
+    // from another test.
+    const content = readMemoryFile(ws, expected);
+    expect(content).toContain("## Session Memory");
   });
 });

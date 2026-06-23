@@ -7,15 +7,15 @@
 // Inspired by ../opencode-kasper/tests/e2e/harness.ts, adapted for STM.
 
 import { execSync, spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync, mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync, mkdtempSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
 import { ensureDir } from "../../src/memory-utils";
 
 const PLUGIN_SOURCE = resolve(__dirname, "..", "..", "src", "index.ts");
-const STM_E2E_MODEL = process.env.STM_E2E_MODEL ?? "opencode-go/minimax-m2.7";
-const STM_E2E_FALLBACK_MODEL = process.env.STM_E2E_FALLBACK_MODEL ?? "opencode/minimax-m2.5-free";
+const STM_E2E_MODEL = process.env.STM_E2E_MODEL ?? "opencode-go/deepseek-v4-flash";
+const STM_E2E_FALLBACK_MODEL = process.env.STM_E2E_FALLBACK_MODEL ?? "opencode-go/deepseek-v4-flash";
 const SERVE_PORT = Number(process.env.STM_E2E_PORT ?? 18999);
 const RUN_TIMEOUT_MS = Number(process.env.STM_E2E_TIMEOUT ?? 180_000);
 const SERVE_STDOUT = "ignore" as const;
@@ -61,6 +61,29 @@ export function setupE2EWorkspace(): E2EWorkspace {
 
   for (const d of [projectDir, pluginsDir, dataHome, dirname(stmConfigPath), dirname(memoryDir)]) {
     mkdirSync(d, { recursive: true });
+  }
+
+  // Symlink the user's auth.json into the test's data dir so the model
+  // calls work. The real auth lives at $XDG_DATA_HOME/opencode/auth.json
+  // (default: ~/.local/share/opencode/auth.json). We DON'T copy the
+  // opencode.db — that stays in the real data dir, but the test
+  // uses a different port and different `run=...` id, so the only
+  // collision risk is session-id reuse, which the test ignores.
+  const realAuth = join(homedir(), ".local", "share", "opencode", "auth.json");
+  const testAuthDir = join(dataHome, "opencode");
+  const testAuth = join(testAuthDir, "auth.json");
+  mkdirSync(testAuthDir, { recursive: true });
+  try {
+    if (existsSync(realAuth)) {
+      try {
+        rmSync(testAuth);
+      } catch {
+        // ignore
+      }
+      symlinkSync(realAuth, testAuth);
+    }
+  } catch {
+    // best-effort; model calls will fail with "model not found" if no auth
   }
 
   // Project-local opencode.json. We do NOT list the STM plugin here —
@@ -161,6 +184,7 @@ export interface StmSeedConfig {
   remindEveryN?: number;
   cleanFallbackToActiveSession?: boolean;
   sideSessionRetries?: number;
+  includeAgentsMdOnFirstUpdate?: boolean;
 }
 
 export async function writeStmProjectConfig(ws: E2EWorkspace, cfg: StmSeedConfig = {}): Promise<void> {
@@ -187,7 +211,9 @@ export async function writeStmProjectConfig(ws: E2EWorkspace, cfg: StmSeedConfig
     `  "sideSessionRetries": ${cfg.sideSessionRetries ?? 1},`,
     `  "cleanFallbackToActiveSession": ${cfg.cleanFallbackToActiveSession ?? false},`,
     `  "injectInSubagents": ${cfg.injectInSubagents ?? true},`,
+    `  "logMaxLines": ${cfg.logMaxLines ?? 20000},`,
     `  "debug": ${cfg.debug ?? false},`,
+    `  "includeAgentsMdOnFirstUpdate": ${cfg.includeAgentsMdOnFirstUpdate ?? false},`,
     "}",
   ];
   writeFileSync(ws.stmConfigPath, lines.join("\n") + "\n", "utf-8");
@@ -207,7 +233,7 @@ export function startServe(ws: E2EWorkspace, port = SERVE_PORT, opts?: { serveTi
   writeFileSync(ws.serveLogPath, "", "utf-8"); // truncate
 
   return new Promise((resolve, reject) => {
-    const proc = spawn("opencode", ["serve", "--port", String(port)], {
+    const proc = spawn("opencode", ["serve", "--port", String(port), "--print-logs"], {
       cwd: ws.projectDir,
       stdio: [SERVE_STDOUT, SERVE_STDOUT, SERVE_STDERR],
       detached: false,
@@ -326,6 +352,7 @@ export interface RunResult {
   sessionID: string;
   events: unknown[];
   raw: string;
+  agentText: string;
   exitCode: number | null;
   stderr: string;
 }
@@ -380,7 +407,40 @@ export function runAttach(
   const sessionID =
     (events.find((e) => e && typeof e === "object" && "sessionID" in e) as { sessionID?: string } | undefined)
       ?.sessionID ?? "";
-  return { sessionID, events, raw, exitCode: result.status, stderr: result.stderr ?? "" };
+  const agentText = extractAgentText(events);
+  return { sessionID, events, raw, agentText, exitCode: result.status, stderr: result.stderr ?? "" };
+}
+
+/**
+ * Pull the assistant's text out of the NDJSON event stream. The
+ * agent's response lives in `text` events (newer opencode) and/or
+ * `message.part.updated` events with part.type === "text" (older).
+ * We also include the OUTPUT of any `short_term_memory` tool call
+ * (the plugin's own tool surface) so that models which call the tool
+ * directly — instead of echoing via the `/stm` slash command — still
+ * produce a checkable result.
+ */
+export function extractAgentText(events: unknown[]): string {
+  const parts: string[] = [];
+  for (const ev of events) {
+    if (!ev || typeof ev !== "object") continue;
+    const e = ev as Record<string, unknown>;
+    if (e.type === "text" && typeof e.text === "string") {
+      parts.push(e.text);
+    }
+    const part = e.part as Record<string, unknown> | undefined;
+    if (part && part.type === "text" && typeof part.text === "string") {
+      parts.push(part.text);
+    }
+    if (part && part.type === "tool") {
+      const state = part.state as Record<string, unknown> | undefined;
+      const output = state?.output;
+      if (typeof output === "string") {
+        parts.push(output);
+      }
+    }
+  }
+  return parts.join("").trim();
 }
 
 // ── /stm command helper ──────────────────────────────────────────────

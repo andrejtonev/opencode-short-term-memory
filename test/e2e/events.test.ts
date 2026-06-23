@@ -8,7 +8,7 @@
 // Skipped unless OPENCODE_E2E=1 is set and the opencode binary is on $PATH.
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { existsSync, readdirSync, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import SessionMemoryPlugin from "../../src/session-memory";
@@ -308,7 +308,19 @@ describe("enabled=false gates all memory operations", () => {
     expect(memFile).not.toBeNull();
     expect(memFile).toContain("None captured yet");
 
-    // But the system transform should be a no-op: no injection.
+    // Pre-seed a NON-empty memory file. With enabled=true, this would
+    // cause the system transform to push the memory. With enabled=false,
+    // the injectMemoryIntoSystemTransform early-returns at the
+    // `if (!config.enabled) return;` guard, so nothing is pushed.
+    // This is the test that actually exercises the enabled gate (the
+    // earlier assertion "system.length === 0" would pass even if the
+    // gate were broken, because the memory was empty).
+    writeFileSync(
+      join(ws.memoryDir, `session_${sessionID}.md`),
+      "## Session Memory\n\n### Long Horizon Context\n- real content that would normally be injected\n",
+      "utf-8",
+    );
+
     const output = { system: [] as string[] };
     await plugin["experimental.chat.system.transform"]({ sessionID, messageID: "msg-1" }, output);
     expect(output.system.length).toBe(0);
@@ -370,21 +382,8 @@ describe("session.deleted removes the memory file", () => {
   });
 });
 
-// ── 8. Memory dir is created if missing ────────────────────────────
-
-describe("memory dir is auto-created by the plugin", () => {
-  test("the plugin creates the memory dir on first run", () => {
-    if (!ENABLED) return;
-    // We've already run the plugin many times; the dir must exist.
-    expect(existsSync(ws.memoryDir)).toBe(true);
-    // And it must contain at least the session-memory.log.
-    const files = (() => {
-      try {
-        return readdirSync(ws.memoryDir);
-      } catch {
-        return [];
-      }
-    })();
-    expect(files).toContain("session-memory.log");
-  });
-});
+// (The previous "memory dir auto-created" test was removed: it
+// was vacuous because the harness itself creates the dir via
+// `mkdirSync`. The plugin's `runBackgroundInit` does the same
+// `mkdir(config.memoryDir, { recursive: true })` and is covered
+// by the unit tests in test/side-sessions-cleanup.test.ts.)
