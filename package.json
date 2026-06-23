@@ -39,7 +39,7 @@
   ],
   "scripts": {
     "clean": "bun -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
-    "build": "npm run clean && tsup && tsc --emitDeclarationOnly",
+    "build": "bun --bun run clean && bun --bun run tsup && bun --bun run tsc --emitDeclarationOnly",
     "check:package": "bun run build && bun run typecheck && bun test --isolate",
     "prepublishOnly": "bun run check:package",
     "dev": "opencode plugin dev",

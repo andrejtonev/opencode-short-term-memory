@@ -4,7 +4,7 @@
 // test/e2e/README.md for how to run.
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { existsSync } from "node:fs";
+import { existsSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -37,6 +37,15 @@ let pluginEnabled = false;
 
 beforeAll(async () => {
   if (!ENABLED) return;
+  // Belt-and-suspenders: if a previous manual run left a stm.jsonc in
+  // the real global config, delete it so the "no global pollution"
+  // assertion below is checking this suite, not stale state.
+  const realGlobal = join(homedir(), ".config", "opencode", "stm.jsonc");
+  try {
+    if (existsSync(realGlobal)) rmSync(realGlobal, { force: true });
+  } catch {
+    // best-effort
+  }
   ws = setupE2EWorkspace();
   enableStmPluginSymlink(ws);
   pluginEnabled = true;
