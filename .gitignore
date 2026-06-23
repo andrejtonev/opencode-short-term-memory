@@ -1,5 +1,8 @@
 node_modules/
 .opencode/
+.claude/
+CLAUDE.md
+AGENTS.md
 dist/
 *.tgz
 *.tar.gz

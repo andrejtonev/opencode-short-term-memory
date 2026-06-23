@@ -376,6 +376,49 @@ export function logPath(memoryDir = DEFAULT_CONFIG.memoryDir) {
   return join(memoryDir, "session-memory.log");
 }
 
+export const SIDE_SESSION_TITLE = "Session Memory Summarizer";
+
+export function sideSessionsStatePath(memoryDir = DEFAULT_CONFIG.memoryDir) {
+  return join(memoryDir, "side-sessions.json");
+}
+
+export async function loadActiveSideSessions(memoryDir: string): Promise<string[]> {
+  const raw = await readText(sideSessionsStatePath(memoryDir), "");
+  if (!raw.trim()) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((entry): entry is string => typeof entry === "string" && entry.length > 0);
+  } catch {
+    return [];
+  }
+}
+
+export async function saveActiveSideSessions(memoryDir: string, ids: string[]) {
+  const sanitized = Array.from(new Set(ids.filter((id) => typeof id === "string" && id.length > 0)));
+  await writeTextAtomic(sideSessionsStatePath(memoryDir), JSON.stringify(sanitized));
+}
+
+function sanitizeSideSessionIDs(ids: string[]): string[] {
+  return Array.from(new Set(ids.filter((id) => typeof id === "string" && id.length > 0)));
+}
+
+const SIDE_SESSIONS_LOCK_KEY = "__side_sessions_tracking__";
+
+export async function mutateActiveSideSessions<T>(
+  memoryDir: string,
+  mutator: (current: string[]) => T | Promise<T>,
+): Promise<T> {
+  return await withPathWriteLock(SIDE_SESSIONS_LOCK_KEY, async () => {
+    const current = await loadActiveSideSessions(memoryDir);
+    const next = await mutator(current);
+    if (!Array.isArray(next)) return next;
+    const sanitized = sanitizeSideSessionIDs(next);
+    await writeTextAtomic(sideSessionsStatePath(memoryDir), JSON.stringify(sanitized));
+    return next as T;
+  });
+}
+
 export function safeSessionID(sessionID: string) {
   return String(sessionID).replace(/[^a-zA-Z0-9_.-]/g, "_");
 }

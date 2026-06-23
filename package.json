@@ -44,6 +44,7 @@
     "prepublishOnly": "bun run check:package",
     "dev": "opencode plugin dev",
     "test": "bun test --isolate",
+    "test:e2e": "OPENCODE_E2E=1 bun test --isolate --timeout 300000 test/e2e/",
     "typecheck": "bun --bun run tsc --noEmit",
     "format": "prettier --write .",
     "format:check": "prettier --check .",

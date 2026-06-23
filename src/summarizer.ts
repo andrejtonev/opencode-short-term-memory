@@ -6,8 +6,15 @@ import {
   logEvent,
   parseModel,
   getMessageTextFromParts,
+  mutateActiveSideSessions,
+  SIDE_SESSION_TITLE,
 } from "./memory-utils";
 import type { Client } from "./types";
+
+// Mutable via .ms so tests can shrink the timeout. Wrapped in an object
+// because ES module bindings are read-only — the property of an exported
+// object is reassignable.
+export const CLEAN_SUMMARIZER_TIMEOUT = { ms: 90_000 };
 
 export function buildMemoryPrompt(
   existingMemory: string,
@@ -171,9 +178,11 @@ export async function runCleanOpencodeSummarizer(client: Client, prompt: string,
 
   // 1. Create a fresh side session for isolated summarization
   let sessionID: string | undefined;
+  let abortController: AbortController | undefined;
+  let abortTimer: ReturnType<typeof setTimeout> | undefined;
   try {
     const createResult = await client.session.create({
-      body: { title: "Session Memory Summarizer" },
+      body: { title: SIDE_SESSION_TITLE },
     });
     const createRow =
       (createResult as { data?: Record<string, unknown> })?.data || (createResult as Record<string, unknown>);
@@ -183,16 +192,59 @@ export async function runCleanOpencodeSummarizer(client: Client, prompt: string,
     }
     await logEvent(config, "side_session_created", { sessionID });
 
+    // Persist the new side session so a future opencode run can clean it up
+    // if the current process crashes before reaching the finally block.
+    // mutateActiveSideSessions atomically reads+modifies+writes the tracking
+    // file so concurrent summarizers (for different sessions) cannot lose
+    // each other's entries.
+    const trackedSessionID: string = sessionID;
+    try {
+      await mutateActiveSideSessions(config.memoryDir, (active) => {
+        if (!active.includes(trackedSessionID)) active.push(trackedSessionID);
+        return active;
+      });
+    } catch (trackError) {
+      await logEvent(config, "side_session_track_failed", {
+        sessionID,
+        error: (trackError as Error).message || String(trackError || ""),
+      });
+    }
+
     // 2. Execute the summarization prompt in the fresh session
-    const result = await client.session.prompt({
-      path: { id: sessionID },
-      body: {
-        noReply: true,
-        ...(parsed ? { model: parsed } : {}),
-        system: "You are a clean short-term memory summarizer. Return only the updated Session Memory markdown.",
-        parts: [{ type: "text" as const, text: prompt }],
-      },
-    });
+    abortController = new AbortController();
+    abortTimer = setTimeout(() => abortController?.abort(), CLEAN_SUMMARIZER_TIMEOUT.ms);
+    let result;
+    try {
+      result = await client.session.prompt({
+        path: { id: sessionID },
+        body: {
+          noReply: true,
+          ...(parsed ? { model: parsed } : {}),
+          system: "You are a clean short-term memory summarizer. Return only the updated Session Memory markdown.",
+          parts: [{ type: "text" as const, text: prompt }],
+        },
+        signal: abortController.signal,
+      });
+    } catch (promptError) {
+      const msg = (promptError as Error).message || String(promptError || "");
+      const isAbort = (promptError as { name?: string })?.name === "AbortError" || msg.toLowerCase().includes("abort");
+      if (isAbort) {
+        await logEvent(config, "side_session_prompt_timeout", {
+          sessionID,
+          timeoutMs: CLEAN_SUMMARIZER_TIMEOUT.ms,
+        });
+        // Best-effort: ask the server to abort the session so it stops generating.
+        try {
+          await (client.session as { abort?: (args: unknown) => Promise<unknown> }).abort?.({
+            path: { id: sessionID },
+          });
+        } catch {}
+        throw new Error(`Side session summarizer timed out after ${CLEAN_SUMMARIZER_TIMEOUT.ms}ms`);
+      }
+      throw promptError;
+    } finally {
+      if (abortTimer) clearTimeout(abortTimer);
+    }
 
     // 3. Extract text from response parts
     const row = (result as { data?: unknown })?.data || result;
@@ -212,13 +264,17 @@ export async function runCleanOpencodeSummarizer(client: Client, prompt: string,
 
     return text.trim();
   } finally {
-    // 4. Clean up: delete the side session
+    // 4. Clean up: delete the side session and remove it from the tracking file.
     if (sessionID) {
+      const cleanupSessionID: string = sessionID;
       try {
-        await client.session.delete({ path: { id: sessionID } });
+        await client.session.delete({ path: { id: cleanupSessionID } });
       } catch {
         // Best-effort cleanup; don't let session deletion failures mask summarizer results.
       }
+      try {
+        await mutateActiveSideSessions(config.memoryDir, (active) => active.filter((id) => id !== cleanupSessionID));
+      } catch {}
     }
   }
 }

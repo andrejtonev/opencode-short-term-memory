@@ -38,6 +38,9 @@ import {
   type SessionMemoryConfig,
   type RuntimeState,
   DEFAULT_CONFIG,
+  loadActiveSideSessions,
+  mutateActiveSideSessions,
+  SIDE_SESSION_TITLE,
 } from "./memory-utils";
 import { type ConfigContext, reloadConfig } from "./config";
 import { readLastProcessedMessageID, collectRecentVisibleMessages } from "./message-collector";
@@ -69,6 +72,9 @@ export const SessionMemoryPlugin = async ({
   client: Client;
   directory?: string;
 }): Promise<Record<string, unknown>> => {
+  // Start-of-factory clock. We want the factory body (synchronous setup)
+  // to complete in <10ms; the diff is what the e2e harness greps for.
+  const __stmT0 = performance.now();
   // ── Instance‑local runtime state ─────────────────────────
   let globalState = createRuntimeState();
   const sessionStates = new Map<string, SessionRuntimeState>();
@@ -99,32 +105,177 @@ export const SessionMemoryPlugin = async ({
   const waitForIdleCtx = (sid: string, ms: number) => waitForSessionIdle(sid, ms, isBusyCtx, idleWaiters);
 
   // ── Initialisation helpers inside factory ────────────────
-  await reloadConfig(configCtx, true);
-  const globalOpencodeDir = resolveGlobalOpencodeDir();
-  await ensureDefaultConfigFile(globalOpencodeDir);
-  let config = configCtx.config;
+  // Heavy I/O (config read, directory creation, default-config seeding,
+  // log write, orphan cleanup) is deferred to a microtask so the plugin
+  // factory returns in <10ms and does not block opencode startup.
+  let config: SessionMemoryConfig = DEFAULT_CONFIG;
   const cmdCtx: CommandContext = { config, sessionStates, globalState };
-  await mkdir(config.memoryDir, { recursive: true });
-  await logEvent(config, "plugin_loaded", { model: config.memoryModel, mode: config.summarizerMode });
+  let backgroundInitPromise: Promise<void> | undefined;
+  let backgroundInitDone = false;
 
-  if (configCtx.globalState.startupWarning) {
-    client?.tui
-      ?.showToast?.({
-        body: {
-          title: "Session Memory Plugin",
-          message: configCtx.globalState.startupWarning,
-          variant: "warning",
-          duration: 8000,
-        },
-      })
-      ?.catch?.(() => {});
+  async function runBackgroundInit() {
+    if (backgroundInitDone) return;
+    try {
+      await reloadConfig(configCtx, true);
+      const globalOpencodeDir = resolveGlobalOpencodeDir();
+      await ensureDefaultConfigFile(globalOpencodeDir);
+      config = configCtx.config;
+      cmdCtx.config = config;
+      await mkdir(config.memoryDir, { recursive: true });
+      await logEvent(config, "plugin_loaded", { model: config.memoryModel, mode: config.summarizerMode });
+
+      if (configCtx.globalState.startupWarning) {
+        client?.tui
+          ?.showToast?.({
+            body: {
+              title: "Session Memory Plugin",
+              message: configCtx.globalState.startupWarning,
+              variant: "warning",
+              duration: 8000,
+            },
+          })
+          ?.catch?.(() => {});
+      }
+
+      await cleanupOrphanedSideSessions();
+    } catch (error) {
+      try {
+        await logEvent(config, "plugin_background_init_error", {
+          error: (error as Error).message || String(error || ""),
+        });
+      } catch {}
+    } finally {
+      // Set the flag only after the work actually completes (or fails).
+      // Setting it earlier would race with concurrent reloadConfigLocal()
+      // calls, which check this flag to decide whether to wait.
+      backgroundInitDone = true;
+    }
   }
 
+  function scheduleBackgroundInit() {
+    if (backgroundInitPromise) return backgroundInitPromise;
+    backgroundInitPromise = runBackgroundInit();
+    return backgroundInitPromise;
+  }
+
+  // Kick off the background work as a microtask so we never block the
+  // caller. The factory still returns the plugin object synchronously.
+  scheduleBackgroundInit();
+
   async function reloadConfigLocal(force = false) {
+    if (!backgroundInitDone) await scheduleBackgroundInit();
     await reloadConfig(configCtx, force);
     config = configCtx.config;
     cmdCtx.config = config;
     return config;
+  }
+
+  // ── Orphan side-session cleanup ────────────────────────────
+  // On startup, delete any side sessions left behind by a previous run
+  // (crash, OOM, kill -9, etc.) so they don't accumulate in the session list.
+  async function cleanupOrphanedSideSessions() {
+    let orphans: string[];
+    try {
+      orphans = await loadActiveSideSessions(config.memoryDir);
+    } catch (error) {
+      await logEvent(config, "orphan_side_sessions_load_error", {
+        error: (error as Error).message || String(error || ""),
+      });
+      return;
+    }
+
+    // Also scan the live session list for any "Session Memory Summarizer"
+    // sessions we might have missed (e.g. created before this plugin version
+    // shipped the tracking file). This is a best-effort supplement.
+    let liveOrphans: string[] = [];
+    try {
+      const listResult = (await client.session.list()) as unknown;
+      const rows: unknown[] = Array.isArray(listResult)
+        ? (listResult as unknown[])
+        : Array.isArray((listResult as { data?: unknown[] } | undefined)?.data)
+          ? ((listResult as { data: unknown[] }).data as unknown[])
+          : [];
+      for (const row of rows) {
+        const r = row as Record<string, unknown>;
+        if (typeof r?.id !== "string") continue;
+        if (r?.title === SIDE_SESSION_TITLE) {
+          liveOrphans.push(r.id);
+        }
+      }
+    } catch {}
+
+    const all = Array.from(new Set([...orphans, ...liveOrphans]));
+    if (!all.length) return;
+    await logEvent(config, "orphan_side_sessions_cleanup_start", { count: all.length });
+
+    // Track which IDs we could not delete so we can keep them in the tracking
+    // file for retry on the next startup. A partial failure must not drop a
+    // legitimate tracked session from the file.
+    //
+    // Special case: a 404 / NotFoundError means the session is already gone,
+    // which is exactly what we wanted. Some opencode builds (e.g. 1.17.x)
+    // respond with a generic "Unexpected server error" wrapped as an
+    // UnknownError for missing sessions — the session is gone either way,
+    // so drop the tracking entry so we don't leak it forever.
+    const failedToDelete: string[] = [];
+    let deleted = 0;
+    for (const id of all) {
+      try {
+        const res = (await client.session.delete({ path: { id } })) as {
+          data?: unknown;
+          error?: { name?: string; data?: { message?: string } } | string;
+        };
+        if (res?.error) {
+          const errObj = typeof res.error === "object" && res.error !== null ? res.error : undefined;
+          const errName = errObj?.name;
+          const errMsg = errObj?.data?.message ?? (typeof res.error === "string" ? res.error : "");
+          const isAlreadyGone =
+            errName === "NotFoundError" || /not\s*found/i.test(errMsg) || /Unexpected server error/i.test(errMsg);
+          if (isAlreadyGone) {
+            deleted += 1;
+            continue;
+          }
+          failedToDelete.push(id);
+          await logEvent(config, "orphan_side_sessions_cleanup_failed", {
+            sessionID: id,
+            error: errMsg || "delete returned error",
+          });
+        } else {
+          deleted += 1;
+        }
+      } catch (error) {
+        failedToDelete.push(id);
+        await logEvent(config, "orphan_side_sessions_cleanup_failed", {
+          sessionID: id,
+          error: (error as Error).message || String(error || ""),
+        });
+      }
+    }
+
+    // Persist the survivors atomically. The next startup's live scan will
+    // supplement anything that has since been renamed or moved out of band.
+    try {
+      await mutateActiveSideSessions(config.memoryDir, () => failedToDelete);
+    } catch (error) {
+      await logEvent(config, "orphan_side_sessions_save_error", {
+        error: (error as Error).message || String(error || ""),
+      });
+    }
+
+    await logEvent(config, "orphan_side_sessions_cleanup_done", {
+      deleted,
+      remaining: failedToDelete.length,
+    });
+  }
+
+  async function isSessionDeleted(sessionID: string): Promise<boolean> {
+    try {
+      const res = (await client.session.get({ path: { id: sessionID } })) as { data?: unknown; error?: unknown };
+      if (res?.error) return true;
+      return !res?.data;
+    } catch {
+      return true;
+    }
   }
 
   // ── Helper functions that require instance state ──────────
@@ -233,6 +384,15 @@ export const SessionMemoryPlugin = async ({
     updateMemory,
   };
   const tools = createTools(toolCtx);
+
+  // Diagnostic: emit a single stderr line with the factory wall-clock
+  // duration. The e2e harness greps for the [STM-STARTUP] marker; for
+  // interactive users the line is harmless. The env gate keeps it opt-in
+  // for production: STM_STARTUP_TIMING=1 or OPENCODE_E2E=1 enables it.
+  if (process.env.STM_STARTUP_TIMING === "1" || process.env.OPENCODE_E2E === "1") {
+    const __elapsed = performance.now() - __stmT0;
+    process.stderr.write(`[STM-STARTUP] factory_returned_ms=${__elapsed.toFixed(3)}\n`);
+  }
 
   // ── Return the plugin object ─────────────────────────────
   return {

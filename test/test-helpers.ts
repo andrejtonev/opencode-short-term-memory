@@ -12,12 +12,17 @@ type FakeClient = {
     messages: (args?: unknown) => Promise<unknown>;
     prompt: (args?: unknown) => Promise<unknown>;
     delete: (args?: unknown) => Promise<unknown>;
+    list?: (args?: unknown) => Promise<unknown>;
+    get?: (args?: unknown) => Promise<unknown>;
+    abort?: (args?: unknown) => Promise<unknown>;
   };
   calls: {
     create: unknown[];
     messages: unknown[];
     prompt: unknown[];
     delete: unknown[];
+    list: unknown[];
+    abort: unknown[];
   };
 };
 
@@ -32,6 +37,8 @@ export function createFakeClient(options?: {
     messages: [] as unknown[],
     prompt: [] as unknown[],
     delete: [] as unknown[],
+    list: [] as unknown[],
+    abort: [] as unknown[],
   };
 
   const messagesRows = options?.messagesRows ?? [];
@@ -64,6 +71,14 @@ export function createFakeClient(options?: {
       },
       delete: async (args?: unknown) => {
         calls.delete.push(args);
+        return { data: true };
+      },
+      list: async (args?: unknown) => {
+        calls.list.push(args);
+        return { data: [] };
+      },
+      abort: async (args?: unknown) => {
+        calls.abort.push(args);
         return { data: true };
       },
     },
