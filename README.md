@@ -2,6 +2,8 @@
 
 Automatically summarizes conversation context into structured session memory and injects it back into the system prompt every few turns — preserving user instructions, project context, decisions, and active references across long chats and compactions.
 
+> **Unofficial plugin:** This is an independent project and is not affiliated with, endorsed by, or maintained by the opencode team.
+
 ## Installation
 
 Install the plugin globally using the OpenCode CLI:
