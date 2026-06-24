@@ -49,7 +49,7 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "link:global": "bun link",
-    "prepare": "bunx husky"
+    "prepare": "bun --bun husky"
   },
   "devDependencies": {
     "@opencode-ai/sdk": "1.14.25",
