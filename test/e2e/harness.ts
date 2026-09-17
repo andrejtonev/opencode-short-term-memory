@@ -185,6 +185,7 @@ export interface StmSeedConfig {
   cleanFallbackToActiveSession?: boolean;
   sideSessionRetries?: number;
   includeAgentsMdOnFirstUpdate?: boolean;
+  enableLegacyPeriodicSystemTransform?: boolean;
 }
 
 export async function writeStmProjectConfig(ws: E2EWorkspace, cfg: StmSeedConfig = {}): Promise<void> {
@@ -214,6 +215,7 @@ export async function writeStmProjectConfig(ws: E2EWorkspace, cfg: StmSeedConfig
     `  "logMaxLines": ${cfg.logMaxLines ?? 20000},`,
     `  "debug": ${cfg.debug ?? false},`,
     `  "includeAgentsMdOnFirstUpdate": ${cfg.includeAgentsMdOnFirstUpdate ?? false},`,
+    `  "enableLegacyPeriodicSystemTransform": ${cfg.enableLegacyPeriodicSystemTransform ?? false},`,
     "}",
   ];
   writeFileSync(ws.stmConfigPath, lines.join("\n") + "\n", "utf-8");

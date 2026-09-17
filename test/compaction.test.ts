@@ -15,6 +15,7 @@ const COMPACTION_TEST_CONFIG = {
   includeAgentsMdOnFirstUpdate: false,
   sideSessionRetries: 2,
   remindEveryN: 1,
+  enableLegacyPeriodicSystemTransform: true,
   maxMemoryLength: 4000,
   maxUpdateInputLength: 6000,
   debounceMs: 1200,
@@ -98,7 +99,7 @@ test.serial(
     // Proves clean mode used the SDK API.
     expect(client.calls.messages.length).toBe(1);
     expect(client.calls.create.length).toBeGreaterThanOrEqual(1);
-    expect(client.calls.prompt.length).toBeGreaterThanOrEqual(1);
+    expect(client.calls.summarizerPrompts.length).toBeGreaterThanOrEqual(1);
     expect(client.calls.delete.length).toBeGreaterThanOrEqual(1);
   },
   30000,

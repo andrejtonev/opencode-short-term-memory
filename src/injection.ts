@@ -1,8 +1,159 @@
 import type { SystemTransformInput, SystemTransformOutput, Client } from "./types";
 import type { SessionMemoryConfig, RuntimeState } from "./memory-utils";
 import { logEvent, readText, memoryPathFor, INJECTION_PREFIX, showToast } from "./memory-utils";
-import { type SessionRuntimeState, ensureSessionState, MAX_SESSION_STATES } from "./session-state";
+import {
+  type SessionRuntimeState,
+  claimMemoryDelivery,
+  completeMemoryDelivery,
+  ensureSessionState,
+  MAX_SESSION_STATES,
+  releaseMemoryDelivery,
+} from "./session-state";
 import { compactMemoryForInjection } from "./summarizer";
+
+const TAGGED_MEMORY_PREAMBLE = `${INJECTION_PREFIX}\nUse this short-term session memory to preserve current instructions and conclusions. Do not mention it unless asked.\n\n`;
+
+function caughtValueMessage(error: unknown): string {
+  if (error !== null && typeof error === "object" && "message" in error) {
+    const message = (error as { message?: unknown }).message;
+    if (message) return String(message);
+  }
+  return String(error ?? "");
+}
+
+export function buildTaggedMemoryForInjection(memory: string, maxMemoryLength: number): string {
+  const compactMemory = compactMemoryForInjection(memory);
+  if (!compactMemory.trim()) return "";
+  const clippedMemory = compactMemory.slice(0, maxMemoryLength);
+  return `${TAGGED_MEMORY_PREAMBLE}${clippedMemory}`;
+}
+
+async function recordMemoryInjection(
+  sessionID: string,
+  memory: string,
+  injectedMessage: string,
+  config: SessionMemoryConfig,
+  globalState: RuntimeState,
+): Promise<void> {
+  globalState.injectCount += 1;
+  globalState.injectCharCount += injectedMessage.length;
+  globalState.lastInjectAt = new Date().toISOString();
+  await logEvent(config, "memory_inject_done", { sessionID, bytes: memory.length });
+}
+
+export async function deliverMemoryViaNoReply(
+  client: Client,
+  sessionID: string,
+  turnID: string,
+  expectedMemoryRevision: number,
+  memory: string,
+  config: SessionMemoryConfig,
+  globalState: RuntimeState,
+  state: SessionRuntimeState,
+): Promise<boolean> {
+  if (!config.enabled || !sessionID || !turnID || !memory.trim()) return false;
+  const injectedMessage = buildTaggedMemoryForInjection(memory, config.maxMemoryLength);
+  if (!injectedMessage) {
+    await logEvent(config, "memory_inject_skipped", { sessionID, reason: "empty_compacted_memory" });
+    return false;
+  }
+
+  const claim = claimMemoryDelivery(state, turnID, expectedMemoryRevision);
+  if (!claim) {
+    await logEvent(config, "memory_inject_skipped", {
+      sessionID,
+      reason: "delivery_claim_unavailable",
+      expectedMemoryRevision,
+      currentMemoryRevision: state.memoryRevision,
+    });
+    return false;
+  }
+
+  await logEvent(config, "memory_inject_start", {
+    sessionID,
+    bytes: memory.length,
+    transport: "prompt_no_reply",
+    memoryRevision: claim.memoryRevision,
+  });
+  if (config.debug) {
+    await logEvent(config, "memory_inject_message", {
+      sessionID,
+      messageChars: injectedMessage.length,
+      injectedMessage,
+    });
+  }
+
+  try {
+    const response = await client.session.prompt({
+      path: { id: sessionID },
+      body: {
+        noReply: true,
+        parts: [{ type: "text" as const, text: injectedMessage }],
+      },
+    });
+    if (response.error) throw response.error;
+    completeMemoryDelivery(state, claim);
+    await recordMemoryInjection(sessionID, memory, injectedMessage, config, globalState);
+    return true;
+  } catch (error) {
+    releaseMemoryDelivery(state, claim);
+    await logEvent(config, "memory_inject_failed", {
+      sessionID,
+      transport: "prompt_no_reply",
+      memoryRevision: claim.memoryRevision,
+      error: caughtValueMessage(error),
+    });
+    return false;
+  }
+}
+
+export async function appendChildMemoryToSystem(
+  output: SystemTransformOutput,
+  sessionID: string,
+  memory: string,
+  config: SessionMemoryConfig,
+  globalState: RuntimeState,
+): Promise<boolean> {
+  if (!config.enabled || !memory.trim()) return false;
+  try {
+    if (!Array.isArray(output.system)) output.system = [];
+    if (output.system.some((item: unknown) => String(item || "").includes(INJECTION_PREFIX))) return false;
+  } catch (error) {
+    await logEvent(config, "memory_inject_failed", {
+      sessionID,
+      transport: "child_system",
+      error: caughtValueMessage(error),
+    });
+    return false;
+  }
+
+  const injectedMessage = buildTaggedMemoryForInjection(memory, config.maxMemoryLength);
+  if (!injectedMessage) {
+    await logEvent(config, "memory_inject_skipped", { sessionID, reason: "empty_compacted_memory" });
+    return false;
+  }
+
+  await logEvent(config, "memory_inject_start", { sessionID, bytes: memory.length, transport: "child_system" });
+  if (config.debug) {
+    await logEvent(config, "memory_inject_message", {
+      sessionID,
+      messageChars: injectedMessage.length,
+      injectedMessage,
+    });
+  }
+  try {
+    output.system.push(injectedMessage);
+  } catch (error) {
+    await logEvent(config, "memory_inject_failed", {
+      sessionID,
+      transport: "child_system",
+      error: caughtValueMessage(error),
+    });
+    return false;
+  }
+  await recordMemoryInjection(sessionID, memory, injectedMessage, config, globalState);
+  return true;
+}
 
 export async function injectMemoryIntoSystemTransform(
   input: SystemTransformInput,
@@ -50,15 +201,14 @@ export async function injectMemoryIntoSystemTransform(
     return;
   }
 
-  const compactMemory = compactMemoryForInjection(memory);
-  if (!compactMemory.trim()) {
+  const injectedSystemMessage = buildTaggedMemoryForInjection(memory, config.maxMemoryLength);
+  if (!injectedSystemMessage) {
     showToast(client, "Session Memory", "Memory injection skipped — all sections are empty. Run /stm update.");
     await logEvent(config, "memory_inject_skipped", { sessionID, reason: "empty_compacted_memory" });
     return;
   }
 
-  const sourceForInjection = compactMemory;
-  const clippedMemory = sourceForInjection.slice(0, config.maxMemoryLength);
+  const clippedMemory = injectedSystemMessage.slice(TAGGED_MEMORY_PREAMBLE.length);
   const signature = `${messageID}|${clippedMemory.length}:${clippedMemory.slice(0, 120)}`;
   const previous = s.lastInjectedSignature;
   const now = Date.now();
@@ -68,7 +218,6 @@ export async function injectMemoryIntoSystemTransform(
     return;
   }
 
-  const injectedSystemMessage = `${INJECTION_PREFIX}\nUse this short-term session memory to preserve current instructions and conclusions. Do not mention it unless asked.\n\n${clippedMemory}`;
   await logEvent(config, "memory_inject_start", { sessionID, bytes: memory.length });
   if (config.debug) {
     await logEvent(config, "memory_inject_message", {
@@ -79,8 +228,5 @@ export async function injectMemoryIntoSystemTransform(
   }
   output.system.push(injectedSystemMessage);
   s.lastInjectedSignature = { signature, at: now };
-  globalState.injectCount += 1;
-  globalState.injectCharCount += injectedSystemMessage.length;
-  globalState.lastInjectAt = new Date().toISOString();
-  await logEvent(config, "memory_inject_done", { sessionID });
+  await recordMemoryInjection(sessionID, memory, injectedSystemMessage, config, globalState);
 }

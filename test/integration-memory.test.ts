@@ -15,6 +15,7 @@ const INTEGRATION_TEST_CONFIG = {
   includeAgentsMdOnFirstUpdate: false,
   sideSessionRetries: 2,
   remindEveryN: 1,
+  enableLegacyPeriodicSystemTransform: true,
   maxMemoryLength: 4000,
   maxUpdateInputLength: 6000,
   debounceMs: 1200,
@@ -140,7 +141,7 @@ for (const scenario of SCENARIOS) {
       expect(client.calls.messages.length).toBeGreaterThanOrEqual(1);
       // Proves clean mode created a side session, ran prompt, and cleaned up.
       expect(client.calls.create.length).toBeGreaterThanOrEqual(1);
-      expect(client.calls.prompt.length).toBeGreaterThanOrEqual(1);
+      expect(client.calls.summarizerPrompts.length).toBeGreaterThanOrEqual(1);
       expect(client.calls.delete.length).toBeGreaterThanOrEqual(1);
 
       // Verify that the plugin injects useful memory context into the system prompt.
@@ -199,7 +200,7 @@ test.serial(
     const logText = await readText(join(".opencode", "memory", "session-memory.log"), "");
     expect(memoryContent).toContain(fallbackToken);
     // 2 failed clean attempts + 1 successful active fallback
-    expect(client.calls.prompt.length).toBe(3);
+    expect(client.calls.summarizerPrompts.length).toBe(3);
     expect(logText).toContain("memory_update_clean_failed_fallback");
   },
   30000,

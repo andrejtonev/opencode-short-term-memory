@@ -104,7 +104,7 @@ function waitForLogEntry(log: string, needle: string, maxWaitMs = 5_000): Promis
 // ── 1. Sub-agent memory inheritance ──────────────────────────────────
 
 describe("sub-agent memory inheritance", () => {
-  test("a child session inherits the parent's memory file when injectInSubagents is true", async () => {
+  test("a child session receives the parent's captured memory once without copying it to disk", async () => {
     if (!ENABLED) return;
     const parentID = `parent-${Date.now()}`;
     const childID = `child-${Date.now()}`;
@@ -120,17 +120,28 @@ describe("sub-agent memory inheritance", () => {
     await plugin["session.created"]({ sessionID: parentID });
 
     // Fire session.created for the child with parentID set. The plugin
-    // should copy the parent's memory to the child's memory file.
+    // should capture the parent's memory as a one-shot runtime snapshot.
     await plugin["session.created"]({
       sessionID: childID,
       event: { properties: { info: { parentID } } },
     });
 
-    // Allow a microtask for the copy to complete.
+    // Allow a microtask for session setup to complete.
     await new Promise((r) => setTimeout(r, 100));
 
     const childMem = readMemoryFile(ws, `session_${childID}.md`);
-    expect(childMem).toContain("Parent says use tabs");
+    expect(childMem).not.toBeNull();
+    expect(childMem).toContain("None captured yet");
+    expect(childMem).not.toContain("Parent says use tabs");
+
+    const firstOutput = { system: [] as string[] };
+    await plugin["experimental.chat.system.transform"]({ sessionID: childID, messageID: "child-msg-1" }, firstOutput);
+    expect(firstOutput.system).toHaveLength(1);
+    expect(firstOutput.system[0].match(/Parent says use tabs/g)).toHaveLength(1);
+
+    const secondOutput = { system: [] as string[] };
+    await plugin["experimental.chat.system.transform"]({ sessionID: childID, messageID: "child-msg-2" }, secondOutput);
+    expect(secondOutput.system).toHaveLength(0);
 
     // The log should record the subagent injection.
     const sawInjection = await waitForLogEntry(readLog(ws), "subagent_created_with_memory");
@@ -186,6 +197,7 @@ describe("DCP compress event triggers memory update", () => {
       debug: true,
       debounceMs: 0,
       injectInSubagents: true,
+      enableLegacyPeriodicSystemTransform: true,
     });
     stopServe(SERVE_PORT);
     await startServe(ws, SERVE_PORT);
@@ -337,6 +349,7 @@ describe("memory persists across opencode restart", () => {
       summarizerMode: "active",
       debug: true,
       debounceMs: 500,
+      enableLegacyPeriodicSystemTransform: true,
     });
     stopServe(SERVE_PORT);
     await startServe(ws, SERVE_PORT);

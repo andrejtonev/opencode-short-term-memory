@@ -1,7 +1,14 @@
 import { beforeEach, describe, expect, test } from "bun:test";
 import {
+  bumpMemoryRevision,
+  claimMemoryDelivery,
+  completeMemoryDelivery,
   createSessionRuntimeState,
   ensureSessionState,
+  MAX_CANONICAL_TURN_IDS,
+  releaseMemoryDelivery,
+  rememberCanonicalTurn,
+  resetSessionDeliveryState,
   touchSessionState,
   MAX_SESSION_STATES,
   type SessionRuntimeState,
@@ -135,5 +142,109 @@ describe("Session state LRU eviction", () => {
     expect(state.lastDcpCompressAt).toBe(0);
     expect(state.timer).toBeUndefined();
     expect(state.lastInjectedSignature).toBeUndefined();
+    expect(state.canonicalTurnIDs).toEqual(new Set());
+    expect(state.canonicalTurnOrder).toEqual([]);
+    expect(state.memoryRevision).toBe(0);
+    expect(state.deliveryClaim).toBeUndefined();
+    expect(state.lastDeliveredClaim).toBeUndefined();
+    expect(state.retryableDeliveryClaim).toBeUndefined();
+    expect(state.childStartupSnapshot).toBeUndefined();
+    expect(state.childStartupInjectionPending).toBe(false);
+    expect(state.childDcpInjectionPending).toBe(false);
+    expect(state.mainDcpDeliveryPending).toBe(false);
+  });
+
+  test("canonical turn identity dedupe evicts the oldest identity at capacity", () => {
+    const state = createSessionRuntimeState();
+
+    for (let i = 0; i < MAX_CANONICAL_TURN_IDS; i++) {
+      expect(rememberCanonicalTurn(state, `turn-${i}`)).toBe(true);
+    }
+
+    expect(rememberCanonicalTurn(state, "turn-0")).toBe(false);
+    expect(rememberCanonicalTurn(state, "overflow-turn")).toBe(true);
+    expect(state.canonicalTurnIDs.size).toBe(MAX_CANONICAL_TURN_IDS);
+    expect(state.canonicalTurnOrder).toHaveLength(MAX_CANONICAL_TURN_IDS);
+    expect(state.canonicalTurnIDs.has("turn-0")).toBe(false);
+    expect(state.canonicalTurnOrder[0]).toBe("turn-1");
+    expect(rememberCanonicalTurn(state, "turn-0")).toBe(true);
+  });
+
+  test("delivery claims reject stale revisions and support release, retry, and completion", () => {
+    const state = createSessionRuntimeState();
+    const revision = bumpMemoryRevision(state);
+
+    expect(claimMemoryDelivery(state, "turn-1", revision - 1)).toBeUndefined();
+
+    const firstClaim = claimMemoryDelivery(state, "turn-1", revision)!;
+    expect(claimMemoryDelivery(state, "turn-2", revision)).toBeUndefined();
+
+    releaseMemoryDelivery(state, firstClaim);
+    expect(state.deliveryClaim).toBeUndefined();
+    expect(state.retryableDeliveryClaim).toBe(firstClaim);
+
+    const retryClaim = claimMemoryDelivery(state, "turn-1", revision)!;
+    expect(retryClaim).not.toBe(firstClaim);
+    expect(state.retryableDeliveryClaim).toBe(firstClaim);
+    completeMemoryDelivery(state, retryClaim);
+
+    expect(state.deliveryClaim).toBeUndefined();
+    expect(state.lastDeliveredClaim).toBe(retryClaim);
+    expect(state.retryableDeliveryClaim).toBeUndefined();
+    expect(claimMemoryDelivery(state, "turn-1", revision)).toBeUndefined();
+
+    const nextRevision = bumpMemoryRevision(state);
+    expect(claimMemoryDelivery(state, "turn-1", nextRevision)).toEqual({
+      turnID: "turn-1",
+      memoryRevision: nextRevision,
+    });
+  });
+
+  test("resetSessionDeliveryState clears delivery and child state", () => {
+    const state = createSessionRuntimeState();
+    state.userTurnInjectState = { count: 3, lastMessageID: "message-3" };
+    state.lastInjectedSignature = { signature: "signature", at: 123 };
+    rememberCanonicalTurn(state, "turn-1");
+    const revision = bumpMemoryRevision(state);
+    const claim = claimMemoryDelivery(state, "turn-1", revision)!;
+    completeMemoryDelivery(state, claim);
+    state.deliveryClaim = { turnID: "turn-2", memoryRevision: revision };
+    state.retryableDeliveryClaim = { turnID: "turn-3", memoryRevision: revision };
+    state.childStartupSnapshot = "startup memory";
+    state.childStartupInjectionPending = true;
+    state.childDcpInjectionPending = true;
+    state.mainDcpDeliveryPending = true;
+
+    resetSessionDeliveryState(state);
+
+    expect(state.userTurnInjectState).toEqual({ count: 0, lastMessageID: "" });
+    expect(state.lastInjectedSignature).toBeUndefined();
+    expect(state.canonicalTurnIDs).toEqual(new Set());
+    expect(state.canonicalTurnOrder).toEqual([]);
+    expect(state.memoryRevision).toBe(0);
+    expect(state.deliveryClaim).toBeUndefined();
+    expect(state.lastDeliveredClaim).toBeUndefined();
+    expect(state.retryableDeliveryClaim).toBeUndefined();
+    expect(state.childStartupSnapshot).toBeUndefined();
+    expect(state.childStartupInjectionPending).toBe(false);
+    expect(state.childDcpInjectionPending).toBe(false);
+    expect(state.mainDcpDeliveryPending).toBe(false);
+  });
+
+  test("LRU eviction removes populated delivery and child state", () => {
+    const evicted = ensureSessionState("evicted", sessionStates, sessionStatesOrder, 1);
+    const revision = bumpMemoryRevision(evicted);
+    evicted.deliveryClaim = { turnID: "turn-1", memoryRevision: revision };
+    evicted.lastDeliveredClaim = { turnID: "turn-0", memoryRevision: 0 };
+    evicted.childStartupSnapshot = "startup memory";
+    evicted.childStartupInjectionPending = true;
+    evicted.childDcpInjectionPending = true;
+    evicted.mainDcpDeliveryPending = true;
+
+    ensureSessionState("retained", sessionStates, sessionStatesOrder, 1);
+
+    expect(sessionStates.has("evicted")).toBe(false);
+    expect(sessionStates.has("retained")).toBe(true);
+    expect(sessionStatesOrder).toEqual(["retained"]);
   });
 });

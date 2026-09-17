@@ -60,7 +60,12 @@ describe("SessionMemoryPlugin general functionality", () => {
 
   test("experimental.chat.system.transform injects memory and dedupes duplicate calls", async () => {
     const sessionID = `inject-${Date.now()}`;
-    const { plugin } = await createPlugin({ summarizerMode: "clean", debounceMs: 500, remindEveryN: 1 });
+    const { plugin } = await createPlugin({
+      summarizerMode: "clean",
+      debounceMs: 500,
+      remindEveryN: 1,
+      enableLegacyPeriodicSystemTransform: true,
+    });
 
     await plugin["session.created"]({ sessionID });
     await writeText(memoryPathFor(sessionID), "## Session Memory\n\n### Long Horizon Context\n- Keep this\n");
@@ -81,7 +86,12 @@ describe("SessionMemoryPlugin general functionality", () => {
 
   test("experimental.chat.system.transform compacts injected memory content while preserving headings", async () => {
     const sessionID = `inject-compact-${Date.now()}`;
-    const { plugin } = await createPlugin({ summarizerMode: "clean", debounceMs: 500, remindEveryN: 1 });
+    const { plugin } = await createPlugin({
+      summarizerMode: "clean",
+      debounceMs: 500,
+      remindEveryN: 1,
+      enableLegacyPeriodicSystemTransform: true,
+    });
 
     await plugin["session.created"]({ sessionID });
     await writeText(
@@ -116,7 +126,12 @@ describe("SessionMemoryPlugin general functionality", () => {
 
   test("experimental.chat.system.transform skips injection when memory contains only placeholders", async () => {
     const sessionID = `inject-empty-${Date.now()}`;
-    const { plugin } = await createPlugin({ summarizerMode: "clean", debounceMs: 500, remindEveryN: 1 });
+    const { plugin } = await createPlugin({
+      summarizerMode: "clean",
+      debounceMs: 500,
+      remindEveryN: 1,
+      enableLegacyPeriodicSystemTransform: true,
+    });
 
     await plugin["session.created"]({ sessionID });
     // Memory file has only placeholder lines
@@ -143,7 +158,12 @@ describe("SessionMemoryPlugin general functionality", () => {
 
   test("experimental.chat.system.transform initializes missing output.system", async () => {
     const sessionID = `inject-init-${Date.now()}`;
-    const { plugin } = await createPlugin({ summarizerMode: "clean", debounceMs: 500, remindEveryN: 1 });
+    const { plugin } = await createPlugin({
+      summarizerMode: "clean",
+      debounceMs: 500,
+      remindEveryN: 1,
+      enableLegacyPeriodicSystemTransform: true,
+    });
 
     await plugin["session.created"]({ sessionID });
     await writeText(memoryPathFor(sessionID), "## Session Memory\n\n### Long Horizon Context\n- Keep this\n");
@@ -178,6 +198,7 @@ describe("SessionMemoryPlugin general functionality", () => {
       remindEveryN: 2,
       debounceMs: 500,
       debug: false,
+      enableLegacyPeriodicSystemTransform: true,
     });
 
     await plugin["session.created"]({ sessionID });
@@ -721,7 +742,11 @@ describe("SessionMemoryPlugin general functionality", () => {
 
   test("reset clears userTurnInjectState counter", async () => {
     const sessionID = `reset-inject-${Date.now()}`;
-    const { plugin } = await createPlugin({ summarizerMode: "clean", remindEveryN: 2 });
+    const { plugin } = await createPlugin({
+      summarizerMode: "clean",
+      remindEveryN: 2,
+      enableLegacyPeriodicSystemTransform: true,
+    });
     await plugin["session.created"]({ sessionID });
     await writeText(memoryPathFor(sessionID), "## Session Memory\n\n### Long Horizon Context\n- persist\n");
 
@@ -1107,7 +1132,11 @@ describe("SessionMemoryPlugin general functionality", () => {
 
   test("transform skips when memory already injected in output.system", async () => {
     const sessionID = `already-injected-${Date.now()}`;
-    const { plugin } = await createPlugin({ debug: false, remindEveryN: 1 });
+    const { plugin } = await createPlugin({
+      debug: false,
+      remindEveryN: 1,
+      enableLegacyPeriodicSystemTransform: true,
+    });
     await plugin["session.created"]({ sessionID });
     await writeText(memoryPathFor(sessionID), "## Session Memory\n\n### Long Horizon Context\n- Keep this\n");
     const output = { system: [`${INJECTION_PREFIX}\nalready here`] as string[] };
@@ -1178,7 +1207,7 @@ describe("SessionMemoryPlugin general functionality", () => {
   });
 
   describe("subagent memory handling", () => {
-    test("subagent with injectInSubagents true inherits parent memory and skips updates", async () => {
+    test("subagent with injectInSubagents true uses a parent snapshot and skips updates", async () => {
       const parentSessionID = `parent-${Date.now()}`;
       const subSessionID = `sub-${Date.now()}`;
 
@@ -1212,19 +1241,27 @@ describe("SessionMemoryPlugin general functionality", () => {
       };
       await plugin["session.created"](subCreateInput);
 
-      // Subagent memory file should copy parent content
+      // Child persistence remains independent; inherited context lives only in the runtime snapshot.
       const subMemory = await readText(memoryPathFor(subSessionID), "");
-      expect(subMemory).toContain("- Parent instruction");
-      expect(subMemory).toContain("- Important context");
+      expect(subMemory).toContain("- None captured yet.");
+      expect(subMemory).not.toContain("- Parent instruction");
+      expect(subMemory).not.toContain("- Important context");
+
+      await writeText(
+        memoryPathFor(parentSessionID),
+        "## Session Memory\n\n### Long Horizon Context\n- Changed after child creation\n",
+      );
 
       // Attempt update on subagent – should be skipped (no client calls)
       client.calls.messages = [];
-      client.calls.prompt = [];
+      client.calls.summarizerPrompts = [];
+      client.calls.noReplyDeliveries = [];
       await plugin.tool.short_term_memory.execute({ action: "update" }, { sessionID: subSessionID });
       expect(client.calls.messages.length).toBe(0);
-      expect(client.calls.prompt.length).toBe(0);
+      expect(client.calls.summarizerPrompts.length).toBe(0);
+      expect(client.calls.noReplyDeliveries.length).toBe(0);
 
-      // System transform should inject the inherited memory
+      // Startup and compaction use the immutable snapshot captured at child creation.
       const systemOutput = { system: [] as string[] };
       await plugin["experimental.chat.system.transform"](
         { sessionID: subSessionID, messageID: "sub-msg-1" },
@@ -1233,12 +1270,14 @@ describe("SessionMemoryPlugin general functionality", () => {
       expect(systemOutput.system.length).toBe(1);
       expect(systemOutput.system[0]).toContain(INJECTION_PREFIX);
       expect(systemOutput.system[0]).toContain("- Important context");
+      expect(systemOutput.system[0]).not.toContain("Changed after child creation");
 
       // Compaction should push memory
       const compactionOutput = { context: [] as string[] };
       await plugin["experimental.session.compacting"]({ sessionID: subSessionID }, compactionOutput);
       expect(compactionOutput.context.length).toBe(1);
       expect(compactionOutput.context[0]).toContain("Important context");
+      expect(compactionOutput.context[0]).not.toContain("Changed after child creation");
     });
 
     test("subagent with injectInSubagents false leaves placeholder memory and skips injection/compaction", async () => {
@@ -1294,10 +1333,12 @@ describe("SessionMemoryPlugin general functionality", () => {
 
       // Update on subagent should still be skipped (no-op)
       client.calls.messages = [];
-      client.calls.prompt = [];
+      client.calls.summarizerPrompts = [];
+      client.calls.noReplyDeliveries = [];
       await plugin.tool.short_term_memory.execute({ action: "update" }, { sessionID: subSessionID });
       expect(client.calls.messages.length).toBe(0);
-      expect(client.calls.prompt.length).toBe(0);
+      expect(client.calls.summarizerPrompts.length).toBe(0);
+      expect(client.calls.noReplyDeliveries.length).toBe(0);
     });
   });
 

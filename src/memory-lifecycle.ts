@@ -60,10 +60,11 @@ export async function processMemoryChunks(
   recentEntries: VisibleDeltaEntry[],
   agentsMdContext: string,
   globalState: RuntimeState,
-): Promise<void> {
+): Promise<boolean> {
   const separator = "\n\n---\n\n";
   let index = 0;
   let currentExisting = existing;
+  let wroteMemory = false;
 
   while (index < recentEntries.length) {
     const chunkEntries: VisibleDeltaEntry[] = [];
@@ -138,7 +139,7 @@ export async function processMemoryChunks(
             attempts: maxAttempts,
             error: globalState.lastError,
           });
-          return;
+          return wroteMemory;
         }
         await logEvent(config, "memory_update_clean_failed_fallback", {
           sessionID,
@@ -153,7 +154,7 @@ export async function processMemoryChunks(
           globalState.lastError = fallbackMessage;
           showToast(client, "Session Memory", "Summarization failed — check /stm logs for details.");
           await logEvent(config, "memory_update_fallback_error", { sessionID, reason, error: fallbackMessage });
-          return;
+          return wroteMemory;
         }
       }
     }
@@ -162,7 +163,7 @@ export async function processMemoryChunks(
       globalState.lastError = "Summarizer returned empty output";
       showToast(client, "Session Memory", "Summarization failed — empty output. Check /stm logs.");
       await logEvent(config, "memory_update_skipped", { sessionID, reason, detail: "empty_summarizer_output" });
-      return;
+      return wroteMemory;
     }
 
     const next = normalizeMemory(raw, config);
@@ -175,7 +176,7 @@ export async function processMemoryChunks(
         detail: "malformed_summarizer_output",
         preview: next.slice(0, 240),
       });
-      return;
+      return wroteMemory;
     }
 
     const currentOnDisk = await readText(memoryPath, "");
@@ -190,6 +191,7 @@ export async function processMemoryChunks(
     }
 
     await writeTextAtomic(memoryPath, next);
+    wroteMemory = true;
     const checkpointID = chunkEntries[chunkEntries.length - 1]?.lastMessageID || "";
     if (checkpointID) {
       await writeLastProcessedMessageID(sessionID, checkpointID, config);
@@ -217,4 +219,5 @@ export async function processMemoryChunks(
     processedEntries: recentEntries.length,
     newestMessageID: "",
   });
+  return wroteMemory;
 }

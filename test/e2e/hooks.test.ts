@@ -56,6 +56,7 @@ beforeAll(async () => {
     debounceMs: 500,
     logMaxLines: 20000,
     remindEveryN: 1,
+    enableLegacyPeriodicSystemTransform: true,
   });
   await startServe(ws, SERVE_PORT);
   await waitForStmLoaded(ws);
@@ -335,6 +336,7 @@ describe("remindEveryN controls how often the memory is injected", () => {
       debug: true,
       debounceMs: 500,
       remindEveryN: 2,
+      enableLegacyPeriodicSystemTransform: true,
     });
     stopServe(SERVE_PORT);
     await startServe(ws, SERVE_PORT);
@@ -374,6 +376,7 @@ describe("memory injection dedups the same messageID within the duplicate window
       debug: true,
       debounceMs: 500,
       remindEveryN: 1,
+      enableLegacyPeriodicSystemTransform: true,
     });
     stopServe(SERVE_PORT);
     await startServe(ws, SERVE_PORT);

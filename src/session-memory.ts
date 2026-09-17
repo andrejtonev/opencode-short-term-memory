@@ -34,7 +34,6 @@ import {
   readText,
   removePath,
   sanitizeMessage,
-  writeTextAtomic,
   type SessionMemoryConfig,
   type RuntimeState,
   DEFAULT_CONFIG,
@@ -45,16 +44,22 @@ import {
 import { type ConfigContext, reloadConfig } from "./config";
 import { readLastProcessedMessageID, collectRecentVisibleMessages } from "./message-collector";
 import { parseMemoryActionFromCommandArgument, executeMemoryAction, type CommandContext } from "./commands";
-import { injectMemoryIntoSystemTransform } from "./injection";
+import {
+  appendChildMemoryToSystem,
+  deliverMemoryViaNoReply,
+  injectMemoryIntoSystemTransform,
+} from "./injection";
 import { createTools, type CreateToolsContext } from "./tools";
 
 import {
   type SessionRuntimeState,
   type IdleWaiter,
   MAX_SESSION_STATES,
+  bumpMemoryRevision,
   ensureSessionState,
   isSessionBusy,
   notifySessionIdle,
+  rememberCanonicalTurn,
   waitForSessionIdle,
   waitForSessionUpdateDrain,
 } from "./session-state";
@@ -93,6 +98,10 @@ export const SessionMemoryPlugin = async ({
   const sessionParents = new Map<string, string>(); // childID → parentID
   // I2 – Reverse mapping for cleanup
   const parentToChildren = new Map<string, Set<string>>(); // parentID → set of childIDs
+  const childDeliveryMetadata = new Map<
+    string,
+    { startupSnapshot: string; startupInjectionPending: boolean; dcpInjectionPending: boolean }
+  >();
 
   // I3 / I11 – Idle waiters per session
   const idleWaiters = new Map<string, IdleWaiter>();
@@ -109,7 +118,12 @@ export const SessionMemoryPlugin = async ({
   // log write, orphan cleanup) is deferred to a microtask so the plugin
   // factory returns in <10ms and does not block opencode startup.
   let config: SessionMemoryConfig = DEFAULT_CONFIG;
-  const cmdCtx: CommandContext = { config, sessionStates, globalState };
+  const cmdCtx: CommandContext = {
+    config,
+    sessionStates,
+    globalState,
+    clearSessionDeliveryMetadata: (sessionID) => childDeliveryMetadata.delete(sessionID),
+  };
   let backgroundInitPromise: Promise<void> | undefined;
   let backgroundInitDone = false;
 
@@ -293,26 +307,52 @@ export const SessionMemoryPlugin = async ({
     }, config.debounceMs);
   }
 
-  async function updateMemory(client: Client, sessionID: string, reason: string, config: SessionMemoryConfig) {
-    if (!config.enabled) return;
+  async function attemptPendingMainDcpDelivery(client: Client, sessionID: string, config: SessionMemoryConfig) {
+    const s = sessionStates.get(sessionID);
+    if (!s?.mainDcpDeliveryPending || !s.lastDcpCompressAt || deletedSessions.has(sessionID)) return;
+
+    const dcpIdentity = s.lastDcpCompressAt;
+    const memoryRevision = s.memoryRevision;
+    const memory = await readText(memoryPathFor(sessionID, config.memoryDir), "");
+    const delivered = await deliverMemoryViaNoReply(
+      client,
+      sessionID,
+      `dcp:${dcpIdentity}`,
+      memoryRevision,
+      memory,
+      config,
+      globalState,
+      s,
+    );
+    if (delivered && s.lastDcpCompressAt === dcpIdentity) s.mainDcpDeliveryPending = false;
+  }
+
+  async function updateMemory(
+    client: Client,
+    sessionID: string,
+    reason: string,
+    config: SessionMemoryConfig,
+  ): Promise<boolean> {
+    if (!config.enabled) return false;
 
     // Sub-agent sessions never update memory
     if (sessionParents.has(sessionID)) {
       await logEvent(config, "subagent_update_skipped", { sessionID, reason });
-      return;
+      return false;
     }
 
     if (deletedSessions.has(sessionID)) {
       await logEvent(config, "memory_update_skipped", { sessionID, reason, detail: "session_deleted" });
-      return;
+      return false;
     }
 
     if (updateInFlight.has(sessionID)) {
       pendingUpdateAfterInFlight.add(sessionID);
       await logEvent(config, "memory_update_skipped", { sessionID, reason, detail: "update_in_flight" });
-      return;
+      return false;
     }
     updateInFlight.add(sessionID);
+    let wroteMemory = false;
 
     try {
       // Outer try/catch to record any unexpected error
@@ -328,7 +368,7 @@ export const SessionMemoryPlugin = async ({
         const recent = await collectRecentVisibleMessages(client, sessionID, config, globalState);
         if (!recent.entries.length) {
           await logEvent(config, "memory_update_skipped", { sessionID, reason, detail: "no_visible_recent_messages" });
-          return;
+          return false;
         }
         await logEvent(config, "memory_update_start", {
           sessionID,
@@ -344,11 +384,11 @@ export const SessionMemoryPlugin = async ({
             reason,
             detail: "session_deleted_during_collection",
           });
-          return;
+          return false;
         }
 
         // I13 – delegate chunk processing to extracted helper
-        await processMemoryChunks(
+        wroteMemory = await processMemoryChunks(
           client,
           sessionID,
           reason,
@@ -359,12 +399,26 @@ export const SessionMemoryPlugin = async ({
           agentsMdContext,
           globalState,
         );
+        if (wroteMemory) {
+          const s = ensureSessionState(sessionID, sessionStates, sessionStatesOrder, MAX_SESSION_STATES);
+          bumpMemoryRevision(s);
+        }
       } catch (error) {
         globalState.lastError = (error as Error).message;
         showToast(client, "Session Memory", "Summarization failed — check /stm logs for details.");
         await logEvent(config, "memory_update_error", { sessionID, reason, error: globalState.lastError });
       }
     } finally {
+      try {
+        await attemptPendingMainDcpDelivery(client, sessionID, config);
+      } catch (error) {
+        try {
+          await logEvent(config, "dcp_delivery_error", {
+            sessionID,
+            error: (error as Error).message || String(error || ""),
+          });
+        } catch {}
+      }
       updateInFlight.delete(sessionID);
       if (pendingUpdateAfterInFlight.has(sessionID)) {
         pendingUpdateAfterInFlight.delete(sessionID);
@@ -373,6 +427,7 @@ export const SessionMemoryPlugin = async ({
         notifySessionIdle(sessionID, idleWaiters);
       }
     }
+    return wroteMemory;
   }
 
   // ── Tool context ───────────────────────────────────────
@@ -381,7 +436,9 @@ export const SessionMemoryPlugin = async ({
     globalState,
     client,
     reloadConfigLocal,
-    updateMemory,
+    updateMemory: async (toolClient, sessionID, reason, toolConfig) => {
+      await updateMemory(toolClient, sessionID, reason, toolConfig);
+    },
   };
   const tools = createTools(toolCtx);
 
@@ -416,7 +473,14 @@ export const SessionMemoryPlugin = async ({
         if (part?.type === "tool" && part?.tool === "compress" && partState?.status === "completed") {
           const sessionID =
             props?.sessionID && typeof props.sessionID === "string" ? props.sessionID : getSessionID(input);
-          if (sessionID && !sessionParents.has(sessionID)) {
+          if (sessionID) {
+            if (deletedSessions.has(sessionID)) return;
+            if (sessionParents.has(sessionID)) {
+              const metadata = childDeliveryMetadata.get(sessionID);
+              if (metadata) metadata.dcpInjectionPending = true;
+              await logEvent(config, "dcp_compress_child_injection_pending", { sessionID });
+              return;
+            }
             const s = ensureSessionState(sessionID, sessionStates, sessionStatesOrder, MAX_SESSION_STATES);
             const now = Date.now();
 
@@ -426,6 +490,7 @@ export const SessionMemoryPlugin = async ({
               return;
             }
             s.lastDcpCompressAt = now;
+            s.mainDcpDeliveryPending = true;
 
             // If an update is already in-flight, queue a pending replay
             if (updateInFlight.has(sessionID)) {
@@ -443,6 +508,8 @@ export const SessionMemoryPlugin = async ({
       if (config.enabled && name === "session.idle") {
         const sessionID = getSessionID(evt) || getSessionID(input);
         if (sessionID) {
+          if (deletedSessions.has(sessionID)) return;
+          if (sessionParents.has(sessionID)) return;
           const s = ensureSessionState(sessionID, sessionStates, sessionStatesOrder, MAX_SESSION_STATES);
           const now = Date.now();
           if (now - s.lastIdleScheduledAt < Math.max(config.debounceMs, 1500)) return;
@@ -472,7 +539,15 @@ export const SessionMemoryPlugin = async ({
       const rawArgument =
         input?.command?.argument ?? input?.argument ?? input?.args?.argument ?? input?.args?.value ?? "";
       const action = parseMemoryActionFromCommandArgument(rawArgument);
-      const result = await executeMemoryAction(action, sessionID, cmdCtx, client, updateMemory);
+      const result = await executeMemoryAction(
+        action,
+        sessionID,
+        cmdCtx,
+        client,
+        async (commandClient, commandSessionID, reason, commandConfig) => {
+          await updateMemory(commandClient, commandSessionID, reason, commandConfig);
+        },
+      );
 
       if (output && typeof output === "object") {
         output.stop = true;
@@ -503,11 +578,16 @@ export const SessionMemoryPlugin = async ({
         }
         children.add(sessionID);
 
+        const metadata = {
+          startupSnapshot: "",
+          startupInjectionPending: false,
+          dcpInjectionPending: false,
+        };
+        childDeliveryMetadata.set(sessionID, metadata);
         if (config.injectInSubagents) {
           const parentMemory = await readText(memoryPathFor(parentID, config.memoryDir), "");
-          if (parentMemory.trim()) {
-            await writeTextAtomic(memoryPathFor(sessionID, config.memoryDir), parentMemory);
-          }
+          metadata.startupSnapshot = parentMemory;
+          metadata.startupInjectionPending = Boolean(parentMemory.trim());
           await logEvent(config, "subagent_created_with_memory", { sessionID, parentID });
         } else {
           await logEvent(config, "subagent_created_skipped_injection", { sessionID, parentID });
@@ -524,10 +604,11 @@ export const SessionMemoryPlugin = async ({
       await reloadConfigLocal();
       const sessionID = getSessionID(input);
       if (!sessionID) return;
-      deletedSessions.delete(sessionID);
+      if (deletedSessions.has(sessionID)) return;
       globalState.lastActiveSessionID = sessionID;
       await ensureMemoryFile(sessionID, config);
       await logEvent(config, "session_updated", { sessionID });
+      if (sessionParents.has(sessionID)) return;
       await maybeBootstrapSessionHistory(sessionID, "session_updated_bootstrap", config, client, scheduleMemoryUpdate);
     },
 
@@ -536,18 +617,33 @@ export const SessionMemoryPlugin = async ({
       const sessionID = getSessionID(input);
       if (!sessionID) return;
       deletedSessions.add(sessionID);
+      const children = parentToChildren.get(sessionID);
+      if (children) {
+        for (const child of children) deletedSessions.add(child);
+      }
       await removePath(memoryPathFor(sessionID, config.memoryDir));
       await removePath(checkpointPathFor(sessionID, config.memoryDir));
       // Clean up per‑session runtime state
       const s = sessionStates.get(sessionID);
       if (s?.timer) clearTimeout(s.timer);
       sessionStates.delete(sessionID);
+      childDeliveryMetadata.delete(sessionID);
       // I2 – Cleanup parent/child mappings
       sessionParents.delete(sessionID);
-      const children = parentToChildren.get(sessionID);
       if (children) {
         for (const child of children) {
+          await removePath(memoryPathFor(child, config.memoryDir));
+          await removePath(checkpointPathFor(child, config.memoryDir));
           sessionParents.delete(child);
+          childDeliveryMetadata.delete(child);
+          const childState = sessionStates.get(child);
+          if (childState?.timer) clearTimeout(childState.timer);
+          sessionStates.delete(child);
+          const childIdx = sessionStatesOrder.indexOf(child);
+          if (childIdx !== -1) sessionStatesOrder.splice(childIdx, 1);
+          updateInFlight.delete(child);
+          pendingUpdateAfterInFlight.delete(child);
+          notifySessionIdle(child, idleWaiters);
         }
         parentToChildren.delete(sessionID);
       }
@@ -574,6 +670,7 @@ export const SessionMemoryPlugin = async ({
       if (!config.enabled) return;
       const sessionID = getSessionID(input);
       if (!sessionID) return;
+      if (deletedSessions.has(sessionID)) return;
       globalState.lastActiveSessionID = sessionID;
       await ensureMemoryFile(sessionID, config);
 
@@ -590,6 +687,8 @@ export const SessionMemoryPlugin = async ({
 
       const sessionID = input.sessionID || globalState.lastActiveSessionID;
       if (!sessionID) return;
+      if (deletedSessions.has(sessionID)) return;
+      if (sessionParents.has(sessionID)) return;
 
       // Cast to access the message property (not in official SDK types yet)
       const role = getMessageRole(input.message || input);
@@ -598,7 +697,7 @@ export const SessionMemoryPlugin = async ({
       globalState.lastActiveSessionID = sessionID;
       await ensureMemoryFile(sessionID, config);
 
-      const text = getMessageText({ message: output?.message, parts: output?.parts });
+      const text = getMessageText(input) || getMessageText({ message: output?.message, parts: output?.parts });
       if (!text || isSelfInjection(text)) return;
 
       await logEvent(config, "chat_message", {
@@ -608,11 +707,76 @@ export const SessionMemoryPlugin = async ({
         hasParts: Array.isArray(output?.parts),
       });
 
-      await logEvent(config, "memory_inject_skipped", { sessionID, reason: "using_chat_system_transform" });
+      if (config.enableLegacyPeriodicSystemTransform) {
+        await logEvent(config, "memory_inject_skipped", { sessionID, reason: "using_chat_system_transform" });
+        return;
+      }
+
+      const runtimeTurnID =
+        input.messageID ||
+        input.messageId ||
+        input.message?.id ||
+        input.id ||
+        output?.messageID ||
+        output?.messageId ||
+        output?.message?.id ||
+        output?.id;
+      const s = ensureSessionState(sessionID, sessionStates, sessionStatesOrder, MAX_SESSION_STATES);
+      const hasRuntimeTurnID = runtimeTurnID !== undefined && runtimeTurnID !== null && String(runtimeTurnID).length > 0;
+      if (!hasRuntimeTurnID) s.userTurnInvocationSequence += 1;
+      const turnID = hasRuntimeTurnID ? String(runtimeTurnID) : `anonymous:${s.userTurnInvocationSequence}`;
+      const isDistinctTurn = rememberCanonicalTurn(s, turnID);
+      const retryableClaim = s.retryableDeliveryClaim;
+      const isRetryableDuplicate =
+        hasRuntimeTurnID &&
+        !isDistinctTurn &&
+        retryableClaim?.turnID === turnID &&
+        retryableClaim.memoryRevision === s.memoryRevision;
+      if (hasRuntimeTurnID && !isDistinctTurn && !isRetryableDuplicate) return;
+      if (isDistinctTurn) s.userTurnInjectState.count += 1;
+
+      const remindEveryN = Math.max(1, Math.trunc(config.remindEveryN || 1));
+      if (!isRetryableDuplicate && s.userTurnInjectState.count % remindEveryN !== 0) {
+        await logEvent(config, "memory_inject_skipped", {
+          sessionID,
+          reason: "remind_every_n",
+          remindEveryN,
+          userTurnCount: s.userTurnInjectState.count,
+        });
+        return;
+      }
+
+      const memoryRevision = s.memoryRevision;
+      const memory = await readText(memoryPathFor(sessionID, config.memoryDir), "");
+      await deliverMemoryViaNoReply(client, sessionID, turnID, memoryRevision, memory, config, globalState, s);
     },
 
     "experimental.chat.system.transform": async (input: SystemTransformInput, output: SystemTransformOutput) => {
       await reloadConfigLocal();
+      if (!config.enabled) return;
+      const sessionID = input.sessionID;
+      if (!sessionID) {
+        await logEvent(config, "memory_inject_skipped", { reason: "missing_session_id" });
+        return;
+      }
+      if (deletedSessions.has(sessionID)) return;
+      if (sessionParents.has(sessionID)) {
+        if (!config.injectInSubagents) return;
+        const metadata = childDeliveryMetadata.get(sessionID);
+        if (!metadata) return;
+        const snapshot = metadata.startupSnapshot;
+        if (metadata.startupInjectionPending) {
+          const appended = await appendChildMemoryToSystem(output, sessionID, snapshot, config, globalState);
+          if (appended) metadata.startupInjectionPending = false;
+          return;
+        }
+        if (metadata.dcpInjectionPending) {
+          const appended = await appendChildMemoryToSystem(output, sessionID, snapshot, config, globalState);
+          if (appended) metadata.dcpInjectionPending = false;
+        }
+        return;
+      }
+      if (!config.enableLegacyPeriodicSystemTransform) return;
       await injectMemoryIntoSystemTransform(
         input,
         output,
@@ -628,8 +792,19 @@ export const SessionMemoryPlugin = async ({
       await reloadConfigLocal();
       const sessionID = getSessionID(input) || globalState.lastActiveSessionID;
       if (!sessionID || !config.enabled) return;
+      if (deletedSessions.has(sessionID)) return;
       globalState.compactCount += 1;
       await ensureMemoryFile(sessionID, config);
+
+      const parentID = sessionParents.get(sessionID);
+      if (parentID) {
+        if (!config.injectInSubagents) return;
+        const snapshot = childDeliveryMetadata.get(sessionID)?.startupSnapshot || "";
+        if (!snapshot.trim()) return;
+        output.context.push(`${MEMORY_HEADER}\n\n${snapshot.slice(0, config.maxMemoryLength)}`);
+        await logEvent(config, "compaction_context_pushed", { sessionID, bytes: snapshot.length });
+        return;
+      }
 
       // Wait for any in-flight update to finish (with retry)
       const drainTimeout = Math.max(3000, config.debounceMs * 5);
@@ -658,12 +833,6 @@ export const SessionMemoryPlugin = async ({
           sessionID,
           timeoutMs: drainTimeout,
         });
-      }
-
-      // For sub-agents with injection disabled, do not push any memory
-      const parentID = sessionParents.get(sessionID);
-      if (parentID && !config.injectInSubagents) {
-        return;
       }
 
       const memory = await readText(memoryPathFor(sessionID, config.memoryDir), "");

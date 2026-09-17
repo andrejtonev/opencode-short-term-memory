@@ -41,14 +41,26 @@ export interface MessageUpdatedInput {
 
 export interface ChatMessageInput {
   sessionID?: string;
+  messageID?: string;
+  messageId?: string;
+  id?: string;
   message?: {
+    id?: string;
     role?: string;
+    content?: string;
+    parts?: unknown[];
   };
+  parts?: unknown[];
 }
 
 export interface ChatMessageOutput {
+  messageID?: string;
+  messageId?: string;
+  id?: string;
   message?: {
+    id?: string;
     content?: string;
+    parts?: unknown[];
   };
   parts?: Part[];
 }

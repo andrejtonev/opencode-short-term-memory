@@ -2,8 +2,8 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createPlugin, createFakeClient } from "./test-helpers";
-import { readText, writeText, memoryPathFor } from "../src/memory-utils";
+import { createPlugin, createFakeClient, extractTaggedChildSystemDeliveries } from "./test-helpers";
+import { INJECTION_PREFIX, readText, writeText, memoryPathFor } from "../src/memory-utils";
 
 describe("DCP compress event integration", () => {
   const originalCwd = process.cwd();
@@ -71,7 +71,15 @@ describe("DCP compress event integration", () => {
     // The DCP compress event triggers updateMemory synchronously (debounceMs=0)
     const memory = await readText(memoryPathFor(sessionID), "");
     expect(memory).toContain("/lib/auth.ts via DCP compress trigger");
-    expect(client.calls.prompt.length).toBeGreaterThanOrEqual(1);
+    expect(client.calls.summarizerPrompts).toHaveLength(1);
+    expect(client.calls.noReplyDeliveries).toHaveLength(1);
+    expect(client.calls.noReplyDeliveries[0]).toMatchObject({
+      path: { id: sessionID },
+      body: { noReply: true },
+    });
+    expect(client.calls.noReplyDeliveries[0]).toMatchObject({
+      body: { parts: [{ type: "text", text: expect.stringContaining(INJECTION_PREFIX) }] },
+    });
 
     const logText = await readText(join(".opencode", "memory", "session-memory.log"), "");
     expect(logText).toContain('"event":"dcp_compress_triggered"');
@@ -123,6 +131,8 @@ describe("DCP compress event integration", () => {
     // Only one update should have happened (the first one)
     const updateLines = [...logText.matchAll(/"event":"memory_update_done"/g)];
     expect(updateLines.length).toBe(1);
+    expect(client.calls.summarizerPrompts).toHaveLength(1);
+    expect(client.calls.noReplyDeliveries).toHaveLength(1);
   });
 
   test("DCP compress event queues replay when update is in flight", async () => {
@@ -192,9 +202,11 @@ describe("DCP compress event integration", () => {
     const logText = await readText(join(".opencode", "memory", "session-memory.log"), "");
     expect(logText).toContain('"event":"dcp_compress_queued_after_inflight"');
     expect(logText).toContain('"reason":"post_in_flight_replay"');
+    expect(client.calls.summarizerPrompts).toHaveLength(1);
+    expect(client.calls.noReplyDeliveries).toHaveLength(1);
   });
 
-  test("DCP compress event ignored for sub-agent sessions", async () => {
+  test("DCP compress event schedules one additional child snapshot injection without an update", async () => {
     const parentSessionID = `dcp-parent-${Date.now()}`;
     const subSessionID = `dcp-sub-${Date.now()}`;
 
@@ -231,8 +243,25 @@ describe("DCP compress event integration", () => {
     // Reset client calls
     client.calls.prompt = [];
     client.calls.messages = [];
+    client.calls.summarizerPrompts = [];
+    client.calls.noReplyDeliveries = [];
 
-    // Fire DCP compress event for the sub-agent session
+    // Consume the startup snapshot exactly once.
+    const startupOutput = { system: [] as string[] };
+    const afterStartupOutput = { system: [] as string[] };
+    await plugin["experimental.chat.system.transform"](
+      { sessionID: subSessionID, messageID: "sub-startup" },
+      startupOutput,
+    );
+    await plugin["experimental.chat.system.transform"](
+      { sessionID: subSessionID, messageID: "sub-after-startup" },
+      afterStartupOutput,
+    );
+    expect(extractTaggedChildSystemDeliveries(startupOutput)).toHaveLength(1);
+    expect(startupOutput.system[0]).toContain("Parent context");
+    expect(extractTaggedChildSystemDeliveries(afterStartupOutput)).toHaveLength(0);
+
+    // Fire DCP compress event for the sub-agent session.
     const dcpCompressEvent = {
       event: {
         type: "message.part.updated",
@@ -248,18 +277,25 @@ describe("DCP compress event integration", () => {
     };
     await plugin.event(dcpCompressEvent as any);
 
-    // Sub-agent should NOT trigger an update (no client calls)
+    // Child DCP should not collect messages, summarize, or use noReply delivery.
     expect(client.calls.messages.length).toBe(0);
-    expect(client.calls.prompt.length).toBe(0);
+    expect(client.calls.summarizerPrompts.length).toBe(0);
+    expect(client.calls.noReplyDeliveries.length).toBe(0);
 
-    // But sub-agent memory should still be injectable (inherited from parent)
-    const systemOutput = { system: [] as string[] };
+    // DCP marks exactly one additional snapshot injection pending.
+    const dcpOutput = { system: [] as string[] };
+    const afterDcpOutput = { system: [] as string[] };
     await plugin["experimental.chat.system.transform"](
-      { sessionID: subSessionID, messageID: "sub-dcp-msg" },
-      systemOutput,
+      { sessionID: subSessionID, messageID: "sub-dcp" },
+      dcpOutput,
     );
-    expect(systemOutput.system.length).toBe(1);
-    expect(systemOutput.system[0]).toContain("Parent context");
+    await plugin["experimental.chat.system.transform"](
+      { sessionID: subSessionID, messageID: "sub-after-dcp" },
+      afterDcpOutput,
+    );
+    expect(extractTaggedChildSystemDeliveries(dcpOutput)).toHaveLength(1);
+    expect(dcpOutput.system[0]).toContain("Parent context");
+    expect(extractTaggedChildSystemDeliveries(afterDcpOutput)).toHaveLength(0);
   });
 
   test("DCP compress event on non-compress tool part is ignored", async () => {

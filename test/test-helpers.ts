@@ -1,7 +1,7 @@
 import { join } from "node:path";
 import { rm } from "node:fs/promises";
 import SessionMemoryPlugin from "../src/session-memory";
-import { DEFAULT_CONFIG, writeText } from "../src/memory-utils";
+import { DEFAULT_CONFIG, INJECTION_PREFIX, writeText } from "../src/memory-utils";
 import type { Client } from "../src/types";
 
 type TestPlugin = Awaited<ReturnType<typeof SessionMemoryPlugin>>;
@@ -20,6 +20,8 @@ type FakeClient = {
     create: unknown[];
     messages: unknown[];
     prompt: unknown[];
+    summarizerPrompts: unknown[];
+    noReplyDeliveries: unknown[];
     delete: unknown[];
     list: unknown[];
     abort: unknown[];
@@ -31,11 +33,15 @@ export function createFakeClient(options?: {
   promptText?: string;
   promptResponder?: (args?: unknown) => string | Promise<string>;
   promptShouldThrow?: boolean;
+  noReplyFailures?: number;
+  noReplyResolvedErrors?: number;
 }) {
   const calls = {
     create: [] as unknown[],
     messages: [] as unknown[],
     prompt: [] as unknown[],
+    summarizerPrompts: [] as unknown[],
+    noReplyDeliveries: [] as unknown[],
     delete: [] as unknown[],
     list: [] as unknown[],
     abort: [] as unknown[],
@@ -45,6 +51,8 @@ export function createFakeClient(options?: {
   const promptText = options?.promptText ?? "## Session Memory\n\n### User Instructions\n- updated from prompt";
   const promptResponder = options?.promptResponder;
   const promptShouldThrow = options?.promptShouldThrow ?? false;
+  let noReplyFailures = Math.max(0, Math.trunc(options?.noReplyFailures ?? 0));
+  let noReplyResolvedErrors = Math.max(0, Math.trunc(options?.noReplyResolvedErrors ?? 0));
 
   const client: FakeClient = {
     session: {
@@ -63,8 +71,24 @@ export function createFakeClient(options?: {
       },
       prompt: async (args?: unknown) => {
         calls.prompt.push(args);
+        const body = (args as { body?: Record<string, unknown> } | undefined)?.body;
+        const isSummarizerPrompt = typeof body?.system === "string";
+        const isNoReplyDelivery = body?.noReply === true && !isSummarizerPrompt;
+        if (isSummarizerPrompt) calls.summarizerPrompts.push(args);
+        if (isNoReplyDelivery) calls.noReplyDeliveries.push(args);
         if (promptShouldThrow) {
           throw new Error("session.prompt is disabled for this test");
+        }
+        if (isNoReplyDelivery) {
+          if (noReplyFailures > 0) {
+            noReplyFailures -= 1;
+            throw new Error("session.prompt noReply delivery failed for this test");
+          }
+          if (noReplyResolvedErrors > 0) {
+            noReplyResolvedErrors -= 1;
+            return { error: { name: "UnknownError", data: { message: "noReply delivery failed for this test" } } };
+          }
+          return { data: { parts: [] } };
         }
         const resolvedPromptText = promptResponder ? await promptResponder(args) : promptText;
         return { data: { parts: [{ type: "text", text: resolvedPromptText }] } };
@@ -86,6 +110,13 @@ export function createFakeClient(options?: {
   };
 
   return client;
+}
+
+export function extractTaggedChildSystemDeliveries(output?: { system?: unknown }): string[] {
+  if (!Array.isArray(output?.system)) return [];
+  return output.system.filter(
+    (item): item is string => typeof item === "string" && item.includes(INJECTION_PREFIX),
+  );
 }
 
 export async function createPlugin(configOverrides: Partial<typeof DEFAULT_CONFIG> = {}, client?: FakeClient) {
