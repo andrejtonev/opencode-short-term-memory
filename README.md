@@ -56,11 +56,19 @@ Memory summarization and injection is fully automated — the plugin watches the
 | `/stm logs`     | Print the last ~120 log entries.                              |
 | `/stm settings` | Dump the resolved config as JSON.                             |
 
-**Agent tool**
+**Agent tools**
 
-| Tool                | Description                                                                                                                        |
-| ------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
-| `short_term_memory` | Full control interface — accepts the same actions as the `/stm` command (`show`, `status`, `update`, `reset`, `logs`, `settings`). |
+Agents should use `stm_memory_read` when prior instructions, decisions, or constraints may affect the current task. This pull-first workflow retrieves the current session's stored memory only when it is relevant.
+
+| Tool                  | Description                                                                                                                              |
+| --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `stm_memory_read`     | Read the current session memory. Use when prior instructions, decisions, or constraints may matter.                                    |
+| `stm_memory_status`   | Show the current session's runtime and status information.                                                                              |
+| `stm_memory_update`   | Run an immediate memory update for the current session and return the resulting memory.                                                 |
+| `stm_memory_reset`    | Destructively clear the current session memory and checkpoint. Requires `confirm: true`.                                                |
+| `stm_memory_logs`     | Show plugin logs. Logs may include sensitive content; do not disclose secrets or other sensitive information from them.                |
+| `stm_memory_settings` | Show the resolved STM configuration.                                                                                                     |
+| `short_term_memory`   | Legacy compatibility tool. Accepts an `action` for the same operations: `show`, `status`, `update`, `reset`, `logs`, and `settings`. |
 
 ## How it works
 

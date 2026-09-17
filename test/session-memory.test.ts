@@ -779,6 +779,75 @@ describe("SessionMemoryPlugin general functionality", () => {
     expect(typeof logs).toBe("string");
   });
 
+  test("stm_memory_read uses the invoking ToolContext session instead of the active session", async () => {
+    const invokingSessionID = `tool-context-${Date.now()}`;
+    const activeSessionID = `tool-active-${Date.now()}`;
+    const { plugin } = await createPlugin({ debug: false });
+    await plugin["session.created"]({ sessionID: invokingSessionID });
+    await plugin["session.created"]({ sessionID: activeSessionID });
+    await writeText(memoryPathFor(invokingSessionID), "## Session Memory\n\n- invoking session only\n");
+    await writeText(memoryPathFor(activeSessionID), "## Session Memory\n\n- active session only\n");
+
+    const memory = await plugin.tool.stm_memory_read.execute({}, { sessionID: invokingSessionID });
+
+    expect(String(memory)).toContain("invoking session only");
+    expect(String(memory)).not.toContain("active session only");
+  });
+
+  test("named STM tools dispatch status, settings, logs, and update actions", async () => {
+    const sessionID = `named-tool-dispatch-${Date.now()}`;
+    const fakeClient = createFakeClient({
+      messagesRows: [
+        { id: "m1", role: "user", content: "remember named tool dispatch" },
+        { id: "m2", role: "assistant", content: "recorded" },
+      ],
+      promptText: "## Session Memory\n\n### Decisions\n- updated by named tool\n",
+    });
+    const { plugin, client } = await createPlugin({ summarizerMode: "active", debug: false }, fakeClient);
+    await plugin["session.created"]({ sessionID });
+
+    const status = await plugin.tool.stm_memory_status.execute({}, { sessionID });
+    const settings = await plugin.tool.stm_memory_settings.execute({}, { sessionID });
+    const logs = await plugin.tool.stm_memory_logs.execute({}, { sessionID });
+    const updated = await plugin.tool.stm_memory_update.execute({}, { sessionID });
+
+    expect(String(status)).toContain(`- activeSessionID: ${sessionID}`);
+    expect(String(settings)).toContain('"summarizerMode": "active"');
+    expect(typeof logs).toBe("string");
+    expect(String(updated)).toContain("updated by named tool");
+    expect(client.calls.prompt).toHaveLength(1);
+    expect(client.calls.prompt[0]).toMatchObject({ path: { id: sessionID } });
+  });
+
+  test("stm_memory_reset requires direct confirmation before resetting", async () => {
+    const sessionID = `named-tool-reset-${Date.now()}`;
+    const { plugin } = await createPlugin({ debug: false });
+    await plugin["session.created"]({ sessionID });
+    await writeText(memoryPathFor(sessionID), "## Session Memory\n\n- preserve until confirmed\n");
+
+    const refused = await plugin.tool.stm_memory_reset.execute({ confirm: false }, { sessionID });
+    expect(String(refused)).toContain("Refused to reset short-term memory");
+    expect(await readText(memoryPathFor(sessionID), "")).toContain("preserve until confirmed");
+
+    const reset = await plugin.tool.stm_memory_reset.execute({ confirm: true }, { sessionID });
+    expect(String(reset)).toContain(`Reset memory for session ${sessionID}`);
+    expect(await readText(memoryPathFor(sessionID), "")).toContain("None captured yet.");
+  });
+
+  test("short_term_memory remains compatible with named tool actions", async () => {
+    const sessionID = `legacy-tool-${Date.now()}`;
+    const { plugin } = await createPlugin({ debug: false });
+    await plugin["session.created"]({ sessionID });
+    await writeText(memoryPathFor(sessionID), "## Session Memory\n\n- legacy wrapper content\n");
+
+    const namedRead = await plugin.tool.stm_memory_read.execute({}, { sessionID });
+    const legacyShow = await plugin.tool.short_term_memory.execute({ action: "show" }, { sessionID });
+    const legacyStatus = await plugin.tool.short_term_memory.execute({ action: "status" }, { sessionID });
+
+    expect(String(legacyShow)).toBe(String(namedRead));
+    expect(String(legacyStatus)).toContain(`- activeSessionID: ${sessionID}`);
+  });
+
   test("short_term_memory tool supports status and logs actions", async () => {
     const sessionID = `tool-shortcuts-${Date.now()}`;
     const { plugin } = await createPlugin({ debug: false });
