@@ -11,6 +11,7 @@ export type SessionMemoryConfig = {
   cleanFallbackToActiveSession: boolean;
   includeAgentsMdOnFirstUpdate: boolean;
   injectInSubagents: boolean;
+  enableLegacyPeriodicSystemTransform: boolean;
   sideSessionRetries: number;
   remindEveryN: number;
   maxMemoryLength: number;
@@ -36,6 +37,7 @@ export const DEFAULT_CONFIG: SessionMemoryConfig = {
   cleanFallbackToActiveSession: false,
   includeAgentsMdOnFirstUpdate: false,
   injectInSubagents: true,
+  enableLegacyPeriodicSystemTransform: false,
   sideSessionRetries: 1,
   remindEveryN: 4,
   maxMemoryLength: 10000,
@@ -215,6 +217,10 @@ function normalizeConfig(merged: Record<string, unknown>): SessionMemoryConfig {
       DEFAULT_CONFIG.includeAgentsMdOnFirstUpdate,
     ),
     injectInSubagents: normalizeBoolean(merged.injectInSubagents, DEFAULT_CONFIG.injectInSubagents),
+    enableLegacyPeriodicSystemTransform: normalizeBoolean(
+      merged.enableLegacyPeriodicSystemTransform,
+      DEFAULT_CONFIG.enableLegacyPeriodicSystemTransform,
+    ),
     sideSessionRetries: normalizeInteger(merged.sideSessionRetries, DEFAULT_CONFIG.sideSessionRetries, 0, 10),
     remindEveryN: normalizeInteger(merged.remindEveryN, DEFAULT_CONFIG.remindEveryN, 1, 1000),
     maxMemoryLength: normalizeInteger(merged.maxMemoryLength, DEFAULT_CONFIG.maxMemoryLength, 200, 50000),
@@ -280,6 +286,9 @@ export async function ensureDefaultConfigFile(configDir: string) {
 
   // Interval at which to inject memory summarization into chat (every N user turns)
   "remindEveryN": ${DEFAULT_CONFIG.remindEveryN},
+
+  // Enable legacy periodic system-transform memory delivery
+  "enableLegacyPeriodicSystemTransform": ${DEFAULT_CONFIG.enableLegacyPeriodicSystemTransform},
 
   // Max chars stored in session memory markdown
   "maxMemoryLength": ${DEFAULT_CONFIG.maxMemoryLength},
