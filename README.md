@@ -60,14 +60,14 @@ Memory summarization and injection is fully automated — the plugin watches the
 
 Agents should use `stm_memory_read` when prior instructions, decisions, or constraints may affect the current task. This pull-first workflow retrieves the current session's stored memory only when it is relevant.
 
-| Tool                  | Description                                                                                                                              |
-| --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| `stm_memory_read`     | Read the current session memory. Use when prior instructions, decisions, or constraints may matter.                                    |
-| `stm_memory_status`   | Show the current session's runtime and status information.                                                                              |
-| `stm_memory_update`   | Run an immediate memory update for the current session and return the resulting memory.                                                 |
-| `stm_memory_reset`    | Destructively clear the current session memory and checkpoint. Requires `confirm: true`.                                                |
-| `stm_memory_logs`     | Show plugin logs. Logs may include sensitive content; do not disclose secrets or other sensitive information from them.                |
-| `stm_memory_settings` | Show the resolved STM configuration.                                                                                                     |
+| Tool                  | Description                                                                                                                          |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `stm_memory_read`     | Read the current session memory. Use when prior instructions, decisions, or constraints may matter.                                  |
+| `stm_memory_status`   | Show the current session's runtime and status information.                                                                           |
+| `stm_memory_update`   | Run an immediate memory update for the current session and return the resulting memory.                                              |
+| `stm_memory_reset`    | Destructively clear the current session memory and checkpoint. Requires `confirm: true`.                                             |
+| `stm_memory_logs`     | Show plugin logs. Logs may include sensitive content; do not disclose secrets or other sensitive information from them.              |
+| `stm_memory_settings` | Show the resolved STM configuration.                                                                                                 |
 | `short_term_memory`   | Legacy compatibility tool. Accepts an `action` for the same operations: `show`, `status`, `update`, `reset`, `logs`, and `settings`. |
 
 ## How it works
@@ -84,7 +84,7 @@ When `summarizerMode` is `"clean"` (the default), the plugin creates a separate 
 
 Why a separate session?
 
-- **Instruction isolation** — The side session runs with `noReply: true` and only the summarizer system prompt — never the main session's instructions, custom commands, or project rules.
+- **Instruction isolation** — The side session requests an assistant-generated response with only the summarizer system prompt — never the main session's instructions, custom commands, or project rules.
 - **Clean chat** — Summarization prompts never appear in the main chat UI.
 - **Separate model** — The side session can use a different (often cheaper) model via `memoryModel`, keeping summarization costs low without affecting the main session's model choice.
 - **Auto cleanup** — Side sessions are deleted immediately after summarization completes so they don't clutter the session list.

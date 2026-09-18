@@ -117,6 +117,7 @@ describe("processMemoryChunks: chunking with realistic conversations", () => {
           callLog.push({ promptCount: callLog.length + 1, conversationChars });
           return {
             data: {
+              info: { role: "assistant" },
               parts: [{ type: "text", text: basicMemoryResult("", promptText) }],
             },
           };
@@ -184,6 +185,7 @@ describe("processMemoryChunks: chunking with realistic conversations", () => {
           const promptText = a?.body?.parts?.[0]?.text ?? "";
           return {
             data: {
+              info: { role: "assistant" },
               parts: [{ type: "text", text: basicMemoryResult("", promptText) }],
             },
           };
@@ -224,7 +226,7 @@ describe("processMemoryChunks: chunking with realistic conversations", () => {
       session: {
         prompt: async (args: unknown) => {
           promptCalls.push(args);
-          return { data: { parts: [{ type: "text", text: "" }] } };
+          return { data: { info: { role: "assistant" }, parts: [{ type: "text", text: "" }] } };
         },
       },
     } as unknown as Client;
@@ -294,7 +296,12 @@ describe("processMemoryChunks: clean-mode retry + fallback (#5)", () => {
             throw new Error("simulated side-session failure");
           }
           activeCalls += 1;
-          return { data: { parts: [{ type: "text", text: basicMemoryResult("", "fallback result") }] } };
+          return {
+            data: {
+              info: { role: "assistant" },
+              parts: [{ type: "text", text: basicMemoryResult("", "fallback result") }],
+            },
+          };
         },
       },
     } as unknown as Client;
@@ -341,7 +348,12 @@ describe("processMemoryChunks: clean-mode retry + fallback (#5)", () => {
             throw new Error("simulated side-session failure");
           }
           activeCalls += 1;
-          return { data: { parts: [{ type: "text", text: basicMemoryResult("", "fallback result") }] } };
+          return {
+            data: {
+              info: { role: "assistant" },
+              parts: [{ type: "text", text: basicMemoryResult("", "fallback result") }],
+            },
+          };
         },
       },
     } as unknown as Client;
@@ -387,9 +399,14 @@ describe("processMemoryChunks: clean-mode retry + fallback (#5)", () => {
           if (isCleanCall(args)) {
             cleanCalls += 1;
             if (cleanCalls < 2) throw new Error("transient failure");
-            return { data: { parts: [{ type: "text", text: basicMemoryResult("", "recovered") }] } };
+            return {
+              data: {
+                info: { role: "assistant" },
+                parts: [{ type: "text", text: basicMemoryResult("", "recovered") }],
+              },
+            };
           }
-          return { data: { parts: [{ type: "text", text: "" }] } };
+          return { data: { info: { role: "assistant" }, parts: [{ type: "text", text: "" }] } };
         },
       },
     } as unknown as Client;

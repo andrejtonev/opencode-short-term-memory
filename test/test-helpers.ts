@@ -91,7 +91,12 @@ export function createFakeClient(options?: {
           return { data: { parts: [] } };
         }
         const resolvedPromptText = promptResponder ? await promptResponder(args) : promptText;
-        return { data: { parts: [{ type: "text", text: resolvedPromptText }] } };
+        return {
+          data: {
+            info: { role: "assistant" },
+            parts: [{ type: "text", text: resolvedPromptText }],
+          },
+        };
       },
       delete: async (args?: unknown) => {
         calls.delete.push(args);
@@ -114,9 +119,7 @@ export function createFakeClient(options?: {
 
 export function extractTaggedChildSystemDeliveries(output?: { system?: unknown }): string[] {
   if (!Array.isArray(output?.system)) return [];
-  return output.system.filter(
-    (item): item is string => typeof item === "string" && item.includes(INJECTION_PREFIX),
-  );
+  return output.system.filter((item): item is string => typeof item === "string" && item.includes(INJECTION_PREFIX));
 }
 
 export async function createPlugin(configOverrides: Partial<typeof DEFAULT_CONFIG> = {}, client?: FakeClient) {

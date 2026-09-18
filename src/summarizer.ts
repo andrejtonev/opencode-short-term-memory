@@ -136,6 +136,37 @@ export function normalizeMemory(text: string, config: SessionMemoryConfig) {
   return `${MEMORY_FORMAT_VERSION}\n${truncateMemoryLines(out, config.maxMemoryLength)}`;
 }
 
+function extractValidatedSummary(result: unknown, context: string): string {
+  const row = (result as { data?: unknown })?.data || result;
+  if (!row || typeof row !== "object" || Array.isArray(row)) {
+    throw new Error(`${context} returned an unsupported response envelope`);
+  }
+
+  const response = row as Record<string, unknown>;
+  const info = response.info;
+  const role = info && typeof info === "object" ? (info as Record<string, unknown>).role : undefined;
+  if (role !== "assistant") {
+    throw new Error(`${context} returned a response without assistant role`);
+  }
+
+  if (!Array.isArray(response.parts)) {
+    throw new Error(`${context} returned a response without parts array`);
+  }
+
+  const text = getMessageTextFromParts(response.parts);
+  const trimmed = text.trim();
+  if (!trimmed) {
+    throw new Error(`${context} returned empty output`);
+  }
+  if (/<\/?\s*(existing_memory|conversation_update|agents_md_context)\s*>/i.test(trimmed)) {
+    throw new Error(`${context} returned raw prompt-template markers`);
+  }
+  if (!text.includes(MEMORY_HEADER)) {
+    throw new Error(`${context} returned output without ${MEMORY_HEADER}`);
+  }
+  return trimmed;
+}
+
 export function compactMemoryForInjection(memory: string): string {
   const lines = memory.split("\n");
   const kept: string[] = [];
@@ -218,7 +249,6 @@ export async function runCleanOpencodeSummarizer(client: Client, prompt: string,
       result = await client.session.prompt({
         path: { id: sessionID },
         body: {
-          noReply: true,
           ...(parsed ? { model: parsed } : {}),
           system: "You are a clean short-term memory summarizer. Return only the updated Session Memory markdown.",
           parts: [{ type: "text" as const, text: prompt }],
@@ -246,15 +276,8 @@ export async function runCleanOpencodeSummarizer(client: Client, prompt: string,
       if (abortTimer) clearTimeout(abortTimer);
     }
 
-    // 3. Extract text from response parts
-    const row = (result as { data?: unknown })?.data || result;
-    const r = row as Record<string, unknown> | undefined;
-    const rawParts = Array.isArray(r?.parts) ? (r.parts as unknown[]) : Array.isArray(row) ? (row as unknown[]) : [];
-    const text = getMessageTextFromParts(rawParts) || "";
-
-    if (!text.trim()) {
-      throw new Error("Side session summarizer returned empty output");
-    }
+    // 3. Validate the assistant envelope before extracting summary text.
+    const text = extractValidatedSummary(result, "Side session summarizer");
 
     await logEvent(config, "side_session_summarize_done", {
       sessionID,
@@ -262,7 +285,7 @@ export async function runCleanOpencodeSummarizer(client: Client, prompt: string,
       resultPreview: text.slice(0, 120),
     });
 
-    return text.trim();
+    return text;
   } finally {
     // 4. Clean up: delete the side session and remove it from the tracking file.
     if (sessionID) {
@@ -291,22 +314,13 @@ export async function runActiveSessionSummarizer(
     const result = await client.session.prompt({
       path: { id: sessionID },
       body: {
-        noReply: true,
         ...(parsed ? { model: parsed } : {}),
         system: "You are a clean short-term memory summarizer. Return only the updated Session Memory markdown.",
         parts: [{ type: "text", text: prompt }],
       },
     });
-    const row = (result as { data?: unknown })?.data || result;
-    const r = row as Record<string, unknown> | undefined;
-    const rawParts = Array.isArray(r?.parts) ? (r.parts as unknown[]) : Array.isArray(row) ? (row as unknown[]) : [];
-    const text =
-      getMessageTextFromParts(rawParts) ||
-      (row && typeof row === "object"
-        ? String(r?.content || ((r?.info as Record<string, unknown> | undefined)?.content ?? "") || r?.text || "")
-        : "") ||
-      "";
-    const trimmed = String(text || "").trim();
+    const trimmed = extractValidatedSummary(result, "Active session summarizer");
+    // Valid generated summaries include MEMORY_HEADER, so message collection excludes them.
     await logEvent(config, "active_session_summarizer_done", {
       sessionID,
       resultChars: trimmed.length,

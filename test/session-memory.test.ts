@@ -425,7 +425,10 @@ describe("SessionMemoryPlugin general functionality", () => {
     expect(client.calls.prompt.length).toBe(1);
 
     const logText = await readText(join(".opencode", "memory", "session-memory.log"), "");
-    expect(logText).toContain("empty_summarizer_output");
+    expect(logText).toContain('"event":"active_session_summarizer_error"');
+    expect(logText).toContain('"error":"Active session summarizer returned empty output"');
+    expect(logText).toContain('"event":"memory_update_error"');
+    expect(logText).not.toContain('"event":"active_session_summarizer_done"');
   });
 
   test("memory update dedupes when visible messages are unchanged", async () => {
@@ -1028,7 +1031,10 @@ describe("SessionMemoryPlugin general functionality", () => {
     await plugin["session.created"]({ sessionID });
     await plugin.tool.short_term_memory.execute({ action: "update" }, { sessionID });
     const logText = await readText(join(".opencode", "memory", "session-memory.log"), "");
-    expect(logText).toContain("malformed_summarizer_output");
+    expect(logText).toContain('"event":"active_session_summarizer_error"');
+    expect(logText).toContain('"error":"Active session summarizer returned output without ## Session Memory"');
+    expect(logText).toContain('"event":"memory_update_error"');
+    expect(logText).not.toContain('"event":"active_session_summarizer_done"');
   });
 
   test("update truncates oversized single message chunks", async () => {
