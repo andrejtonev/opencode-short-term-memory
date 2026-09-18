@@ -1,0 +1,14 @@
+{
+  "name": "stm-v1-v2-dual-proof",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "bun test --isolate index.test.ts",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "devDependencies": {
+    "@opencode/plugin": "2.0.8",
+    "@types/bun": "1.3.13",
+    "typescript": "^5"
+  }
+}
