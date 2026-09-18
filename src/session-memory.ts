@@ -20,8 +20,6 @@ import { join } from "node:path";
 import {
   createRuntimeState,
   ensureMemoryFile,
-  ensureDefaultConfigFile,
-  resolveGlobalOpencodeDir,
   getMessageRole,
   getMessageText,
   getSessionID,
@@ -165,12 +163,13 @@ export const SessionMemoryPlugin = async ({
   const waitForIdleCtx = (sid: string, ms: number) => waitForSessionIdle(sid, ms, isBusyCtx, idleWaiters);
 
   // ── Initialisation helpers inside factory ────────────────
-  // Heavy I/O (config read, directory creation, default-config seeding,
+  // Heavy I/O (config read, directory creation,
   // log write, orphan cleanup) is deferred to a microtask so the plugin
   // factory returns in <10ms and does not block opencode startup.
   let config: SessionMemoryConfig = DEFAULT_CONFIG;
   const cmdCtx: CommandContext = {
     config,
+    baseDir: directory,
     sessionStates,
     globalState,
     clearSessionDeliveryMetadata: (sessionID) => childDeliveryMetadata.delete(sessionID),
@@ -193,8 +192,6 @@ export const SessionMemoryPlugin = async ({
     if (backgroundInitDone) return;
     try {
       await reloadConfig(configCtx, true);
-      const globalOpencodeDir = resolveGlobalOpencodeDir();
-      await ensureDefaultConfigFile(globalOpencodeDir);
       config = configCtx.config;
       cmdCtx.config = config;
       await mkdir(config.memoryDir, { recursive: true });
@@ -558,7 +555,7 @@ export const SessionMemoryPlugin = async ({
       opencodeConfig.command ??= {};
       opencodeConfig.command.stm ??= {
         template: "/stm $ARGUMENTS",
-        description: "Inspect or control session memory (status|show|logs|settings|update|reset)",
+        description: "Inspect or control session memory (status|show|logs|settings|update|reset|setup)",
       };
     },
 
@@ -640,6 +637,7 @@ export const SessionMemoryPlugin = async ({
       const rawArgument =
         input?.command?.argument ?? input?.argument ?? input?.args?.argument ?? input?.args?.value ?? "";
       const action = parseMemoryActionFromCommandArgument(rawArgument);
+      const setupConfirmed = /^setup\s+confirm\s+true$/i.test(String(rawArgument).trim());
       const result = await executeMemoryAction(
         action,
         sessionID,
@@ -648,6 +646,7 @@ export const SessionMemoryPlugin = async ({
         async (commandClient, commandSessionID, reason, commandConfig) => {
           await updateMemory(commandClient, commandSessionID, reason, commandConfig);
         },
+        { confirm: setupConfirmed },
       );
 
       if (output && typeof output === "object") {

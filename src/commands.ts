@@ -1,12 +1,14 @@
 import type { SessionMemoryConfig, RuntimeState } from "./memory-utils";
 import type { Client } from "./types";
 import {
+  createProjectExampleConfig,
   logEvent,
   tailLog,
   ensureMemoryFile,
   readText,
   memoryPathFor,
   logPath,
+  parseModel,
   removePath,
   checkpointPathFor,
 } from "./memory-utils";
@@ -22,10 +24,15 @@ export function parseMemoryActionFromCommandArgument(argument: unknown): string 
 
 export interface CommandContext {
   config: SessionMemoryConfig;
+  baseDir?: string;
   sessionStates: Map<string, SessionRuntimeState>;
   globalState: RuntimeState;
   clearSessionDeliveryMetadata?: (sessionID: string) => void;
   resetSessionPersistence?: (sessionID: string, config: SessionMemoryConfig) => Promise<void>;
+}
+
+function memoryModelSelection(config: SessionMemoryConfig) {
+  return parseModel(config.memoryModel) ? "explicit-override" : "inherited-current-session";
 }
 
 export async function statusText(sessionID: string | undefined, ctx: CommandContext): Promise<string> {
@@ -37,7 +44,8 @@ export async function statusText(sessionID: string | undefined, ctx: CommandCont
     "# Session Memory Plugin Status",
     `- enabled: ${config.enabled}`,
     `- activeSessionID: ${sid || "unknown"}`,
-    `- memoryModel: ${config.memoryModel}`,
+    `- memoryModelSelection: ${memoryModelSelection(config)}`,
+    `- memoryModel: ${parseModel(config.memoryModel) ? config.memoryModel : "inherited-current-session"}`,
     `- summarizerMode: ${config.summarizerMode}`,
     `- cleanFallbackToActiveSession: ${config.cleanFallbackToActiveSession}`,
     `- includeAgentsMdOnFirstUpdate: ${config.includeAgentsMdOnFirstUpdate}`,
@@ -73,6 +81,7 @@ export async function executeMemoryAction(
   ctx: CommandContext,
   client: Client,
   updateMemoryFn: (client: Client, sessionID: string, reason: string, cfg: SessionMemoryConfig) => Promise<void>,
+  options: { confirm?: boolean } = {},
 ): Promise<string> {
   const { config, sessionStates } = ctx;
   const action = String(actionInput || "status").toLowerCase();
@@ -82,6 +91,7 @@ export async function executeMemoryAction(
     return JSON.stringify(
       {
         ...config,
+        memoryModelSelection: memoryModelSelection(config),
         effectiveDeliveryMode: config.enableLegacyPeriodicSystemTransform ? "legacySystemTransform" : "promptNoReply",
       },
       null,
@@ -90,6 +100,17 @@ export async function executeMemoryAction(
   }
   if (action === "logs") return (await tailLog(120, config.memoryDir)) || "No logs yet.";
   if (action === "status") return await statusText(sessionID, ctx);
+  if (action === "setup") {
+    if (options.confirm !== true) {
+      return [
+        "Setup not run: explicit confirmation is required.",
+        "Run `/stm setup confirm true` or call `stm_memory_setup` with `confirm: true`.",
+        "This creates only the project-local .opencode/stm.jsonc example and never overwrites stm.jsonc or stm.json.",
+      ].join("\n");
+    }
+    const result = await createProjectExampleConfig(ctx.baseDir);
+    return result.message;
+  }
   if (!sessionID) return "No active session ID found yet. Send one chat message, then run this again.";
   if (action === "show") {
     await ensureMemoryFile(sessionID, config);
@@ -116,5 +137,5 @@ export async function executeMemoryAction(
       "Memory update attempted, but no memory file was found.",
     );
   }
-  return "Unknown action. Use: show, status, logs, update, reset, settings.";
+  return "Unknown action. Use: show, status, logs, update, reset, settings, setup.";
 }

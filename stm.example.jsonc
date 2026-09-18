@@ -2,8 +2,8 @@
   // Session memory plugin on/off
   "enabled": true,
 
-  // Model used by the summarizer
-  "memoryModel": "opencode/minimax-m2.5-free",
+  // Empty inherits the active OpenCode session model. Set provider/model to override it.
+  "memoryModel": "",
 
   // clean | active
   "summarizerMode": "clean",

@@ -18,7 +18,13 @@ import type { Client } from "../src/types";
 
 const VALID_SUMMARY = `${MEMORY_HEADER}\n\n### User Instructions\n- keep this\n\n### Long Horizon Context\n- stable`;
 
-type PromptCall = { body?: { noReply?: unknown; parts?: Array<{ text?: string }> } };
+type PromptCall = {
+  body?: {
+    noReply?: unknown;
+    model?: { providerID: string; modelID: string };
+    parts?: Array<{ text?: string }>;
+  };
+};
 
 function assistantEnvelope(text: string) {
   return { data: { info: { role: "assistant" }, parts: [{ type: "text", text }] } };
@@ -78,6 +84,25 @@ describe("summarizer SDK envelopes", () => {
     for (const call of promptCalls) {
       expect(call.body?.parts?.[0]?.text).toBeTruthy();
       expect("noReply" in (call.body ?? {})).toBe(false);
+      expect("model" in (call.body ?? {})).toBe(false);
+    }
+  });
+
+  test("both summarizers send an explicit valid model override", async () => {
+    const memoryDir = join(testDir, "explicit-model");
+    const promptCalls: PromptCall[] = [];
+    const client = clientFor(assistantEnvelope(VALID_SUMMARY), promptCalls);
+    const cfg = { ...config(memoryDir, "clean"), memoryModel: "openai/gpt-5.3" };
+
+    await runCleanOpencodeSummarizer(client, "clean prompt", cfg);
+    await runActiveSessionSummarizer(client, "session-1", "active prompt", {
+      ...cfg,
+      summarizerMode: "active",
+    });
+
+    expect(promptCalls).toHaveLength(2);
+    for (const call of promptCalls) {
+      expect(call.body?.model).toEqual({ providerID: "openai", modelID: "gpt-5.3" });
     }
   });
 

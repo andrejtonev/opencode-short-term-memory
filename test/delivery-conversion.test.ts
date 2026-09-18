@@ -319,7 +319,10 @@ describe("delivery conversion", () => {
     const sessionID = "self-filter";
     const tagged = `${INJECTION_PREFIX}\nDO_NOT_RECOLLECT`;
     const fakeClient = createFakeClient({ messagesRows: [{ id: "self-1", role: "user", content: tagged }] });
-    const { plugin, client } = await createPlugin({ summarizerMode: "active", remindEveryN: 1, debug: false }, fakeClient);
+    const { plugin, client } = await createPlugin(
+      { summarizerMode: "active", remindEveryN: 1, debug: false },
+      fakeClient,
+    );
     await writeText(memoryPathFor(sessionID), MEMORY);
     await plugin["session.created"]({ sessionID });
 
@@ -419,6 +422,7 @@ describe("delivery conversion", () => {
         "stm_memory_logs",
         "stm_memory_settings",
         "stm_memory_reset",
+        "stm_memory_setup",
         "short_term_memory",
       ]),
     );

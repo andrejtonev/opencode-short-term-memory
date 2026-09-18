@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { INJECTION_PREFIX, memoryPathFor, readText, writeText, checkpointPathFor } from "../src/memory-utils";
 import { createFakeClient, createPlugin } from "./test-helpers";
+import SessionMemoryPlugin from "../src/session-memory";
 
 describe("SessionMemoryPlugin general functionality", () => {
   const originalCwd = process.cwd();
@@ -55,7 +56,76 @@ describe("SessionMemoryPlugin general functionality", () => {
     expect(String(status)).toContain("# Session Memory Plugin Status");
     expect(String(status)).toContain(`- activeSessionID: ${sessionID}`);
     expect(String(status)).toContain("- summarizerMode: clean");
+    expect(String(status)).toContain("- memoryModelSelection: inherited-current-session");
     expect(String(status)).toContain("- injectCharCount: 0");
+  });
+
+  test("status and settings distinguish inherited model selection from an explicit override", async () => {
+    const inherited = await createPlugin({ memoryModel: "", debug: false });
+    const inheritedStatus = await inherited.plugin.tool.stm_memory_status.execute({}, {});
+    const inheritedSettings = await inherited.plugin.tool.stm_memory_settings.execute({}, {});
+    expect(String(inheritedStatus)).toContain("- memoryModelSelection: inherited-current-session");
+    expect(String(inheritedSettings)).toContain('"memoryModelSelection": "inherited-current-session"');
+
+    const explicit = await createPlugin({ memoryModel: "openai/gpt-5.3", debug: false });
+    const explicitStatus = await explicit.plugin.tool.stm_memory_status.execute({}, {});
+    const explicitSettings = await explicit.plugin.tool.stm_memory_settings.execute({}, {});
+    expect(String(explicitStatus)).toContain("- memoryModelSelection: explicit-override");
+    expect(String(explicitStatus)).toContain("- memoryModel: openai/gpt-5.3");
+    expect(String(explicitSettings)).toContain('"memoryModelSelection": "explicit-override"');
+  });
+
+  test("startup does not seed global STM config", async () => {
+    const { plugin } = await createPlugin({ debug: false });
+    await plugin.tool.stm_memory_status.execute({}, {});
+
+    const globalConfig = join(process.env.XDG_CONFIG_HOME!, "opencode", "stm.jsonc");
+    expect(await readText(globalConfig, "missing")).toBe("missing");
+  });
+
+  test("stm_memory_setup gives guidance, creates project config only after confirmation, and needs no session", async () => {
+    const projectDir = join(testDir, "tool-setup-project");
+    const plugin = (await SessionMemoryPlugin({
+      client: createFakeClient() as any,
+      directory: projectDir,
+    })) as any;
+    const configPath = join(projectDir, ".opencode", "stm.jsonc");
+
+    const guidance = await plugin.tool.stm_memory_setup.execute({}, {});
+    expect(String(guidance)).toContain("Setup not run: explicit confirmation is required.");
+    expect(await readText(configPath, "missing")).toBe("missing");
+
+    const created = await plugin.tool.stm_memory_setup.execute({ confirm: true }, {});
+    expect(String(created)).toBe(`Created project example config at ${configPath}.`);
+    expect(await readText(configPath, "")).toContain('"memoryModel": ""');
+
+    const refused = await plugin.tool.stm_memory_setup.execute({ confirm: true }, {});
+    expect(String(refused)).toContain("No example config created: stm.jsonc already exists");
+  });
+
+  test("/stm setup confirmation is session-independent and refuses existing config", async () => {
+    const projectDir = join(testDir, "command-setup-project");
+    const plugin = (await SessionMemoryPlugin({
+      client: createFakeClient() as any,
+      directory: projectDir,
+    })) as any;
+    const configPath = join(projectDir, ".opencode", "stm.jsonc");
+
+    const guidanceOut: Record<string, unknown> = {};
+    await plugin["command.execute.before"]({ command: { name: "stm", argument: "setup" } }, guidanceOut);
+    expect(guidanceOut.stop).toBe(true);
+    expect(String(guidanceOut.message)).toContain("Setup not run");
+    expect(await readText(configPath, "missing")).toBe("missing");
+
+    const createOut: Record<string, unknown> = {};
+    await plugin["command.execute.before"]({ command: { name: "stm", argument: "setup confirm true" } }, createOut);
+    expect(String(createOut.message)).toBe(`Created project example config at ${configPath}.`);
+
+    const existing = await readText(configPath, "");
+    const refuseOut: Record<string, unknown> = {};
+    await plugin["command.execute.before"]({ command: { name: "stm", argument: "setup confirm true" } }, refuseOut);
+    expect(String(refuseOut.message)).toContain("No example config created: stm.jsonc already exists");
+    expect(await readText(configPath, "")).toBe(existing);
   });
 
   test("experimental.chat.system.transform injects memory and dedupes duplicate calls", async () => {

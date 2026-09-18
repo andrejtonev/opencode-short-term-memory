@@ -16,30 +16,30 @@ OpenCode installs npm plugins automatically using Bun at startup. Packages and t
 
 ### Post-install
 
-Create `.opencode/stm.jsonc` in your project (or copy from `stm.example.jsonc`), then restart OpenCode.
+Run `/stm setup` for guidance, then `/stm setup confirm true` to create a project-local `.opencode/stm.jsonc` example. The setup command never writes global config and refuses to overwrite an existing `stm.jsonc` or `stm.json`. You can also copy `stm.example.jsonc` manually, then restart OpenCode.
 
 ## Configuration
 
 All keys are optional. Place in `.opencode/stm.jsonc` (project) or a global config directory. Global → env → project merge with project taking precedence.
 
-| Key                            | Type                 | Default                        | Description                                                                                                                                                                                                    |
-| ------------------------------ | -------------------- | ------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `enabled`                      | bool                 | `true`                         | Enable/disable the plugin.                                                                                                                                                                                     |
-| `summarizerMode`               | `"clean"` `"active"` | `"clean"`                      | **`clean`** — creates a separate side session via the OpenCode SDK API as a pure summarizer. **`active`** — uses the current session model. Clean mode isolates the summarizer from main-session instructions. |
-| `memoryModel`                  | string               | `"opencode/minimax-m2.5-free"` | Model for summarization (`provider/model`).                                                                                                                                                                    |
-| `remindEveryN`                 | number               | `4`                            | Inject memory every N user turns. `1` = every turn. After `/stm reset` the counter restarts at 0 (injection on 4th, 8th, … turn).                                                                              |
-| `injectInSubagents`            | bool                 | `true`                         | Copy parent memory into sub-agent (fork) sessions. Sub-agents never run the summarizer; they inherit a snapshot. Set `false` to keep sub-agents memory-free.                                                   |
-| `cleanFallbackToActiveSession` | bool                 | `false`                        | If clean summarizer fails, fall back to the active session model.                                                                                                                                              |
-| `includeAgentsMdOnFirstUpdate` | bool                 | `false`                        | Include `AGENTS.md` content in the first memory update prompt.                                                                                                                                                 |
-| `sideSessionRetries`           | number               | `1`                            | Retries for clean summarizer before giving up or falling back.                                                                                                                                                 |
-| `maxMemoryLength`              | number               | `10000`                        | Max characters stored in the memory file.                                                                                                                                                                      |
-| `maxUpdateInputLength`         | number               | `20000`                        | Max characters of conversation delta sent to the summarizer per chunk.                                                                                                                                         |
-| `maxDeltaMessages`             | number               | `200`                          | Max recent messages processed per update cycle. Caps look-back when a checkpoint is stale or lost. To rebuild from full history, run `/stm reset` then `/stm update`.                                          |
-| `collapseAssistantBursts`      | bool                 | `false`                        | When `true`, consecutive assistant messages between user turns are collapsed into the last visible assistant reply. When `false`, every assistant turn is kept (thinking/tool parts are still filtered).       |
-| `debounceMs`                   | number               | `1200`                         | Debounce before triggering an update after idle.                                                                                                                                                               |
-| `debug`                        | bool                 | `false`                        | Verbose logging. Set to `true` to enable debug output.                                                                                                                                                         |
-| `logMaxLines`                  | number               | `300`                          | Max lines kept in the log file.                                                                                                                                                                                |
-| `memoryDir`                    | string               | `".opencode/memory"`           | Directory for memory files, checkpoints, and logs (relative to project root). Keep identical across instances sharing sessions.                                                                                |
+| Key                            | Type                 | Default              | Description                                                                                                                                                                                                    |
+| ------------------------------ | -------------------- | -------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `enabled`                      | bool                 | `true`               | Enable/disable the plugin.                                                                                                                                                                                     |
+| `summarizerMode`               | `"clean"` `"active"` | `"clean"`            | **`clean`** — creates a separate side session via the OpenCode SDK API as a pure summarizer. **`active`** — uses the current session model. Clean mode isolates the summarizer from main-session instructions. |
+| `memoryModel`                  | string               | `""`                 | Empty inherits the active OpenCode session model by omitting the summary request override. Set a valid `provider/model` to explicitly override it.                                                             |
+| `remindEveryN`                 | number               | `4`                  | Inject memory every N user turns. `1` = every turn. After `/stm reset` the counter restarts at 0 (injection on 4th, 8th, … turn).                                                                              |
+| `injectInSubagents`            | bool                 | `true`               | Copy parent memory into sub-agent (fork) sessions. Sub-agents never run the summarizer; they inherit a snapshot. Set `false` to keep sub-agents memory-free.                                                   |
+| `cleanFallbackToActiveSession` | bool                 | `false`              | If clean summarizer fails, fall back to the active session model.                                                                                                                                              |
+| `includeAgentsMdOnFirstUpdate` | bool                 | `false`              | Include `AGENTS.md` content in the first memory update prompt.                                                                                                                                                 |
+| `sideSessionRetries`           | number               | `1`                  | Retries for clean summarizer before giving up or falling back.                                                                                                                                                 |
+| `maxMemoryLength`              | number               | `10000`              | Max characters stored in the memory file.                                                                                                                                                                      |
+| `maxUpdateInputLength`         | number               | `20000`              | Max characters of conversation delta sent to the summarizer per chunk.                                                                                                                                         |
+| `maxDeltaMessages`             | number               | `200`                | Max recent messages processed per update cycle. Caps look-back when a checkpoint is stale or lost. To rebuild from full history, run `/stm reset` then `/stm update`.                                          |
+| `collapseAssistantBursts`      | bool                 | `false`              | When `true`, consecutive assistant messages between user turns are collapsed into the last visible assistant reply. When `false`, every assistant turn is kept (thinking/tool parts are still filtered).       |
+| `debounceMs`                   | number               | `1200`               | Debounce before triggering an update after idle.                                                                                                                                                               |
+| `debug`                        | bool                 | `false`              | Verbose logging. Set to `true` to enable debug output.                                                                                                                                                         |
+| `logMaxLines`                  | number               | `300`                | Max lines kept in the log file.                                                                                                                                                                                |
+| `memoryDir`                    | string               | `".opencode/memory"` | Directory for memory files, checkpoints, and logs (relative to project root). Keep identical across instances sharing sessions.                                                                                |
 
 ## Usage
 
@@ -47,28 +47,31 @@ Memory summarization and injection is fully automated — the plugin watches the
 
 **User commands (`/stm ...`)**
 
-| Command         | Description                                                   |
-| --------------- | ------------------------------------------------------------- |
-| `/stm`          | Show plugin status (enabled state, counters, paths, mode).    |
-| `/stm show`     | Print the current session memory content.                     |
-| `/stm update`   | Force an immediate memory summarization from recent messages. |
-| `/stm reset`    | Clear memory and checkpoint for the current session.          |
-| `/stm logs`     | Print the last ~120 log entries.                              |
-| `/stm settings` | Dump the resolved config as JSON.                             |
+| Command                   | Description                                                    |
+| ------------------------- | -------------------------------------------------------------- |
+| `/stm`                    | Show plugin status (enabled state, counters, paths, mode).     |
+| `/stm show`               | Print the current session memory content.                      |
+| `/stm update`             | Force an immediate memory summarization from recent messages.  |
+| `/stm reset`              | Clear memory and checkpoint for the current session.           |
+| `/stm logs`               | Print the last ~120 log entries.                               |
+| `/stm settings`           | Dump the resolved config as JSON.                              |
+| `/stm setup`              | Show safe project-local setup guidance.                        |
+| `/stm setup confirm true` | Create `.opencode/stm.jsonc`; never overwrite existing config. |
 
 **Agent tools**
 
 Agents should use `stm_memory_read` when prior instructions, decisions, or constraints may affect the current task. This pull-first workflow retrieves the current session's stored memory only when it is relevant.
 
-| Tool                  | Description                                                                                                                          |
-| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| `stm_memory_read`     | Read the current session memory. Use when prior instructions, decisions, or constraints may matter.                                  |
-| `stm_memory_status`   | Show the current session's runtime and status information.                                                                           |
-| `stm_memory_update`   | Run an immediate memory update for the current session and return the resulting memory.                                              |
-| `stm_memory_reset`    | Destructively clear the current session memory and checkpoint. Requires `confirm: true`.                                             |
-| `stm_memory_logs`     | Show plugin logs. Logs may include sensitive content; do not disclose secrets or other sensitive information from them.              |
-| `stm_memory_settings` | Show the resolved STM configuration.                                                                                                 |
-| `short_term_memory`   | Legacy compatibility tool. Accepts an `action` for the same operations: `show`, `status`, `update`, `reset`, `logs`, and `settings`. |
+| Tool                  | Description                                                                                                              |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `stm_memory_read`     | Read the current session memory. Use when prior instructions, decisions, or constraints may matter.                      |
+| `stm_memory_status`   | Show the current session's runtime and status information.                                                               |
+| `stm_memory_update`   | Run an immediate memory update for the current session and return the resulting memory.                                  |
+| `stm_memory_reset`    | Destructively clear the current session memory and checkpoint. Requires `confirm: true`.                                 |
+| `stm_memory_logs`     | Show plugin logs. Logs may include sensitive content; do not disclose secrets or other sensitive information from them.  |
+| `stm_memory_settings` | Show the resolved STM configuration.                                                                                     |
+| `stm_memory_setup`    | Show setup guidance, or create project-local config with `confirm: true`; never overwrites existing config.              |
+| `short_term_memory`   | Legacy compatibility tool. Accepts an `action` for the same operations, including `setup` with optional `confirm: true`. |
 
 ## How it works
 
@@ -86,5 +89,5 @@ Why a separate session?
 
 - **Instruction isolation** — The side session requests an assistant-generated response with only the summarizer system prompt — never the main session's instructions, custom commands, or project rules.
 - **Clean chat** — Summarization prompts never appear in the main chat UI.
-- **Separate model** — The side session can use a different (often cheaper) model via `memoryModel`, keeping summarization costs low without affecting the main session's model choice.
+- **Inherited or separate model** — By default summary calls omit a model override and inherit the active OpenCode session model. Set `memoryModel` to a valid `provider/model` for an explicit, often cheaper override.
 - **Auto cleanup** — Side sessions are deleted immediately after summarization completes so they don't clutter the session list.

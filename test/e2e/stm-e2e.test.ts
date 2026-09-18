@@ -186,10 +186,7 @@ describe("orphan side sessions cleaned up on next opencode startup", () => {
     // After cleanup, the tracking file should be empty (both deletes succeed).
     expect(readSideSessionsState(ws)).toEqual([]);
 
-    // The global stm.jsonc (auto-created by ensureDefaultConfigFile under
-    // <XDG>/opencode/) MUST NOT have been written into the real user config.
-    // We assert this by checking that no file was created outside the
-    // workspace: STM_E2E_KEEP_TMP=1 leaves it, otherwise it's gone.
+    // Side-session cleanup remains scoped to the isolated workspace.
     expect(existsSync(statePath)).toBe(true);
   });
 });
@@ -218,11 +215,8 @@ describe("factory startup is <10ms under a live opencode", () => {
 describe("e2e tests do not pollute the user's global opencode config", () => {
   test("~/.config/opencode/stm.jsonc is not created by the e2e run", () => {
     if (!ENABLED) return;
-    // The harness redirects XDG_CONFIG_HOME to the test's temp dir, so
-    // the plugin's ensureDefaultConfigFile must write to <temp>/opencode/
-    // and never to the real $HOME/.config/opencode/. This is a hard
-    // invariant — if it ever breaks, the test suite is silently
-    // overwriting the developer's real config.
+    // Plugin startup must never create a global STM config. The isolated
+    // XDG_CONFIG_HOME is defense in depth; the real user config stays untouched.
     const realGlobal = join(homedir(), ".config", "opencode", "stm.jsonc");
     expect(existsSync(realGlobal)).toBe(false);
   });

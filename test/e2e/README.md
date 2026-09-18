@@ -44,10 +44,9 @@ scripts/
 The harness:
 
 1. `setupE2EWorkspace()` — `mkdtemp` a root dir, then create a sub-dir for
-   the project and one for the temp `XDG_CONFIG_HOME`. The plugin auto-creates
-   its `stm.jsonc` in `<XDG>/opencode/` (no global pollution), and the test
-   seeds a per-project `.opencode/stm.jsonc` so the test config wins over the
-   auto-created one.
+   the project and one for the temp `XDG_CONFIG_HOME`. The test seeds a
+   per-project `.opencode/stm.jsonc`; plugin startup does not create global
+   configuration.
 2. `enableStmPluginSymlink()` — symlinks `src/index.ts` into
    `<XDG>/opencode/plugins/opencode-short-term-memory.ts`. The user's real
    `~/.config/opencode/plugins/` is left untouched.

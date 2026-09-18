@@ -15,10 +15,14 @@ export interface CreateToolsContext {
 
 export function createTools(ctx: CreateToolsContext): Record<string, unknown> {
   const { cmdCtx, globalState, client, reloadConfigLocal, updateMemory } = ctx;
-  const executeAction = async (action: string, toolCtx: ToolContext): Promise<string> => {
+  const executeAction = async (
+    action: string,
+    toolCtx: ToolContext,
+    options: { confirm?: boolean } = {},
+  ): Promise<string> => {
     await reloadConfigLocal();
     const sessionID = getSessionID({}, toolCtx) || globalState.lastActiveSessionID;
-    return await executeMemoryAction(action, sessionID, cmdCtx, client, updateMemory);
+    return await executeMemoryAction(action, sessionID, cmdCtx, client, updateMemory, options);
   };
 
   return {
@@ -72,14 +76,25 @@ export function createTools(ctx: CreateToolsContext): Record<string, unknown> {
         return await executeAction("reset", toolCtx);
       },
     }),
+    stm_memory_setup: tool({
+      description:
+        "Create a project-local .opencode/stm.jsonc example without overwriting existing STM config. Requires confirm set to true.",
+      args: {
+        confirm: tool.schema.boolean().optional(),
+      },
+      async execute(args: { confirm?: boolean }, toolCtx: ToolContext) {
+        return await executeAction("setup", toolCtx, { confirm: args.confirm });
+      },
+    }),
     short_term_memory: tool({
       description:
-        "Inspect or control the short-term session memory plugin. Same interface as the /stm command. Actions: show, status, logs, update, reset, settings.",
+        "Inspect or control the short-term session memory plugin. Same interface as the /stm command. Actions: show, status, logs, update, reset, settings, setup.",
       args: {
         action: tool.schema.string(),
+        confirm: tool.schema.boolean().optional(),
       },
-      async execute(args: { action: string }, ctx: ToolContext) {
-        return await executeAction(args.action, ctx);
+      async execute(args: { action: string; confirm?: boolean }, ctx: ToolContext) {
+        return await executeAction(args.action, ctx, { confirm: args.confirm });
       },
     }),
   };

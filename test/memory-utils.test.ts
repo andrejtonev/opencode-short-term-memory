@@ -8,8 +8,8 @@ import {
   MEMORY_HEADER,
   appendText,
   clampText,
+  createProjectExampleConfig,
   ensureMemoryFile,
-  ensureDefaultConfigFile,
   getMessageText,
   getMessageTextFromParts,
   getSessionID,
@@ -132,6 +132,14 @@ describe("memory-utils general behavior", () => {
     expect(fallback).toEqual(DEFAULT_CONFIG);
   });
 
+  test("readConfig preserves empty model inheritance and explicit model overrides", async () => {
+    await writeText(join(".opencode", "stm.jsonc"), JSON.stringify({ memoryModel: "   " }));
+    expect((await readConfig()).memoryModel).toBe("");
+
+    await writeText(join(".opencode", "stm.jsonc"), JSON.stringify({ memoryModel: "openai/gpt-5.3" }));
+    expect((await readConfig()).memoryModel).toBe("openai/gpt-5.3");
+  });
+
   test("readConfig normalizes string booleans and numeric fields", async () => {
     await writeText(
       join(".opencode", "stm.json"),
@@ -228,29 +236,38 @@ describe("memory-utils general behavior", () => {
     expect(acceptable.has(final)).toBe(true);
   });
 
-  test("ensureDefaultConfigFile creates stm.jsonc when no config exists", async () => {
-    const opencodeDir = join(testDir, "new-project", ".opencode");
-    await ensureDefaultConfigFile(opencodeDir);
+  test("createProjectExampleConfig creates only a project-local stm.jsonc example", async () => {
+    const projectDir = join(testDir, "new-project");
+    const result = await createProjectExampleConfig(projectDir);
 
-    const created = await readText(join(opencodeDir, "stm.jsonc"), "");
+    expect(result.created).toBe(true);
+    expect(result.configPath).toBe(join(projectDir, ".opencode", "stm.jsonc"));
+    expect(result.message).toBe(`Created project example config at ${result.configPath}.`);
+    const created = await readText(result.configPath, "");
     expect(created).toContain('"enabled": true');
-    expect(created).toContain('"memoryModel":');
+    expect(created).toContain('"memoryModel": ""');
     expect(created).toContain('"summarizerMode": "clean"');
     expect(created).toContain('"remindEveryN": 4');
   });
 
-  test("ensureDefaultConfigFile does nothing when config already exists", async () => {
-    const opencodeDir = join(testDir, "existing-project", ".opencode");
-    await writeText(join(opencodeDir, "stm.json"), JSON.stringify({ debug: true }, null, 2));
+  for (const existingName of ["stm.jsonc", "stm.json"] as const) {
+    test(`createProjectExampleConfig refuses to overwrite existing ${existingName}`, async () => {
+      const projectDir = join(testDir, `existing-${existingName}`);
+      const opencodeDir = join(projectDir, ".opencode");
+      const existingPath = join(opencodeDir, existingName);
+      const existingContent = JSON.stringify({ debug: true }, null, 2);
+      await writeText(existingPath, existingContent);
 
-    await ensureDefaultConfigFile(opencodeDir);
+      const result = await createProjectExampleConfig(projectDir);
 
-    const existing = await readText(join(opencodeDir, "stm.json"), "");
-    expect(JSON.parse(existing).debug).toBe(true);
-
-    const jsonc = await readText(join(opencodeDir, "stm.jsonc"), "");
-    expect(jsonc).toBe("");
-  });
+      expect(result.created).toBe(false);
+      expect(result.message).toBe(`No example config created: ${existingName} already exists in ${opencodeDir}.`);
+      expect(await readText(existingPath, "")).toBe(existingContent);
+      if (existingName === "stm.json") {
+        expect(await readText(join(opencodeDir, "stm.jsonc"), "missing")).toBe("missing");
+      }
+    });
+  }
 
   test("resolveGlobalOpencodeDir returns XDG_CONFIG_HOME/opencode when set", () => {
     const dir = resolveGlobalOpencodeDir();

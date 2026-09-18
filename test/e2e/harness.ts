@@ -189,9 +189,7 @@ export interface StmSeedConfig {
 }
 
 export async function writeStmProjectConfig(ws: E2EWorkspace, cfg: StmSeedConfig = {}): Promise<void> {
-  // Atomic: ensure the parent dir exists, then write. The plugin's
-  // ensureDefaultConfigFile will skip seeding the global stm.jsonc because
-  // it sees this project-local file.
+  // Atomic: ensure the parent dir exists, then write the isolated project config.
   //
   // IMPORTANT: we write the memoryDir as an absolute path. The plugin's
   // config is loaded with the test's cwd (not the project dir), so a

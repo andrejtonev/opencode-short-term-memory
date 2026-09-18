@@ -32,7 +32,7 @@ const CONFIG_FILE_CANDIDATES = ["stm.jsonc", "stm.json"] as const;
 
 export const DEFAULT_CONFIG: SessionMemoryConfig = {
   enabled: true,
-  memoryModel: "opencode/minimax-m2.5-free",
+  memoryModel: "",
   summarizerMode: "clean",
   cleanFallbackToActiveSession: false,
   includeAgentsMdOnFirstUpdate: false,
@@ -265,21 +265,13 @@ async function findFirstExistingConfig(baseDir: string) {
   return undefined;
 }
 
-export async function ensureDefaultConfigFile(configDir: string) {
-  for (const fileName of CONFIG_FILE_CANDIDATES) {
-    const fullPath = join(configDir, fileName);
-    try {
-      const info = await stat(fullPath);
-      if (info.isFile()) return; // Config already exists
-    } catch {}
-  }
-
-  const defaultContent = `{
+const EXAMPLE_CONFIG_CONTENT = `{
   // Session memory plugin on/off
   "enabled": true,
 
-  // Model used by the summarizer (provider/model)
-  "memoryModel": "${DEFAULT_CONFIG.memoryModel}",
+  // Model used by the summarizer (provider/model). An empty value inherits
+  // the active OpenCode model; set this explicitly only to override it.
+  "memoryModel": "",
 
   // clean | active
   "summarizerMode": "${DEFAULT_CONFIG.summarizerMode}",
@@ -298,8 +290,73 @@ export async function ensureDefaultConfigFile(configDir: string) {
 }
 `;
 
-  await ensureDir(configDir);
-  await writeFile(join(configDir, "stm.jsonc"), defaultContent, "utf8");
+export type ExampleConfigResult = {
+  created: boolean;
+  configDir: string;
+  configPath: string;
+  message: string;
+};
+
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await stat(path);
+    return true;
+  } catch (error: unknown) {
+    if ((error as { code?: string })?.code === "ENOENT") return false;
+    throw error;
+  }
+}
+
+async function createExampleConfigFile(configDir: string): Promise<ExampleConfigResult> {
+  const configPath = join(configDir, "stm.jsonc");
+  return await withPathWriteLock(`example-config:${configDir}`, async () => {
+    for (const fileName of CONFIG_FILE_CANDIDATES) {
+      if (await pathExists(join(configDir, fileName))) {
+        return {
+          created: false,
+          configDir,
+          configPath,
+          message: `No example config created: ${fileName} already exists in ${configDir}.`,
+        };
+      }
+    }
+
+    await ensureDir(configDir);
+    let handle: Awaited<ReturnType<typeof open>>;
+    try {
+      handle = await open(configPath, "wx");
+    } catch (error: unknown) {
+      if ((error as { code?: string })?.code === "EEXIST") {
+        return {
+          created: false,
+          configDir,
+          configPath,
+          message: `No example config created: stm.jsonc already exists in ${configDir}.`,
+        };
+      }
+      throw error;
+    }
+
+    try {
+      await handle.writeFile(EXAMPLE_CONFIG_CONTENT, "utf8");
+    } finally {
+      await handle.close();
+    }
+
+    return {
+      created: true,
+      configDir,
+      configPath,
+      message: `Created project example config at ${configPath}.`,
+    };
+  });
+}
+
+/** Create a project-local example config after the caller has confirmed. */
+export async function createProjectExampleConfig(pluginBaseDir?: string): Promise<ExampleConfigResult> {
+  const baseDir = pluginBaseDir || process.cwd();
+  const configDir = baseDir.endsWith(".opencode") ? baseDir : join(baseDir, ".opencode");
+  return await createExampleConfigFile(configDir);
 }
 
 async function findOpencodeDir(startDir: string): Promise<string | undefined> {
