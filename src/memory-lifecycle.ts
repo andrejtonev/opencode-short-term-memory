@@ -60,6 +60,11 @@ export async function processMemoryChunks(
   recentEntries: VisibleDeltaEntry[],
   agentsMdContext: string,
   globalState: RuntimeState,
+  commitChunk?: (
+    previousMemory: string,
+    nextMemory: string,
+    checkpointID: string,
+  ) => Promise<"committed" | "stale" | "concurrent_change">,
 ): Promise<boolean> {
   const separator = "\n\n---\n\n";
   let index = 0;
@@ -179,23 +184,38 @@ export async function processMemoryChunks(
       return wroteMemory;
     }
 
-    const currentOnDisk = await readText(memoryPath, "");
-    if (currentOnDisk !== currentExisting && currentOnDisk.trim()) {
+    const checkpointID = chunkEntries[chunkEntries.length - 1]?.lastMessageID || "";
+    const commit =
+      commitChunk ??
+      (async (previousMemory: string, nextMemory: string, nextCheckpointID: string) => {
+        const currentOnDisk = await readText(memoryPath, "");
+        if (currentOnDisk !== previousMemory) return "concurrent_change" as const;
+        await writeTextAtomic(memoryPath, nextMemory);
+        try {
+          if (nextCheckpointID) {
+            await writeLastProcessedMessageID(sessionID, nextCheckpointID, config);
+          }
+        } catch (error) {
+          await writeTextAtomic(memoryPath, previousMemory);
+          throw error;
+        }
+        return "committed" as const;
+      });
+    const commitResult = await commit(currentExisting, next, checkpointID);
+    if (commitResult === "concurrent_change") {
       await logEvent(config, "memory_update_concurrent_change_detected", {
         sessionID,
         reason,
         bytesBefore: currentExisting.length,
-        bytesNow: currentOnDisk.length,
       });
-      currentExisting = currentOnDisk;
+      return wroteMemory;
+    }
+    if (commitResult === "stale") {
+      await logEvent(config, "memory_update_skipped", { sessionID, reason, detail: "stale_generation" });
+      return wroteMemory;
     }
 
-    await writeTextAtomic(memoryPath, next);
     wroteMemory = true;
-    const checkpointID = chunkEntries[chunkEntries.length - 1]?.lastMessageID || "";
-    if (checkpointID) {
-      await writeLastProcessedMessageID(sessionID, checkpointID, config);
-    }
     currentExisting = next;
     index += chunkEntries.length;
     globalState.updateCount += 1;

@@ -33,6 +33,7 @@ import {
   memoryPathFor,
   readText,
   removePath,
+  writeTextAtomic,
   sanitizeMessage,
   type SessionMemoryConfig,
   type RuntimeState,
@@ -42,13 +43,13 @@ import {
   SIDE_SESSION_TITLE,
 } from "./memory-utils";
 import { type ConfigContext, reloadConfig } from "./config";
-import { readLastProcessedMessageID, collectRecentVisibleMessages } from "./message-collector";
-import { parseMemoryActionFromCommandArgument, executeMemoryAction, type CommandContext } from "./commands";
 import {
-  appendChildMemoryToSystem,
-  deliverMemoryViaNoReply,
-  injectMemoryIntoSystemTransform,
-} from "./injection";
+  readLastProcessedMessageID,
+  writeLastProcessedMessageID,
+  collectRecentVisibleMessages,
+} from "./message-collector";
+import { parseMemoryActionFromCommandArgument, executeMemoryAction, type CommandContext } from "./commands";
+import { appendChildMemoryToSystem, deliverMemoryViaNoReply, injectMemoryIntoSystemTransform } from "./injection";
 import { createTools, type CreateToolsContext } from "./tools";
 
 import {
@@ -85,7 +86,7 @@ export const SessionMemoryPlugin = async ({
   const sessionStates = new Map<string, SessionRuntimeState>();
   const sessionStatesOrder: string[] = []; // LRU order
   let updateInFlight = new Set<string>();
-  let pendingUpdateAfterInFlight = new Set<string>();
+  let pendingUpdateAfterInFlight = new Map<string, number>();
   const configCtx: ConfigContext = {
     config: DEFAULT_CONFIG,
     cache: null,
@@ -106,11 +107,61 @@ export const SessionMemoryPlugin = async ({
   // I3 / I11 – Idle waiters per session
   const idleWaiters = new Map<string, IdleWaiter>();
 
-  // Deleted-session guard to prevent in-flight updates from recreating files
-  const deletedSessions = new Set<string>();
+  type SessionLifecycle = { generation: number; terminal: boolean; persistenceTail: Promise<void> };
+  const sessionLifecycles = new Map<string, SessionLifecycle>();
+
+  function lifecycleFor(sessionID: string): SessionLifecycle {
+    let lifecycle = sessionLifecycles.get(sessionID);
+    if (!lifecycle) {
+      lifecycle = { generation: 0, terminal: false, persistenceTail: Promise.resolve() };
+      sessionLifecycles.set(sessionID, lifecycle);
+    }
+    return lifecycle;
+  }
+
+  function isCurrentGeneration(sessionID: string, generation: number): boolean {
+    const lifecycle = lifecycleFor(sessionID);
+    return !lifecycle.terminal && lifecycle.generation === generation;
+  }
+
+  function invalidateSession(sessionID: string, terminal: boolean): SessionLifecycle {
+    const lifecycle = lifecycleFor(sessionID);
+    lifecycle.generation += 1;
+    lifecycle.terminal = terminal;
+    pendingUpdateAfterInFlight.delete(sessionID);
+    const state = sessionStates.get(sessionID);
+    if (state?.timer) {
+      clearTimeout(state.timer);
+      state.timer = undefined;
+    }
+    return lifecycle;
+  }
+
+  async function withPersistenceLock<T>(sessionID: string, operation: () => Promise<T>): Promise<T> {
+    const lifecycle = lifecycleFor(sessionID);
+    const previous = lifecycle.persistenceTail;
+    let release!: () => void;
+    const current = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const queued = previous.then(() => current);
+    lifecycle.persistenceTail = queued;
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      release();
+      if (lifecycle.persistenceTail === queued) lifecycle.persistenceTail = Promise.resolve();
+    }
+  }
+
+  function isSessionTerminal(sessionID: string): boolean {
+    return lifecycleFor(sessionID).terminal;
+  }
 
   // ── Context wrappers for session-state module ──────────
-  const isBusyCtx = (sid: string) => isSessionBusy(sid, sessionStates, updateInFlight, pendingUpdateAfterInFlight);
+  const isBusyCtx = (sid: string) =>
+    isSessionBusy(sid, sessionStates, updateInFlight, new Set(pendingUpdateAfterInFlight.keys()));
   const waitForIdleCtx = (sid: string, ms: number) => waitForSessionIdle(sid, ms, isBusyCtx, idleWaiters);
 
   // ── Initialisation helpers inside factory ────────────────
@@ -123,6 +174,17 @@ export const SessionMemoryPlugin = async ({
     sessionStates,
     globalState,
     clearSessionDeliveryMetadata: (sessionID) => childDeliveryMetadata.delete(sessionID),
+    resetSessionPersistence: async (sessionID, resetConfig) => {
+      const lifecycle = invalidateSession(sessionID, false);
+      const generation = lifecycle.generation;
+      await withPersistenceLock(sessionID, async () => {
+        if (!isCurrentGeneration(sessionID, generation)) return;
+        await removePath(memoryPathFor(sessionID, resetConfig.memoryDir));
+        await removePath(checkpointPathFor(sessionID, resetConfig.memoryDir));
+        if (!isCurrentGeneration(sessionID, generation)) return;
+        await ensureMemoryFile(sessionID, resetConfig);
+      });
+    },
   };
   let backgroundInitPromise: Promise<void> | undefined;
   let backgroundInitDone = false;
@@ -293,13 +355,19 @@ export const SessionMemoryPlugin = async ({
   }
 
   // ── Helper functions that require instance state ──────────
-  function scheduleMemoryUpdate(client: Client, sessionID: string, reason: string, config: SessionMemoryConfig) {
-    if (deletedSessions.has(sessionID)) return;
+  function scheduleMemoryUpdate(
+    client: Client,
+    sessionID: string,
+    reason: string,
+    config: SessionMemoryConfig,
+    schedulingGeneration = lifecycleFor(sessionID).generation,
+  ) {
+    if (!isCurrentGeneration(sessionID, schedulingGeneration)) return;
     const s = ensureSessionState(sessionID, sessionStates, sessionStatesOrder, MAX_SESSION_STATES);
     if (s.timer) clearTimeout(s.timer);
     s.timer = setTimeout(() => {
       s.timer = undefined;
-      updateMemory(client, sessionID, reason, config).catch(async (error) => {
+      updateMemory(client, sessionID, reason, config, schedulingGeneration).catch(async (error) => {
         globalState.lastError = (error as Error).message;
         showToast(client, "Session Memory", "Summarization failed — check /stm logs for details.");
         await logEvent(config, "memory_update_uncaught_error", { sessionID, error: globalState.lastError });
@@ -309,7 +377,7 @@ export const SessionMemoryPlugin = async ({
 
   async function attemptPendingMainDcpDelivery(client: Client, sessionID: string, config: SessionMemoryConfig) {
     const s = sessionStates.get(sessionID);
-    if (!s?.mainDcpDeliveryPending || !s.lastDcpCompressAt || deletedSessions.has(sessionID)) return;
+    if (!s?.mainDcpDeliveryPending || !s.lastDcpCompressAt || isSessionTerminal(sessionID)) return;
 
     const dcpIdentity = s.lastDcpCompressAt;
     const memoryRevision = s.memoryRevision;
@@ -332,8 +400,11 @@ export const SessionMemoryPlugin = async ({
     sessionID: string,
     reason: string,
     config: SessionMemoryConfig,
+    schedulingGeneration?: number,
   ): Promise<boolean> {
     if (!config.enabled) return false;
+    const operationGeneration = schedulingGeneration ?? lifecycleFor(sessionID).generation;
+    if (!isCurrentGeneration(sessionID, operationGeneration)) return false;
 
     // Sub-agent sessions never update memory
     if (sessionParents.has(sessionID)) {
@@ -341,13 +412,13 @@ export const SessionMemoryPlugin = async ({
       return false;
     }
 
-    if (deletedSessions.has(sessionID)) {
+    if (isSessionTerminal(sessionID)) {
       await logEvent(config, "memory_update_skipped", { sessionID, reason, detail: "session_deleted" });
       return false;
     }
 
     if (updateInFlight.has(sessionID)) {
-      pendingUpdateAfterInFlight.add(sessionID);
+      pendingUpdateAfterInFlight.set(sessionID, operationGeneration);
       await logEvent(config, "memory_update_skipped", { sessionID, reason, detail: "update_in_flight" });
       return false;
     }
@@ -357,8 +428,14 @@ export const SessionMemoryPlugin = async ({
     try {
       // Outer try/catch to record any unexpected error
       try {
-        const memoryPath = await ensureMemoryFile(sessionID, config);
-        let existing = await readText(memoryPath, "");
+        const prepared = await withPersistenceLock(sessionID, async () => {
+          if (!isCurrentGeneration(sessionID, operationGeneration)) return undefined;
+          const memoryPath = await ensureMemoryFile(sessionID, config);
+          if (!isCurrentGeneration(sessionID, operationGeneration)) return undefined;
+          return { memoryPath, existing: await readText(memoryPath, "") };
+        });
+        if (!prepared) return false;
+        const { memoryPath, existing } = prepared;
         const isFirstUpdateForSession = !(await readLastProcessedMessageID(sessionID, config));
         const agentsMdContextRaw =
           config.includeAgentsMdOnFirstUpdate && isFirstUpdateForSession
@@ -378,11 +455,11 @@ export const SessionMemoryPlugin = async ({
           deltaEntries: recent.entries.length,
         });
 
-        if (deletedSessions.has(sessionID)) {
+        if (!isCurrentGeneration(sessionID, operationGeneration)) {
           await logEvent(config, "memory_update_skipped", {
             sessionID,
             reason,
-            detail: "session_deleted_during_collection",
+            detail: "stale_generation_after_collection",
           });
           return false;
         }
@@ -398,7 +475,28 @@ export const SessionMemoryPlugin = async ({
           recent.entries,
           agentsMdContext,
           globalState,
+          async (previousMemory, nextMemory, checkpointID) =>
+            await withPersistenceLock(sessionID, async () => {
+              if (!isCurrentGeneration(sessionID, operationGeneration)) return "stale";
+              const currentOnDisk = await readText(memoryPath, "");
+              if (currentOnDisk !== previousMemory) return "concurrent_change";
+              if (!isCurrentGeneration(sessionID, operationGeneration)) return "stale";
+              await writeTextAtomic(memoryPath, nextMemory);
+              try {
+                if (checkpointID) {
+                  if (!isCurrentGeneration(sessionID, operationGeneration)) return "stale";
+                  await writeLastProcessedMessageID(sessionID, checkpointID, config);
+                }
+              } catch (error) {
+                if (isCurrentGeneration(sessionID, operationGeneration)) {
+                  await writeTextAtomic(memoryPath, previousMemory);
+                }
+                throw error;
+              }
+              return isCurrentGeneration(sessionID, operationGeneration) ? "committed" : "stale";
+            }),
         );
+        if (!isCurrentGeneration(sessionID, operationGeneration)) wroteMemory = false;
         if (wroteMemory) {
           const s = ensureSessionState(sessionID, sessionStates, sessionStatesOrder, MAX_SESSION_STATES);
           bumpMemoryRevision(s);
@@ -420,9 +518,12 @@ export const SessionMemoryPlugin = async ({
         } catch {}
       }
       updateInFlight.delete(sessionID);
-      if (pendingUpdateAfterInFlight.has(sessionID)) {
+      const replayGeneration = pendingUpdateAfterInFlight.get(sessionID);
+      if (replayGeneration !== undefined) {
         pendingUpdateAfterInFlight.delete(sessionID);
-        scheduleMemoryUpdate(client, sessionID, "post_in_flight_replay", config);
+        if (isCurrentGeneration(sessionID, replayGeneration)) {
+          scheduleMemoryUpdate(client, sessionID, "post_in_flight_replay", config, replayGeneration);
+        }
       } else if (!isBusyCtx(sessionID)) {
         notifySessionIdle(sessionID, idleWaiters);
       }
@@ -474,7 +575,7 @@ export const SessionMemoryPlugin = async ({
           const sessionID =
             props?.sessionID && typeof props.sessionID === "string" ? props.sessionID : getSessionID(input);
           if (sessionID) {
-            if (deletedSessions.has(sessionID)) return;
+            if (isSessionTerminal(sessionID)) return;
             if (sessionParents.has(sessionID)) {
               const metadata = childDeliveryMetadata.get(sessionID);
               if (metadata) metadata.dcpInjectionPending = true;
@@ -494,7 +595,7 @@ export const SessionMemoryPlugin = async ({
 
             // If an update is already in-flight, queue a pending replay
             if (updateInFlight.has(sessionID)) {
-              pendingUpdateAfterInFlight.add(sessionID);
+              pendingUpdateAfterInFlight.set(sessionID, lifecycleFor(sessionID).generation);
               await logEvent(config, "dcp_compress_queued_after_inflight", { sessionID });
               return;
             }
@@ -508,7 +609,7 @@ export const SessionMemoryPlugin = async ({
       if (config.enabled && name === "session.idle") {
         const sessionID = getSessionID(evt) || getSessionID(input);
         if (sessionID) {
-          if (deletedSessions.has(sessionID)) return;
+          if (isSessionTerminal(sessionID)) return;
           if (sessionParents.has(sessionID)) return;
           const s = ensureSessionState(sessionID, sessionStates, sessionStatesOrder, MAX_SESSION_STATES);
           const now = Date.now();
@@ -563,7 +664,11 @@ export const SessionMemoryPlugin = async ({
       const info = input?.event?.properties?.info;
       const parentID = info?.parentID;
 
-      deletedSessions.delete(sessionID);
+      const lifecycle = lifecycleFor(sessionID);
+      if (lifecycle.terminal) {
+        lifecycle.generation += 1;
+        lifecycle.terminal = false;
+      }
       globalState.lastActiveSessionID = sessionID;
       await ensureMemoryFile(sessionID, config);
 
@@ -604,7 +709,7 @@ export const SessionMemoryPlugin = async ({
       await reloadConfigLocal();
       const sessionID = getSessionID(input);
       if (!sessionID) return;
-      if (deletedSessions.has(sessionID)) return;
+      if (isSessionTerminal(sessionID)) return;
       globalState.lastActiveSessionID = sessionID;
       await ensureMemoryFile(sessionID, config);
       await logEvent(config, "session_updated", { sessionID });
@@ -613,16 +718,18 @@ export const SessionMemoryPlugin = async ({
     },
 
     "session.deleted": async (input: SessionDeletedInput) => {
-      await reloadConfigLocal();
       const sessionID = getSessionID(input);
       if (!sessionID) return;
-      deletedSessions.add(sessionID);
+      invalidateSession(sessionID, true);
       const children = parentToChildren.get(sessionID);
       if (children) {
-        for (const child of children) deletedSessions.add(child);
+        for (const child of children) invalidateSession(child, true);
       }
-      await removePath(memoryPathFor(sessionID, config.memoryDir));
-      await removePath(checkpointPathFor(sessionID, config.memoryDir));
+      await reloadConfigLocal();
+      await withPersistenceLock(sessionID, async () => {
+        await removePath(memoryPathFor(sessionID, config.memoryDir));
+        await removePath(checkpointPathFor(sessionID, config.memoryDir));
+      });
       // Clean up per‑session runtime state
       const s = sessionStates.get(sessionID);
       if (s?.timer) clearTimeout(s.timer);
@@ -632,8 +739,10 @@ export const SessionMemoryPlugin = async ({
       sessionParents.delete(sessionID);
       if (children) {
         for (const child of children) {
-          await removePath(memoryPathFor(child, config.memoryDir));
-          await removePath(checkpointPathFor(child, config.memoryDir));
+          await withPersistenceLock(child, async () => {
+            await removePath(memoryPathFor(child, config.memoryDir));
+            await removePath(checkpointPathFor(child, config.memoryDir));
+          });
           sessionParents.delete(child);
           childDeliveryMetadata.delete(child);
           const childState = sessionStates.get(child);
@@ -670,7 +779,7 @@ export const SessionMemoryPlugin = async ({
       if (!config.enabled) return;
       const sessionID = getSessionID(input);
       if (!sessionID) return;
-      if (deletedSessions.has(sessionID)) return;
+      if (isSessionTerminal(sessionID)) return;
       globalState.lastActiveSessionID = sessionID;
       await ensureMemoryFile(sessionID, config);
 
@@ -687,7 +796,7 @@ export const SessionMemoryPlugin = async ({
 
       const sessionID = input.sessionID || globalState.lastActiveSessionID;
       if (!sessionID) return;
-      if (deletedSessions.has(sessionID)) return;
+      if (isSessionTerminal(sessionID)) return;
       if (sessionParents.has(sessionID)) return;
 
       // Cast to access the message property (not in official SDK types yet)
@@ -722,7 +831,8 @@ export const SessionMemoryPlugin = async ({
         output?.message?.id ||
         output?.id;
       const s = ensureSessionState(sessionID, sessionStates, sessionStatesOrder, MAX_SESSION_STATES);
-      const hasRuntimeTurnID = runtimeTurnID !== undefined && runtimeTurnID !== null && String(runtimeTurnID).length > 0;
+      const hasRuntimeTurnID =
+        runtimeTurnID !== undefined && runtimeTurnID !== null && String(runtimeTurnID).length > 0;
       if (!hasRuntimeTurnID) s.userTurnInvocationSequence += 1;
       const turnID = hasRuntimeTurnID ? String(runtimeTurnID) : `anonymous:${s.userTurnInvocationSequence}`;
       const isDistinctTurn = rememberCanonicalTurn(s, turnID);
@@ -759,7 +869,7 @@ export const SessionMemoryPlugin = async ({
         await logEvent(config, "memory_inject_skipped", { reason: "missing_session_id" });
         return;
       }
-      if (deletedSessions.has(sessionID)) return;
+      if (isSessionTerminal(sessionID)) return;
       if (sessionParents.has(sessionID)) {
         if (!config.injectInSubagents) return;
         const metadata = childDeliveryMetadata.get(sessionID);
@@ -792,7 +902,7 @@ export const SessionMemoryPlugin = async ({
       await reloadConfigLocal();
       const sessionID = getSessionID(input) || globalState.lastActiveSessionID;
       if (!sessionID || !config.enabled) return;
-      if (deletedSessions.has(sessionID)) return;
+      if (isSessionTerminal(sessionID)) return;
       globalState.compactCount += 1;
       await ensureMemoryFile(sessionID, config);
 

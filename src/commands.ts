@@ -25,6 +25,7 @@ export interface CommandContext {
   sessionStates: Map<string, SessionRuntimeState>;
   globalState: RuntimeState;
   clearSessionDeliveryMetadata?: (sessionID: string) => void;
+  resetSessionPersistence?: (sessionID: string, config: SessionMemoryConfig) => Promise<void>;
 }
 
 export async function statusText(sessionID: string | undefined, ctx: CommandContext): Promise<string> {
@@ -95,9 +96,13 @@ export async function executeMemoryAction(
     return await readText(memoryPathFor(sessionID, config.memoryDir), "No memory file found.");
   }
   if (action === "reset") {
-    await removePath(memoryPathFor(sessionID, config.memoryDir));
-    await removePath(checkpointPathFor(sessionID, config.memoryDir));
-    await ensureMemoryFile(sessionID, config);
+    if (ctx.resetSessionPersistence) {
+      await ctx.resetSessionPersistence(sessionID, config);
+    } else {
+      await removePath(memoryPathFor(sessionID, config.memoryDir));
+      await removePath(checkpointPathFor(sessionID, config.memoryDir));
+      await ensureMemoryFile(sessionID, config);
+    }
     const s = sessionStates.get(sessionID);
     if (s) resetSessionDeliveryState(s);
     ctx.clearSessionDeliveryMetadata?.(sessionID);
