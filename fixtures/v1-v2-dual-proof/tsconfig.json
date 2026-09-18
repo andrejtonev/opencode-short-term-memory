@@ -8,5 +8,5 @@
     "skipLibCheck": true,
     "types": ["bun"]
   },
-  "include": ["index.ts", "index.test.ts"]
+  "include": ["host-load-matrix.ts", "index.ts", "index.test.ts"]
 }

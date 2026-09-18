@@ -3,6 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "host-load-matrix": "bun host-load-matrix.ts",
     "test": "bun test --isolate index.test.ts",
     "typecheck": "tsc -p tsconfig.json"
   },
