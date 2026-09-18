@@ -966,8 +966,8 @@ describe("SessionMemoryPlugin general functionality", () => {
       message: { role: "assistant", content: `${INJECTION_PREFIX}\ninternal` },
     } as any);
     await plugin["chat.message"](
-      { sessionID, message: { role: "user", content: "hi" } } as any,
-      { message: { role: "assistant", content: "## Session Memory" } } as any,
+      { sessionID, message: { role: "user", content: `${INJECTION_PREFIX}\ninternal` } } as any,
+      { message: { role: "assistant", content: "ignored" } } as any,
     );
 
     const logText = await readText(join(".opencode", "memory", "session-memory.log"), "");
