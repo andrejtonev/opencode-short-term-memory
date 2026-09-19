@@ -1,187 +1,122 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 
 const BUN = process.execPath;
+const FIXTURE = import.meta.dir;
 const HOSTS = [
   {
     generation: "V1",
     packageName: "opencode-ai",
     version: "1.14.25",
-    binary: ["node_modules", "opencode-ai", "bin", ".opencode"],
-    expectedMarker: "server.marker",
+    binary: ["bin", ".opencode"],
+    marker: "server.marker",
   },
   {
     generation: "V2",
     packageName: "@opencode/cli",
     version: "2.0.8",
-    binary: ["node_modules", "@opencode", "cli", "bin", "opencode.exe"],
-    expectedMarker: "setup.marker",
+    binary: ["bin", "opencode.exe"],
+    marker: "setup.marker",
   },
 ] as const;
 
-function run(
-  command: string,
-  args: string[],
-  cwd: string,
-  env = process.env,
-  acceptedStatuses: readonly number[] = [0],
-) {
-  const result = spawnSync(command, args, {
-    cwd,
-    env,
-    encoding: "utf8",
-    timeout: 120_000,
-  });
-  const rendered = [command, ...args].join(" ");
+function run(command: string, args: string[], cwd: string, env: Record<string, string>) {
+  const rendered = `${command} ${args.join(" ")}`;
   console.log(`$ ${rendered}`);
+  const result = spawnSync(command, args, { cwd, env, encoding: "utf8", timeout: 120_000 });
   if (result.stdout.trim()) console.log(result.stdout.trim());
   if (result.stderr.trim()) console.log(result.stderr.trim());
   if (result.error) throw result.error;
-  if (!acceptedStatuses.includes(result.status ?? -1)) {
-    throw new Error(`${rendered} exited with status ${String(result.status)}`);
-  }
-  return result;
+  if (result.status !== 0) throw new Error(`${rendered} exited with status ${String(result.status)}`);
 }
 
-function isolatedEnvironment(root: string, markerDirectory: string) {
-  const directories = {
+function isolatedEnvironment(root: string, markers: string) {
+  const env = {
     HOME: join(root, "home"),
-    XDG_CONFIG_HOME: join(root, "config"),
-    XDG_DATA_HOME: join(root, "data"),
-    XDG_CACHE_HOME: join(root, "cache"),
-    XDG_STATE_HOME: join(root, "state"),
+    XDG_CONFIG_HOME: join(root, "xdg-config"),
+    XDG_DATA_HOME: join(root, "xdg-data"),
+    XDG_CACHE_HOME: join(root, "xdg-cache"),
+    XDG_STATE_HOME: join(root, "xdg-state"),
+    XDG_RUNTIME_DIR: join(root, "xdg-runtime"),
     TMPDIR: join(root, "tmp"),
-  };
-  for (const directory of Object.values(directories)) mkdirSync(directory, { recursive: true });
-  return {
-    ...directories,
-    PATH: "/home/dev/.bun/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+    TMP: join(root, "tmp"),
+    TEMP: join(root, "tmp"),
+    PATH: [dirname(BUN), process.env.PATH].filter(Boolean).join(delimiter),
     NO_COLOR: "1",
-    STM_HOST_MARKER_DIR: markerDirectory,
+    STM_HOST_MARKER_DIR: markers,
   };
+  for (const directory of new Set(Object.values(env).filter((value) => value.startsWith(root)))) {
+    mkdirSync(directory, { recursive: true });
+  }
+  return env;
 }
 
-function installHost(root: string, host: (typeof HOSTS)[number]) {
-  const installDirectory = join(root, "install");
-  mkdirSync(installDirectory, { recursive: true });
+function installHost(root: string, host: (typeof HOSTS)[number], env: Record<string, string>) {
+  const install = join(root, "install");
+  mkdirSync(install, { recursive: true });
   writeFileSync(
-    join(installDirectory, "package.json"),
-    `${JSON.stringify(
-      {
-        private: true,
-        trustedDependencies: [host.packageName],
-        dependencies: { [host.packageName]: host.version },
-      },
-      null,
-      2,
-    )}\n`,
+    join(install, "package.json"),
+    `${JSON.stringify({ private: true, trustedDependencies: [host.packageName], dependencies: { [host.packageName]: host.version } })}\n`,
   );
-  run(BUN, ["install", "--exact"], installDirectory);
-
-  const packageJsonPath = join(installDirectory, "node_modules", ...host.packageName.split("/"), "package.json");
-  const installedVersion = JSON.parse(readFileSync(packageJsonPath, "utf8")).version;
-  if (installedVersion !== host.version) {
-    throw new Error(`${host.generation} installed ${String(installedVersion)}, expected ${host.version}`);
-  }
-  return join(installDirectory, ...host.binary);
+  run(BUN, ["install", "--exact"], install, env);
+  const packageRoot = join(install, "node_modules", ...host.packageName.split("/"));
+  const manifest = JSON.parse(readFileSync(join(packageRoot, "package.json"), "utf8")) as { version: string };
+  if (manifest.version !== host.version) throw new Error(`installed ${manifest.version}, expected ${host.version}`);
+  return join(packageRoot, ...host.binary);
 }
 
 function runHost(root: string, host: (typeof HOSTS)[number]) {
-  const markerDirectory = join(root, "markers");
-  const projectDirectory = join(root, "project");
-  mkdirSync(markerDirectory, { recursive: true });
-  mkdirSync(projectDirectory, { recursive: true });
-
-  const pluginDirectory = join(projectDirectory, "dual-host-proof");
-  const pluginPath = join(pluginDirectory, "index.js");
-  mkdirSync(pluginDirectory);
-  writeFileSync(join(pluginDirectory, "package.json"), '{"type":"module"}\n');
+  const markers = join(root, "markers");
+  const project = join(root, "project");
+  mkdirSync(markers, { recursive: true });
+  mkdirSync(project, { recursive: true });
+  const plugin = host.generation === "V1" ? pathToFileURL(join(FIXTURE, "index.ts")).href : FIXTURE;
   writeFileSync(
-    pluginPath,
-    `import { writeFileSync } from "node:fs";
-import { join } from "node:path";
-
-const markers = process.env.STM_HOST_MARKER_DIR;
-if (!markers) throw new Error("STM_HOST_MARKER_DIR is required");
-
-export default {
-  id: "opencode-short-term-memory-host-load-proof",
-  async server() {
-    writeFileSync(join(markers, "server.marker"), "V1 server selected\\n");
-    return {};
-  },
-  async setup() {
-    writeFileSync(join(markers, "setup.marker"), "V2 setup selected\\n");
-  },
-};
-`,
+    join(project, "opencode.json"),
+    `${JSON.stringify({ [host.generation === "V1" ? "plugin" : "plugins"]: [plugin] })}\n`,
   );
-  writeFileSync(
-    join(projectDirectory, "opencode.json"),
-    `${JSON.stringify(
-      {
-        [host.generation === "V1" ? "plugin" : "plugins"]: [
-          host.generation === "V1" ? pathToFileURL(pluginPath).href : pluginDirectory,
-        ],
-      },
-      null,
-      2,
-    )}\n`,
-  );
+  const env = isolatedEnvironment(root, markers);
+  const binary = installHost(root, host, env);
 
-  const binary = installHost(root, host);
-  const env = isolatedEnvironment(root, markerDirectory);
-  let result: ReturnType<typeof run> | undefined;
   if (host.generation === "V2") {
     let primaryFailure: unknown;
-    let failed = false;
     try {
-      result = run(binary, ["debug", "config"], projectDirectory, env);
-      run(binary, ["plugin", "list"], projectDirectory, env);
+      run(binary, ["debug", "config"], project, env);
+      run(binary, ["plugin", "list"], project, env);
     } catch (error) {
-      failed = true;
       primaryFailure = error;
     } finally {
       try {
-        run(binary, ["service", "stop"], projectDirectory, env);
-      } catch (cleanupError) {
-        if (!failed) throw cleanupError;
+        run(binary, ["service", "stop"], project, env);
+      } catch (stopFailure) {
+        if (!primaryFailure) throw stopFailure;
+        console.error(`V2 service stop also failed: ${String(stopFailure)}`);
       }
     }
-    if (failed) throw primaryFailure;
-    if (result === undefined) throw new Error("V2 debug config did not produce a result");
+    if (primaryFailure) throw primaryFailure;
   } else {
-    result = run(binary, ["debug", "config"], projectDirectory, env);
+    run(binary, ["debug", "config"], project, env);
   }
-  const markers = ["server.marker", "setup.marker"].filter((marker) => existsSync(join(markerDirectory, marker)));
-  if (markers.length !== 1 || markers[0] !== host.expectedMarker) {
-    throw new Error(
-      `${host.generation} produced markers [${markers.join(", ")}], expected only ${host.expectedMarker}`,
-    );
+
+  const observed = ["server.marker", "setup.marker"].filter((marker) => existsSync(join(markers, marker)));
+  if (observed.length !== 1 || observed[0] !== host.marker) {
+    throw new Error(`${host.generation} markers: [${observed.join(", ")}], expected only ${host.marker}`);
   }
-  console.log(
-    `${host.generation} ${host.packageName}@${host.version}: ${host.expectedMarker} (${readFileSync(
-      join(markerDirectory, host.expectedMarker),
-      "utf8",
-    ).trim()})`,
-  );
-  return result;
+  console.log(`${host.generation} ${host.packageName}@${host.version}: only ${host.marker}`);
 }
 
-const sandboxParent = join(tmpdir(), "opencode");
-mkdirSync(sandboxParent, { recursive: true });
-const sandbox = mkdtempSync(join(sandboxParent, "stm-v1-v2-host-load-"));
+const parent = join(tmpdir(), "opencode");
+mkdirSync(parent, { recursive: true });
+const sandbox = mkdtempSync(join(parent, "stm-v1-v2-host-load-"));
 console.log(`sandbox: ${sandbox}`);
 try {
-  for (const host of HOSTS) {
-    console.log(`\n=== ${host.generation}: ${host.packageName}@${host.version} ===`);
-    runHost(join(sandbox, host.generation.toLowerCase()), host);
-  }
-  console.log("\nVERDICT: PASS - V1 selected server only; V2 selected setup only.");
-} finally {
+  for (const host of HOSTS) runHost(join(sandbox, host.generation.toLowerCase()), host);
   rmSync(sandbox, { recursive: true, force: true });
-  console.log(`cleanup: removed ${sandbox}`);
+  console.log(`VERDICT: PASS; removed successful sandbox ${sandbox}`);
+} catch (error) {
+  console.error(`VERDICT: FAIL; retained evidence at ${sandbox}`);
+  throw error;
 }

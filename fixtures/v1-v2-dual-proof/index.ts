@@ -1,11 +1,22 @@
 import type { Plugin } from "@opencode/plugin";
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
 
-const legacyV1Server = async () => ({});
+function markHostSelection(marker: string) {
+  const directory = process.env.STM_HOST_MARKER_DIR;
+  if (directory) writeFileSync(join(directory, marker), `${marker}\n`);
+}
+
+const legacyV1Server = async () => {
+  markHostSelection("server.marker");
+  return {};
+};
 
 const dualRuntimeProof = {
   id: "opencode-short-term-memory-dual-proof",
   server: legacyV1Server,
   async setup(context) {
+    markHostSelection("setup.marker");
     const location = context.location;
 
     await context.session.hook("context", () => {
