@@ -1,6 +1,6 @@
 import { join } from "node:path";
 import { rm } from "node:fs/promises";
-import SessionMemoryPlugin from "../src/session-memory";
+import SessionMemoryPlugin from "../src/v1-adapter";
 import { DEFAULT_CONFIG, INJECTION_PREFIX, writeText } from "../src/memory-utils";
 import type { Client } from "../src/types";
 

@@ -9,12 +9,14 @@ type SessionMethod = "abort" | "create" | "delete" | "get" | "list" | "messages"
 const expectedCapabilities = {
   readSessionMetadata: true,
   readSessionHistory: true,
+  readSessionMessages: true,
   readSessionContext: false,
   deliverGeneratedPrompt: true,
   deliverContextNoReply: true,
   createTemporarySession: true,
   abortTemporarySession: true,
   deleteTemporarySession: true,
+  deleteTemporarySessionForCleanup: true,
   listTemporarySessions: true,
   getTemporarySession: true,
   registerSystemContextMutation: true,
@@ -122,22 +124,50 @@ describe("runtime contract V1 conformance", () => {
     expect(Object.isFrozen(history.messages)).toBe(true);
   });
 
+  test("delegates message reads with an optional limit without reading session metadata", async () => {
+    const { fake, runtime } = createFixture();
+    const messages = [{ info: { id: "message" }, parts: [] }];
+    fake.respond("messages", { data: messages });
+
+    const withoutLimit = await runtime.readSessionMessages("messages-id");
+    const withLimit = await runtime.readSessionMessages("limited-messages-id", { limit: 7 });
+
+    expect(fake.calls.messages).toEqual([
+      { path: { id: "messages-id" } },
+      { path: { id: "limited-messages-id" }, query: { limit: 7 } },
+    ]);
+    expect(fake.calls.get).toEqual([]);
+    expect(withoutLimit).toEqual(messages);
+    expect(withoutLimit).not.toBe(messages);
+    expect(withLimit).toEqual(messages);
+    expect(withLimit).not.toBe(messages);
+    expect(Object.isFrozen(withoutLimit)).toBe(true);
+    expect(Object.isFrozen(withLimit)).toBe(true);
+  });
+
   test("delegates prompt delivery with exact generated and noReply payloads", async () => {
     const { fake, runtime } = createFixture();
     const generated = { parts: [{ type: "text", text: "generated" }] } satisfies Parameters<
       typeof runtime.deliverGeneratedPrompt
     >[0]["prompt"];
+    const generatedResponse = { data: { id: "generated-response" } };
+    const controller = new AbortController();
     const context = { parts: [{ type: "text", text: "context" }] } satisfies Parameters<
       typeof runtime.deliverContextNoReply
     >[0]["context"];
+    fake.respond("prompt", generatedResponse);
 
-    await runtime.deliverGeneratedPrompt({ sessionId: "generated-id", prompt: generated });
+    await expect(
+      runtime.deliverGeneratedPrompt({ sessionId: "generated-id", prompt: generated, signal: controller.signal }),
+    ).resolves.toBe(generatedResponse);
     await runtime.deliverContextNoReply({ sessionId: "context-id", context, noReply: true });
 
     expect(fake.calls.prompt).toEqual([
-      { path: { id: "generated-id" }, body: generated },
+      { path: { id: "generated-id" }, body: generated, signal: controller.signal },
       { path: { id: "context-id" }, body: { ...context, noReply: true } },
     ]);
+    expect(fake.calls.prompt[0]).not.toHaveProperty("body.signal");
+    expect(fake.calls.prompt[1]).toEqual({ path: { id: "context-id" }, body: { ...context, noReply: true } });
   });
 
   test("delegates temporary session lifecycle and filters list locally", async () => {
@@ -175,10 +205,73 @@ describe("runtime contract V1 conformance", () => {
     expect(Object.isFrozen(all)).toBe(true);
   });
 
+  test("returns frozen cleanup deletion outcomes with exact request and error identity", async () => {
+    const success = createFixture();
+
+    const deleted = await success.runtime.deleteTemporarySessionForCleanup({ id: "cleanup-id" });
+
+    expect(success.fake.calls.delete).toEqual([{ path: { id: "cleanup-id" } }]);
+    expect(deleted).toEqual({ deleted: true });
+    expect(Object.isFrozen(deleted)).toBe(true);
+
+    const resolvedError = createFixture();
+    const error = { code: "already-gone" };
+    resolvedError.fake.respond("delete", { error });
+
+    const failed = await resolvedError.runtime.deleteTemporarySessionForCleanup({ id: "resolved-error-id" });
+
+    expect(resolvedError.fake.calls.delete).toEqual([{ path: { id: "resolved-error-id" } }]);
+    expect(failed).toEqual({ deleted: false, error });
+    expect(failed.error).toBe(error);
+    expect(Object.isFrozen(failed)).toBe(true);
+
+    const rejected = createFixture();
+    const rejection = new Error("SDK rejection");
+    rejected.fake.respond("delete", Promise.reject(rejection));
+
+    await expect(rejected.runtime.deleteTemporarySessionForCleanup({ id: "rejected-id" })).rejects.toBe(rejection);
+    expect(rejected.fake.calls.delete).toEqual([{ path: { id: "rejected-id" } }]);
+  });
+
+  test("normalizes envelope and bare-array session lists with optional parent filtering", async () => {
+    const envelope = createFixture();
+    const envelopeRows = [
+      { id: "child", parentID: "parent", title: "Child" },
+      { id: "root", title: "Root" },
+    ];
+    envelope.fake.respond("list", { data: envelopeRows });
+
+    const filtered = await envelope.runtime.listTemporarySessions({ parentId: "parent" });
+
+    expect(envelope.fake.calls.list).toEqual([undefined]);
+    expect(filtered).toEqual([{ id: "child", parentId: "parent", title: "Child" }]);
+    expect(Object.isFrozen(filtered)).toBe(true);
+    expect(Object.isFrozen(filtered[0])).toBe(true);
+
+    const bareArray = createFixture();
+    const bareRows = [
+      { id: "child-a", parentID: "parent", title: "A" },
+      { id: "child-b", parentID: "other", title: "B" },
+    ];
+    bareArray.fake.respond("list", bareRows as unknown);
+
+    const all = await bareArray.runtime.listTemporarySessions({});
+
+    expect(bareArray.fake.calls.list).toEqual([undefined]);
+    expect(all).toEqual([
+      { id: "child-a", parentId: "parent", title: "A" },
+      { id: "child-b", parentId: "other", title: "B" },
+    ]);
+    expect(Object.isFrozen(all)).toBe(true);
+    expect(Object.isFrozen(all[0])).toBe(true);
+    expect(Object.isFrozen(all[1])).toBe(true);
+  });
+
   test("propagates resolved SDK errors for every delegated operation", async () => {
     const cases: readonly [SessionMethod, (runtime: V1RuntimeContractFixture) => Promise<unknown>][] = [
       ["get", (runtime) => runtime.readSessionMetadata("id")],
       ["messages", (runtime) => runtime.readSessionHistory("id")],
+      ["messages", (runtime) => runtime.readSessionMessages("id", { limit: 2 })],
       ["prompt", (runtime) => runtime.deliverGeneratedPrompt({ sessionId: "id", prompt: { parts: [] } })],
       [
         "prompt",

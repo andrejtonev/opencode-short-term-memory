@@ -22,7 +22,28 @@ import {
   type RuntimeState,
 } from "../src/memory-utils";
 import { type VisibleDeltaEntry } from "../src/message-collector";
+import type { SummarizerRuntime } from "../src/summarizer";
 import type { Client } from "../src/types";
+
+type GeneratedPromptRequest = Parameters<SummarizerRuntime["deliverGeneratedPrompt"]>[0];
+
+const minimalClient = { tui: { showToast: async () => {} } } as unknown as Client;
+
+function summarizerRuntime(
+  deliverGeneratedPrompt: (request: GeneratedPromptRequest) => unknown | Promise<unknown>,
+  sideSessionID = "side-test",
+): SummarizerRuntime {
+  return {
+    deliverGeneratedPrompt: async (request) => deliverGeneratedPrompt(request),
+    createTemporarySession: async () => ({ id: sideSessionID }),
+    abortTemporarySession: async () => {},
+    deleteTemporarySession: async () => {},
+  };
+}
+
+function promptText(request: GeneratedPromptRequest): string {
+  return request.prompt.parts[0].text;
+}
 
 function fakeEntry(i: number, role: "user" | "assistant"): VisibleDeltaEntry {
   return {
@@ -101,33 +122,29 @@ describe("processMemoryChunks: chunking with realistic conversations", () => {
     // The mock counts prompts and extracts the conversation-update
     // portion of each prompt (the part that the chunker controls).
     const callLog: Array<{ promptCount: number; conversationChars: number }> = [];
-    const client = {
-      session: {
-        prompt: async (args: unknown) => {
-          const a = args as { body?: { parts?: Array<{ text?: string }> } };
-          const promptText = a?.body?.parts?.[0]?.text ?? "";
-          // The chunker feeds the conversation between the LAST
-          // <conversation_update> and </conversation_update> tags.
-          // (The literal string "<conversation_update>" also appears
-          // in the instructions, so we match the LAST occurrence.)
-          const lastOpen = promptText.lastIndexOf("<conversation_update>\n");
-          const lastClose = promptText.lastIndexOf("</conversation_update>");
-          const conversationChars =
-            lastOpen >= 0 && lastClose > lastOpen ? lastClose - lastOpen - "<conversation_update>\n".length : 0;
-          callLog.push({ promptCount: callLog.length + 1, conversationChars });
-          return {
-            data: {
-              info: { role: "assistant" },
-              parts: [{ type: "text", text: basicMemoryResult("", promptText) }],
-            },
-          };
+    const runtime = summarizerRuntime((request) => {
+      const text = promptText(request);
+      // The chunker feeds the conversation between the LAST
+      // <conversation_update> and </conversation_update> tags.
+      // (The literal string "<conversation_update>" also appears
+      // in the instructions, so we match the LAST occurrence.)
+      const lastOpen = text.lastIndexOf("<conversation_update>\n");
+      const lastClose = text.lastIndexOf("</conversation_update>");
+      const conversationChars =
+        lastOpen >= 0 && lastClose > lastOpen ? lastClose - lastOpen - "<conversation_update>\n".length : 0;
+      callLog.push({ promptCount: callLog.length + 1, conversationChars });
+      return {
+        data: {
+          info: { role: "assistant" },
+          parts: [{ type: "text", text: basicMemoryResult("", text) }],
         },
-      },
-    } as unknown as Client;
+      };
+    });
 
     const globalState = createRuntimeState();
     await processMemoryChunks(
-      client,
+      minimalClient,
+      runtime,
       "session-chunk",
       "test",
       config,
@@ -178,24 +195,20 @@ describe("processMemoryChunks: chunking with realistic conversations", () => {
       debounceMs: 0,
     };
 
-    const client = {
-      session: {
-        prompt: async (args: unknown) => {
-          const a = args as { body?: { parts?: Array<{ text?: string }> } };
-          const promptText = a?.body?.parts?.[0]?.text ?? "";
-          return {
-            data: {
-              info: { role: "assistant" },
-              parts: [{ type: "text", text: basicMemoryResult("", promptText) }],
-            },
-          };
+    const runtime = summarizerRuntime((request) => {
+      const text = promptText(request);
+      return {
+        data: {
+          info: { role: "assistant" },
+          parts: [{ type: "text", text: basicMemoryResult("", text) }],
         },
-      },
-    } as unknown as Client;
+      };
+    });
 
     const globalState = createRuntimeState();
     await processMemoryChunks(
-      client,
+      minimalClient,
+      runtime,
       "session-truncate",
       "test",
       config,
@@ -222,18 +235,15 @@ describe("processMemoryChunks: chunking with realistic conversations", () => {
       debounceMs: 0,
     };
     const promptCalls: unknown[] = [];
-    const client = {
-      session: {
-        prompt: async (args: unknown) => {
-          promptCalls.push(args);
-          return { data: { info: { role: "assistant" }, parts: [{ type: "text", text: "" }] } };
-        },
-      },
-    } as unknown as Client;
+    const runtime = summarizerRuntime((request) => {
+      promptCalls.push(request);
+      return { data: { info: { role: "assistant" }, parts: [{ type: "text", text: "" }] } };
+    });
 
     const globalState = createRuntimeState();
     await processMemoryChunks(
-      client,
+      minimalClient,
+      runtime,
       "session-empty",
       "test",
       config,
@@ -265,13 +275,10 @@ describe("processMemoryChunks: clean-mode retry + fallback (#5)", () => {
     rm(testDir, { recursive: true, force: true }).catch(() => {});
   });
 
-  // Helpers: the clean and active summarizers both use the same
-  // system message. The clean one calls into a freshly-created side
-  // session (path.id starts with "side-"), the active one uses the
-  // original session id.
-  function isCleanCall(args: unknown): boolean {
-    const a = args as { path?: { id?: string } };
-    return typeof a?.path?.id === "string" && a.path.id.startsWith("side-");
+  // The clean summarizer uses a freshly-created side session; the active
+  // fallback uses the original session id.
+  function isCleanCall(request: GeneratedPromptRequest): boolean {
+    return request.sessionId.startsWith("side-");
   }
 
   test("with sideSessionRetries=2, a failing clean summarizer retries 3 times (1 + 2) then gives up (no fallback)", async () => {
@@ -286,30 +293,25 @@ describe("processMemoryChunks: clean-mode retry + fallback (#5)", () => {
 
     let cleanCalls = 0;
     let activeCalls = 0;
-    const client = {
-      session: {
-        create: async () => ({ data: { id: "side-1" } }),
-        delete: async () => ({ data: true }),
-        prompt: async (args: unknown) => {
-          if (isCleanCall(args)) {
-            cleanCalls += 1;
-            throw new Error("simulated side-session failure");
-          }
-          activeCalls += 1;
-          return {
-            data: {
-              info: { role: "assistant" },
-              parts: [{ type: "text", text: basicMemoryResult("", "fallback result") }],
-            },
-          };
+    const runtime = summarizerRuntime((request) => {
+      if (isCleanCall(request)) {
+        cleanCalls += 1;
+        throw new Error("simulated side-session failure");
+      }
+      activeCalls += 1;
+      return {
+        data: {
+          info: { role: "assistant" },
+          parts: [{ type: "text", text: basicMemoryResult("", "fallback result") }],
         },
-      },
-    } as unknown as Client;
+      };
+    }, "side-1");
 
     const entries: VisibleDeltaEntry[] = [fakeEntry(0, "user")];
     const globalState = createRuntimeState();
     await processMemoryChunks(
-      client,
+      minimalClient,
+      runtime,
       "session-fail-no-fallback",
       "test",
       config,
@@ -338,30 +340,25 @@ describe("processMemoryChunks: clean-mode retry + fallback (#5)", () => {
 
     let cleanCalls = 0;
     let activeCalls = 0;
-    const client = {
-      session: {
-        create: async () => ({ data: { id: "side-fb" } }),
-        delete: async () => ({ data: true }),
-        prompt: async (args: unknown) => {
-          if (isCleanCall(args)) {
-            cleanCalls += 1;
-            throw new Error("simulated side-session failure");
-          }
-          activeCalls += 1;
-          return {
-            data: {
-              info: { role: "assistant" },
-              parts: [{ type: "text", text: basicMemoryResult("", "fallback result") }],
-            },
-          };
+    const runtime = summarizerRuntime((request) => {
+      if (isCleanCall(request)) {
+        cleanCalls += 1;
+        throw new Error("simulated side-session failure");
+      }
+      activeCalls += 1;
+      return {
+        data: {
+          info: { role: "assistant" },
+          parts: [{ type: "text", text: basicMemoryResult("", "fallback result") }],
         },
-      },
-    } as unknown as Client;
+      };
+    }, "side-fb");
 
     const entries: VisibleDeltaEntry[] = [fakeEntry(0, "user")];
     const globalState = createRuntimeState();
     await processMemoryChunks(
-      client,
+      minimalClient,
+      runtime,
       "session-fallback",
       "test",
       config,
@@ -391,30 +388,25 @@ describe("processMemoryChunks: clean-mode retry + fallback (#5)", () => {
     };
 
     let cleanCalls = 0;
-    const client = {
-      session: {
-        create: async () => ({ data: { id: "side-recover" } }),
-        delete: async () => ({ data: true }),
-        prompt: async (args: unknown) => {
-          if (isCleanCall(args)) {
-            cleanCalls += 1;
-            if (cleanCalls < 2) throw new Error("transient failure");
-            return {
-              data: {
-                info: { role: "assistant" },
-                parts: [{ type: "text", text: basicMemoryResult("", "recovered") }],
-              },
-            };
-          }
-          return { data: { info: { role: "assistant" }, parts: [{ type: "text", text: "" }] } };
-        },
-      },
-    } as unknown as Client;
+    const runtime = summarizerRuntime((request) => {
+      if (isCleanCall(request)) {
+        cleanCalls += 1;
+        if (cleanCalls < 2) throw new Error("transient failure");
+        return {
+          data: {
+            info: { role: "assistant" },
+            parts: [{ type: "text", text: basicMemoryResult("", "recovered") }],
+          },
+        };
+      }
+      return { data: { info: { role: "assistant" }, parts: [{ type: "text", text: "" }] } };
+    }, "side-recover");
 
     const entries: VisibleDeltaEntry[] = [fakeEntry(0, "user")];
     const globalState = createRuntimeState();
     await processMemoryChunks(
-      client,
+      minimalClient,
+      runtime,
       "session-recover",
       "test",
       config,

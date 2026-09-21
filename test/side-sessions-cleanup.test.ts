@@ -212,8 +212,8 @@ describe("Side session tracking and orphan cleanup", () => {
     const fakeClient = createFakeClient();
 
     const t0 = performance.now();
-    const factoryPromise = (await import("../src/session-memory")).default({
-      client: fakeClient as unknown as Parameters<typeof import("../src/session-memory").default>[0]["client"],
+    const factoryPromise = (await import("../src/v1-adapter")).default({
+      client: fakeClient as unknown as Parameters<typeof import("../src/v1-adapter").default>[0]["client"],
       directory: slowDir,
     });
     // Factory itself is async; the body has no awaits, so the returned
@@ -230,7 +230,7 @@ describe("Side session tracking and orphan cleanup", () => {
     // 50ms to account for slow CI / first-call JIT.
     expect(elapsed).toBeLessThan(50);
 
-    const plugin = (await factoryPromise) as Awaited<ReturnType<typeof import("../src/session-memory").default>>;
+    const plugin = (await factoryPromise) as Awaited<ReturnType<typeof import("../src/v1-adapter").default>>;
     // Plugin should be usable right away (status command should work)
     const status = await plugin.tool.short_term_memory.execute({ action: "status" }, {});
     expect(String(status)).toContain("Session Memory Plugin Status");

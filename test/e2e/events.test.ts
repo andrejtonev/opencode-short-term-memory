@@ -11,7 +11,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-import SessionMemoryPlugin from "../../src/session-memory";
+import SessionMemoryPlugin from "../../src/v1-adapter";
 import type { Client } from "../../src/types";
 import { createFakeClient } from "../test-helpers";
 import {

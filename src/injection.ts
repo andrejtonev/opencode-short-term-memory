@@ -1,5 +1,6 @@
 import type { SystemTransformInput, SystemTransformOutput, Client } from "./types";
 import type { SessionMemoryConfig, RuntimeState } from "./memory-utils";
+import type { RuntimeContract } from "./runtime-contract";
 import { logEvent, readText, memoryPathFor, INJECTION_PREFIX, showToast } from "./memory-utils";
 import {
   type SessionRuntimeState,
@@ -42,7 +43,7 @@ async function recordMemoryInjection(
 }
 
 export async function deliverMemoryViaNoReply(
-  client: Client,
+  runtime: Pick<RuntimeContract, "deliverContextNoReply">,
   sessionID: string,
   turnID: string,
   expectedMemoryRevision: number,
@@ -84,14 +85,13 @@ export async function deliverMemoryViaNoReply(
   }
 
   try {
-    const response = await client.session.prompt({
-      path: { id: sessionID },
-      body: {
-        noReply: true,
+    await runtime.deliverContextNoReply({
+      sessionId: sessionID,
+      context: {
         parts: [{ type: "text" as const, text: injectedMessage }],
       },
+      noReply: true,
     });
-    if (response.error) throw response.error;
     completeMemoryDelivery(state, claim);
     await recordMemoryInjection(sessionID, memory, injectedMessage, config, globalState);
     return true;

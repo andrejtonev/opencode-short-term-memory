@@ -24,6 +24,10 @@ export interface RuntimeSessionHistory<TMessage = unknown> {
   readonly messages: readonly TMessage[];
 }
 
+export interface RuntimeSessionMessagesOptions {
+  readonly limit?: number;
+}
+
 export interface RuntimeSessionContext<TContext = unknown> {
   readonly session: RuntimeSessionMetadata;
   readonly context: TContext;
@@ -32,6 +36,7 @@ export interface RuntimeSessionContext<TContext = unknown> {
 export interface RuntimeGeneratedPrompt<TPrompt = unknown> {
   readonly sessionId: string;
   readonly prompt: TPrompt;
+  readonly signal?: AbortSignal;
 }
 
 export interface RuntimeContextDelivery<TContext = unknown> {
@@ -48,6 +53,10 @@ export interface RuntimeTemporarySessionCreate<TOptions = unknown> {
 export interface RuntimeTemporarySessionQuery {
   readonly id: string;
 }
+
+export type RuntimeTemporarySessionCleanupDeleteResult =
+  | { readonly deleted: true }
+  | { readonly deleted: false; readonly error: unknown };
 
 export interface RuntimeTemporarySessionList {
   readonly parentId?: string;
@@ -73,12 +82,14 @@ export interface RuntimeConfig<TOptions = unknown> {
 export interface RuntimeCapabilities {
   readonly readSessionMetadata: boolean;
   readonly readSessionHistory: boolean;
+  readonly readSessionMessages: boolean;
   readonly readSessionContext: boolean;
   readonly deliverGeneratedPrompt: boolean;
   readonly deliverContextNoReply: boolean;
   readonly createTemporarySession: boolean;
   readonly abortTemporarySession: boolean;
   readonly deleteTemporarySession: boolean;
+  readonly deleteTemporarySessionForCleanup: boolean;
   readonly listTemporarySessions: boolean;
   readonly getTemporarySession: boolean;
   readonly registerSystemContextMutation: boolean;
@@ -118,6 +129,7 @@ export interface RuntimeContract<
   TTool = unknown,
   TCommand = unknown,
   TRuntimeOptions = unknown,
+  TGeneratedPromptResult = unknown,
 > {
   readonly identity: RuntimeIdentity;
   readonly capabilities: Readonly<RuntimeCapabilities>;
@@ -125,14 +137,18 @@ export interface RuntimeContract<
 
   readSessionMetadata(sessionId: string): Promise<RuntimeSessionMetadata>;
   readSessionHistory(sessionId: string): Promise<RuntimeSessionHistory<TMessage>>;
+  readSessionMessages(sessionId: string, options?: RuntimeSessionMessagesOptions): Promise<readonly TMessage[]>;
   readSessionContext(sessionId: string): Promise<RuntimeSessionContext<TContext>>;
-  deliverGeneratedPrompt(request: RuntimeGeneratedPrompt<TPrompt>): Promise<void>;
+  deliverGeneratedPrompt(request: RuntimeGeneratedPrompt<TPrompt>): Promise<TGeneratedPromptResult>;
   deliverContextNoReply(request: RuntimeContextDelivery<TContext>): Promise<void>;
   createTemporarySession(
     request: RuntimeTemporarySessionCreate<TTemporarySessionOptions>,
   ): Promise<RuntimeSessionMetadata>;
   abortTemporarySession(request: RuntimeTemporarySessionQuery): Promise<void>;
   deleteTemporarySession(request: RuntimeTemporarySessionQuery): Promise<void>;
+  deleteTemporarySessionForCleanup(
+    request: RuntimeTemporarySessionQuery,
+  ): Promise<RuntimeTemporarySessionCleanupDeleteResult>;
   listTemporarySessions(request: RuntimeTemporarySessionList): Promise<readonly RuntimeSessionMetadata[]>;
   getTemporarySession(request: RuntimeTemporarySessionQuery): Promise<RuntimeSessionMetadata>;
   registerSystemContextMutation(

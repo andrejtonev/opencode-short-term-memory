@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { INJECTION_PREFIX, memoryPathFor, readText, writeText, checkpointPathFor } from "../src/memory-utils";
 import { createFakeClient, createPlugin } from "./test-helpers";
-import SessionMemoryPlugin from "../src/session-memory";
+import SessionMemoryPlugin from "../src/v1-adapter";
 
 describe("SessionMemoryPlugin general functionality", () => {
   const originalCwd = process.cwd();

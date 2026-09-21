@@ -5,6 +5,7 @@ import type {
   RuntimeDisposer,
   RuntimeMutation,
   RuntimeNamedRegistration,
+  RuntimeSessionMessagesOptions,
   RuntimeSessionMetadata,
 } from "./runtime-contract";
 import { unsupportedRuntimeOperation } from "./runtime-contract";
@@ -13,6 +14,7 @@ type V1Client = PluginInput["client"];
 type V1Session = V1Client["session"];
 type V1PromptOptions = NonNullable<Parameters<V1Session["prompt"]>[0]>;
 type V1Prompt = NonNullable<V1PromptOptions["body"]>;
+type V1PromptResponse = Awaited<ReturnType<V1Session["prompt"]>>;
 type V1CreateOptions = NonNullable<NonNullable<Parameters<V1Session["create"]>[0]>["body"]>;
 type V1Message = Awaited<ReturnType<V1Session["messages"]>> extends { data?: readonly (infer T)[] } ? T : unknown;
 type V1SessionRow = NonNullable<Awaited<ReturnType<V1Session["get"]>>["data"]>;
@@ -42,7 +44,8 @@ export type V1RuntimeContract = RuntimeContract<
   unknown,
   V1Tool,
   V1Command,
-  undefined
+  undefined,
+  V1PromptResponse
 > & {
   readonly registrations: V1RegistrationCollector;
 };
@@ -60,12 +63,14 @@ type V1Response<T> = {
 const capabilities = Object.freeze({
   readSessionMetadata: true,
   readSessionHistory: true,
+  readSessionMessages: true,
   readSessionContext: false,
   deliverGeneratedPrompt: true,
   deliverContextNoReply: true,
   createTemporarySession: true,
   abortTemporarySession: true,
   deleteTemporarySession: true,
+  deleteTemporarySessionForCleanup: true,
   listTemporarySessions: true,
   getTemporarySession: true,
   registerSystemContextMutation: true,
@@ -85,6 +90,22 @@ function unwrapV1Response<T>(response: unknown, operation: string): T {
 function assertV1Response(response: unknown): void {
   const envelope = response as V1Response<unknown>;
   if (envelope.error !== undefined) throw envelope.error;
+}
+
+function asV1Response(response: unknown): V1Response<unknown> | undefined {
+  return typeof response === "object" && response !== null ? (response as V1Response<unknown>) : undefined;
+}
+
+function unwrapV1SessionList(response: unknown): readonly V1SessionRow[] {
+  if (Array.isArray(response)) return response as readonly V1SessionRow[];
+
+  const envelope = asV1Response(response);
+  if (envelope?.error !== undefined) throw envelope.error;
+  if (envelope?.data === undefined) throw new Error('V1 operation "session.list" returned no data.');
+  if (!Array.isArray(envelope.data)) {
+    throw new Error('V1 operation "session.list" returned invalid data.');
+  }
+  return envelope.data as readonly V1SessionRow[];
 }
 
 function normalizeSession(session: V1SessionRow): RuntimeSessionMetadata {
@@ -131,6 +152,17 @@ export function createV1RuntimeContract(input: PluginInput): V1RuntimeContract {
     return normalizeSession(unwrapV1Response<V1SessionRow>(response, "session.get"));
   }
 
+  async function readSessionMessages(
+    sessionId: string,
+    options?: RuntimeSessionMessagesOptions,
+  ): Promise<readonly V1Message[]> {
+    const response = await input.client.session.messages({
+      path: { id: sessionId },
+      ...(options?.limit === undefined ? {} : { query: { limit: options.limit } }),
+    });
+    return Object.freeze([...unwrapV1Response<readonly V1Message[]>(response, "session.messages")]);
+  }
+
   return {
     identity: Object.freeze({
       generation: "v1",
@@ -145,6 +177,7 @@ export function createV1RuntimeContract(input: PluginInput): V1RuntimeContract {
     registrations: registrationCollector,
 
     readSessionMetadata,
+    readSessionMessages,
     async readSessionHistory(sessionId) {
       const [session, response] = await Promise.all([
         readSessionMetadata(sessionId),
@@ -158,9 +191,14 @@ export function createV1RuntimeContract(input: PluginInput): V1RuntimeContract {
     async readSessionContext() {
       unsupportedRuntimeOperation("readSessionContext", "session.context");
     },
-    async deliverGeneratedPrompt({ sessionId, prompt }) {
-      const response = await input.client.session.prompt({ path: { id: sessionId }, body: prompt });
+    async deliverGeneratedPrompt({ sessionId, prompt, signal }) {
+      const response = await input.client.session.prompt({
+        path: { id: sessionId },
+        body: prompt,
+        ...(signal === undefined ? {} : { signal }),
+      });
       assertV1Response(response);
+      return response;
     },
     async deliverContextNoReply({ sessionId, context }) {
       const response = await input.client.session.prompt({
@@ -183,10 +221,16 @@ export function createV1RuntimeContract(input: PluginInput): V1RuntimeContract {
       const response = await input.client.session.delete({ path: { id } });
       assertV1Response(response);
     },
+    async deleteTemporarySessionForCleanup({ id }) {
+      const response = await input.client.session.delete({ path: { id } });
+      const envelope = asV1Response(response);
+      if (envelope?.error !== undefined) return Object.freeze({ deleted: false as const, error: envelope.error });
+      return Object.freeze({ deleted: true as const });
+    },
     async listTemporarySessions({ parentId }) {
       const response = await input.client.session.list();
       return Object.freeze(
-        unwrapV1Response<readonly V1SessionRow[]>(response, "session.list")
+        unwrapV1SessionList(response)
           .filter((session) => parentId === undefined || session.parentID === parentId)
           .map(normalizeSession),
       );
@@ -218,7 +262,7 @@ export function createV1RuntimeContract(input: PluginInput): V1RuntimeContract {
 
 export async function createV1Adapter(input: V1PluginInput): Promise<V1Adapter> {
   const runtime = createV1RuntimeContract(input as PluginInput);
-  const hooks = await createSessionMemoryHooks(input);
+  const hooks = await createSessionMemoryHooks(input, runtime);
   return Object.freeze({ runtime, hooks });
 }
 

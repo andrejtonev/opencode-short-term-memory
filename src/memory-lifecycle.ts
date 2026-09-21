@@ -16,6 +16,7 @@ import {
   normalizeMemory,
   runActiveSessionSummarizer,
   runCleanOpencodeSummarizer,
+  type SummarizerRuntime,
 } from "./summarizer";
 import type { Client } from "./types";
 
@@ -52,6 +53,7 @@ export async function maybeBootstrapSessionHistory(
 
 export async function processMemoryChunks(
   client: Client,
+  runtime: SummarizerRuntime,
   sessionID: string,
   reason: string,
   config: SessionMemoryConfig,
@@ -109,13 +111,13 @@ export async function processMemoryChunks(
 
     let raw = "";
     if (config.summarizerMode === "active") {
-      raw = await runActiveSessionSummarizer(client, sessionID, prompt, config);
+      raw = await runActiveSessionSummarizer(runtime, sessionID, prompt, config);
     } else {
       const maxAttempts = 1 + Math.max(0, Math.trunc(config.sideSessionRetries || 0));
       let lastCleanError = "";
       for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
         try {
-          raw = await runCleanOpencodeSummarizer(client, prompt, config);
+          raw = await runCleanOpencodeSummarizer(runtime, prompt, config);
           if (attempt > 1) {
             await logEvent(config, "memory_update_clean_retry_succeeded", { sessionID, reason, attempt, maxAttempts });
           }
@@ -153,7 +155,7 @@ export async function processMemoryChunks(
           error: lastCleanError || "Clean summarizer produced empty output",
         });
         try {
-          raw = await runActiveSessionSummarizer(client, sessionID, prompt, config);
+          raw = await runActiveSessionSummarizer(runtime, sessionID, prompt, config);
         } catch (fallbackError) {
           const fallbackMessage = (fallbackError as Error).message || String(fallbackError || "");
           globalState.lastError = fallbackMessage;

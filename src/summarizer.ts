@@ -9,7 +9,27 @@ import {
   mutateActiveSideSessions,
   SIDE_SESSION_TITLE,
 } from "./memory-utils";
-import type { Client } from "./types";
+import type {
+  RuntimeGeneratedPrompt,
+  RuntimeSessionMetadata,
+  RuntimeTemporarySessionCreate,
+  RuntimeTemporarySessionQuery,
+} from "./runtime-contract";
+
+type SummarizerPrompt = {
+  readonly model?: ReturnType<typeof parseModel>;
+  readonly system: string;
+  readonly parts: [{ readonly type: "text"; readonly text: string }];
+};
+
+export interface SummarizerRuntime {
+  deliverGeneratedPrompt(request: RuntimeGeneratedPrompt<SummarizerPrompt>): Promise<unknown>;
+  createTemporarySession(
+    request: RuntimeTemporarySessionCreate<{ readonly title: string }>,
+  ): Promise<RuntimeSessionMetadata>;
+  abortTemporarySession(request: RuntimeTemporarySessionQuery): Promise<void>;
+  deleteTemporarySession(request: RuntimeTemporarySessionQuery): Promise<void>;
+}
 
 // Mutable via .ms so tests can shrink the timeout. Wrapped in an object
 // because ES module bindings are read-only — the property of an exported
@@ -204,7 +224,11 @@ export function compactMemoryForInjection(memory: string): string {
   return kept.length ? kept.join("\n") : "";
 }
 
-export async function runCleanOpencodeSummarizer(client: Client, prompt: string, config: SessionMemoryConfig) {
+export async function runCleanOpencodeSummarizer(
+  runtime: SummarizerRuntime,
+  prompt: string,
+  config: SessionMemoryConfig,
+) {
   const parsed = parseModel(config.memoryModel);
 
   // 1. Create a fresh side session for isolated summarization
@@ -212,12 +236,10 @@ export async function runCleanOpencodeSummarizer(client: Client, prompt: string,
   let abortController: AbortController | undefined;
   let abortTimer: ReturnType<typeof setTimeout> | undefined;
   try {
-    const createResult = await client.session.create({
-      body: { title: SIDE_SESSION_TITLE },
+    const createResult = await runtime.createTemporarySession({
+      options: { title: SIDE_SESSION_TITLE },
     });
-    const createRow =
-      (createResult as { data?: Record<string, unknown> })?.data || (createResult as Record<string, unknown>);
-    sessionID = createRow?.id as string | undefined;
+    sessionID = createResult.id;
     if (!sessionID) {
       throw new Error("Failed to create side session: no session ID returned");
     }
@@ -246,9 +268,9 @@ export async function runCleanOpencodeSummarizer(client: Client, prompt: string,
     abortTimer = setTimeout(() => abortController?.abort(), CLEAN_SUMMARIZER_TIMEOUT.ms);
     let result;
     try {
-      result = await client.session.prompt({
-        path: { id: sessionID },
-        body: {
+      result = await runtime.deliverGeneratedPrompt({
+        sessionId: sessionID,
+        prompt: {
           ...(parsed ? { model: parsed } : {}),
           system: "You are a clean short-term memory summarizer. Return only the updated Session Memory markdown.",
           parts: [{ type: "text" as const, text: prompt }],
@@ -265,9 +287,7 @@ export async function runCleanOpencodeSummarizer(client: Client, prompt: string,
         });
         // Best-effort: ask the server to abort the session so it stops generating.
         try {
-          await (client.session as { abort?: (args: unknown) => Promise<unknown> }).abort?.({
-            path: { id: sessionID },
-          });
+          await runtime.abortTemporarySession({ id: sessionID });
         } catch {}
         throw new Error(`Side session summarizer timed out after ${CLEAN_SUMMARIZER_TIMEOUT.ms}ms`);
       }
@@ -291,7 +311,7 @@ export async function runCleanOpencodeSummarizer(client: Client, prompt: string,
     if (sessionID) {
       const cleanupSessionID: string = sessionID;
       try {
-        await client.session.delete({ path: { id: cleanupSessionID } });
+        await runtime.deleteTemporarySession({ id: cleanupSessionID });
       } catch {
         // Best-effort cleanup; don't let session deletion failures mask summarizer results.
       }
@@ -303,7 +323,7 @@ export async function runCleanOpencodeSummarizer(client: Client, prompt: string,
 }
 
 export async function runActiveSessionSummarizer(
-  client: Client,
+  runtime: SummarizerRuntime,
   sessionID: string,
   prompt: string,
   config: SessionMemoryConfig,
@@ -311,9 +331,9 @@ export async function runActiveSessionSummarizer(
   await logEvent(config, "active_session_summarizer_start", { sessionID, promptChars: prompt.length });
   const parsed = parseModel(config.memoryModel);
   try {
-    const result = await client.session.prompt({
-      path: { id: sessionID },
-      body: {
+    const result = await runtime.deliverGeneratedPrompt({
+      sessionId: sessionID,
+      prompt: {
         ...(parsed ? { model: parsed } : {}),
         system: "You are a clean short-term memory summarizer. Return only the updated Session Memory markdown.",
         parts: [{ type: "text", text: prompt }],

@@ -20,7 +20,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import SessionMemoryPlugin from "../src/session-memory";
+import SessionMemoryPlugin from "../src/v1-adapter";
 import { createFakeClient } from "./test-helpers";
 import { DEFAULT_CONFIG, logPath, writeText, memoryPathFor } from "../src/memory-utils";
 import type { Client } from "../src/types";

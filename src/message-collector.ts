@@ -16,6 +16,9 @@ import {
   showToast,
 } from "./memory-utils";
 import type { Client } from "./types";
+import type { RuntimeContract } from "./runtime-contract";
+
+type MessageReader = Pick<RuntimeContract, "readSessionMessages">;
 
 export type VisibleDeltaEntry = {
   rendered: string;
@@ -71,7 +74,7 @@ export async function writeLastProcessedMessageID(sessionID: string, messageID: 
 }
 
 export async function collectVisibleMessagesSinceCheckpoint(
-  client: Client,
+  runtime: MessageReader,
   sessionID: string,
   config: SessionMemoryConfig,
 ) {
@@ -85,18 +88,8 @@ export async function collectVisibleMessagesSinceCheckpoint(
       });
     }
 
-    const fetchLimit = config.maxDeltaMessages;
-    const response = await client.session.messages({
-      path: { id: sessionID },
-      query: { limit: fetchLimit },
-    });
-    const maybeData = (response as { data?: unknown[] })?.data;
-    const rows: unknown[] = Array.isArray(maybeData)
-      ? maybeData
-      : Array.isArray(response)
-        ? (response as unknown[])
-        : [];
-    const list = Array.isArray(rows) ? [...rows] : [];
+    const rows = await runtime.readSessionMessages(sessionID, { limit: config.maxDeltaMessages });
+    const list = [...rows];
 
     list.sort((a, b) => {
       const timeA = getMessageTime(a);
@@ -192,13 +185,14 @@ export async function collectVisibleMessagesSinceCheckpoint(
 }
 
 export async function collectRecentVisibleMessages(
+  runtime: MessageReader,
   client: Client,
   sessionID: string,
   config: SessionMemoryConfig,
   globalState: RuntimeState,
 ) {
   try {
-    const collected = await collectVisibleMessagesSinceCheckpoint(client, sessionID, config);
+    const collected = await collectVisibleMessagesSinceCheckpoint(runtime, sessionID, config);
     if (!collected.entries.length) {
       await logEvent(config, "collect_recent_messages_empty", {
         sessionID,

@@ -13,13 +13,14 @@ import {
 } from "../src/memory-utils";
 import { collectVisibleMessagesSinceCheckpoint } from "../src/message-collector";
 import { processMemoryChunks } from "../src/memory-lifecycle";
-import { runActiveSessionSummarizer, runCleanOpencodeSummarizer } from "../src/summarizer";
+import { runActiveSessionSummarizer, runCleanOpencodeSummarizer, type SummarizerRuntime } from "../src/summarizer";
 import type { Client } from "../src/types";
 
 const VALID_SUMMARY = `${MEMORY_HEADER}\n\n### User Instructions\n- keep this\n\n### Long Horizon Context\n- stable`;
 
 type PromptCall = {
-  body?: {
+  sessionId: string;
+  prompt: {
     noReply?: unknown;
     model?: { providerID: string; modelID: string };
     parts?: Array<{ text?: string }>;
@@ -45,17 +46,20 @@ function config(memoryDir: string, summarizerMode: "clean" | "active") {
   };
 }
 
-function clientFor(response: unknown, promptCalls: PromptCall[] = []) {
+function runtimeFor(response: unknown, promptCalls: PromptCall[] = []): SummarizerRuntime {
   return {
-    session: {
-      create: async () => ({ data: { id: "side-summarizer-1" } }),
-      delete: async () => ({ data: true }),
-      prompt: async (args: unknown) => {
-        promptCalls.push(args as PromptCall);
-        return response;
-      },
+    createTemporarySession: async () => ({ id: "side-summarizer-1" }),
+    deliverGeneratedPrompt: async (request) => {
+      promptCalls.push(request as PromptCall);
+      return response;
     },
-  } as unknown as Client;
+    abortTemporarySession: async () => {},
+    deleteTemporarySession: async () => {},
+  };
+}
+
+function uiClient(): Client {
+  return { tui: { showToast: async () => {} } } as unknown as Client;
 }
 
 describe("summarizer SDK envelopes", () => {
@@ -72,37 +76,37 @@ describe("summarizer SDK envelopes", () => {
   test("both summarizers accept an assistant envelope and omit noReply from generated-summary prompts", async () => {
     const memoryDir = join(testDir, "memory");
     const promptCalls: PromptCall[] = [];
-    const client = clientFor(assistantEnvelope(VALID_SUMMARY), promptCalls);
+    const runtime = runtimeFor(assistantEnvelope(VALID_SUMMARY), promptCalls);
     const cfg = config(memoryDir, "clean");
 
-    await expect(runCleanOpencodeSummarizer(client, "clean prompt", cfg)).resolves.toBe(VALID_SUMMARY);
+    await expect(runCleanOpencodeSummarizer(runtime, "clean prompt", cfg)).resolves.toBe(VALID_SUMMARY);
     await expect(
-      runActiveSessionSummarizer(client, "session-1", "active prompt", { ...cfg, summarizerMode: "active" }),
+      runActiveSessionSummarizer(runtime, "session-1", "active prompt", { ...cfg, summarizerMode: "active" }),
     ).resolves.toBe(VALID_SUMMARY);
 
     expect(promptCalls).toHaveLength(2);
     for (const call of promptCalls) {
-      expect(call.body?.parts?.[0]?.text).toBeTruthy();
-      expect("noReply" in (call.body ?? {})).toBe(false);
-      expect("model" in (call.body ?? {})).toBe(false);
+      expect(call.prompt.parts?.[0]?.text).toBeTruthy();
+      expect("noReply" in call.prompt).toBe(false);
+      expect("model" in call.prompt).toBe(false);
     }
   });
 
   test("both summarizers send an explicit valid model override", async () => {
     const memoryDir = join(testDir, "explicit-model");
     const promptCalls: PromptCall[] = [];
-    const client = clientFor(assistantEnvelope(VALID_SUMMARY), promptCalls);
+    const runtime = runtimeFor(assistantEnvelope(VALID_SUMMARY), promptCalls);
     const cfg = { ...config(memoryDir, "clean"), memoryModel: "openai/gpt-5.3" };
 
-    await runCleanOpencodeSummarizer(client, "clean prompt", cfg);
-    await runActiveSessionSummarizer(client, "session-1", "active prompt", {
+    await runCleanOpencodeSummarizer(runtime, "clean prompt", cfg);
+    await runActiveSessionSummarizer(runtime, "session-1", "active prompt", {
       ...cfg,
       summarizerMode: "active",
     });
 
     expect(promptCalls).toHaveLength(2);
     for (const call of promptCalls) {
-      expect(call.body?.model).toEqual({ providerID: "openai", modelID: "gpt-5.3" });
+      expect(call.prompt.model).toEqual({ providerID: "openai", modelID: "gpt-5.3" });
     }
   });
 
@@ -145,20 +149,20 @@ describe("summarizer SDK envelopes", () => {
       const cleanCalls: PromptCall[] = [];
       const activeCalls: PromptCall[] = [];
 
-      await expect(runCleanOpencodeSummarizer(clientFor(response, cleanCalls), "clean prompt", cfg)).rejects.toThrow(
+      await expect(runCleanOpencodeSummarizer(runtimeFor(response, cleanCalls), "clean prompt", cfg)).rejects.toThrow(
         expectedError,
       );
       await expect(
-        runActiveSessionSummarizer(clientFor(response, activeCalls), "session-active-rejected", "active prompt", {
+        runActiveSessionSummarizer(runtimeFor(response, activeCalls), "session-active-rejected", "active prompt", {
           ...cfg,
           summarizerMode: "active",
         }),
       ).rejects.toThrow(expectedError);
 
-      expect(cleanCalls[0]?.body?.parts?.[0]?.text).toBe("clean prompt");
-      expect(activeCalls[0]?.body?.parts?.[0]?.text).toBe("active prompt");
-      expect("noReply" in (cleanCalls[0]?.body ?? {})).toBe(false);
-      expect("noReply" in (activeCalls[0]?.body ?? {})).toBe(false);
+      expect(cleanCalls[0]?.prompt.parts?.[0]?.text).toBe("clean prompt");
+      expect(activeCalls[0]?.prompt.parts?.[0]?.text).toBe("active prompt");
+      expect("noReply" in (cleanCalls[0]?.prompt ?? {})).toBe(false);
+      expect("noReply" in (activeCalls[0]?.prompt ?? {})).toBe(false);
 
       const log = await tailLog(50, memoryDir);
       expect(log).toContain('"event":"active_session_summarizer_error"');
@@ -178,7 +182,8 @@ describe("summarizer SDK envelopes", () => {
     const cfg = config(memoryDir, "clean");
 
     const wrote = await processMemoryChunks(
-      clientFor({ data: { info: { role: "user" }, parts: [{ type: "text", text: VALID_SUMMARY }] } }),
+      uiClient(),
+      runtimeFor({ data: { info: { role: "user" }, parts: [{ type: "text", text: VALID_SUMMARY }] } }),
       sessionID,
       "rejected-clean",
       cfg,
@@ -210,7 +215,8 @@ describe("summarizer SDK envelopes", () => {
 
     await expect(
       processMemoryChunks(
-        clientFor({ data: { info: { role: "user" }, parts: [{ type: "text", text: VALID_SUMMARY }] } }),
+        uiClient(),
+        runtimeFor({ data: { info: { role: "user" }, parts: [{ type: "text", text: VALID_SUMMARY }] } }),
         sessionID,
         "rejected-active",
         cfg,
@@ -247,17 +253,23 @@ test("collection excludes an active-session generated summary to preserve the re
         parts: [{ type: "text", text: "ordinary assistant response" }],
       },
     ];
-    const client = {
-      session: { messages: async () => ({ data: rows }) },
-    } as unknown as Client;
+    const requestedLimits: Array<number | undefined> = [];
+    const reader = {
+      readSessionMessages: async (readSessionID: string, options?: { limit?: number }): Promise<readonly unknown[]> => {
+        expect(readSessionID).toBe("session-collection");
+        requestedLimits.push(options?.limit);
+        return rows;
+      },
+    };
 
-    const collected = await collectVisibleMessagesSinceCheckpoint(client, "session-collection", {
+    const collected = await collectVisibleMessagesSinceCheckpoint(reader, "session-collection", {
       ...DEFAULT_CONFIG,
       memoryDir,
     });
 
     expect(collected.entries.map((entry) => entry.rendered)).toEqual(["ASSISTANT:\nordinary assistant response"]);
     expect(collected.entries.map((entry) => entry.rendered).join("\n")).not.toContain(MEMORY_HEADER);
+    expect(requestedLimits).toEqual([DEFAULT_CONFIG.maxDeltaMessages]);
   } finally {
     await rm(testDir, { recursive: true, force: true });
   }

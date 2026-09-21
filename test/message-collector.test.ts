@@ -6,9 +6,9 @@
 // summarizer input is shaped:
 //   * collapseAssistantBursts: merge consecutive assistant messages
 //     so the model doesn't see a wall of one-line replies.
-//   * maxDeltaMessages: limit how many rows the upstream
-//     `client.session.messages` call returns (defends against very
-//     long histories blowing up the summarizer prompt).
+//   * maxDeltaMessages: limit how many rows the upstream message reader
+//     returns (defends against very long histories blowing up the
+//     summarizer prompt).
 //
 // These were unit-tested only at the per-flag level before this PR.
 // This file adds explicit tests for both flags and the cross-flag
@@ -20,7 +20,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { collectVisibleMessagesSinceCheckpoint } from "../src/message-collector";
 import { DEFAULT_CONFIG, writeText, memoryPathFor, checkpointPathFor } from "../src/memory-utils";
-import type { Client } from "../src/types";
+
+type MessageReader = {
+  readSessionMessages(sessionID: string, options?: { limit?: number }): Promise<readonly unknown[]>;
+};
 
 function makeRow(id: string, role: "user" | "assistant", content: string, time: number) {
   return {
@@ -56,18 +59,15 @@ describe("collectVisibleMessagesSinceCheckpoint", () => {
       makeRow("d", "assistant", "a3", 1300),
       makeRow("e", "user", "u2", 1400),
     ];
-    const calls: Array<{ limit?: number }> = [];
-    const client = {
-      session: {
-        messages: async (args: unknown) => {
-          const a = args as { query?: { limit?: number } };
-          calls.push({ limit: a?.query?.limit });
-          return { data: rows };
-        },
+    const calls: Array<{ sessionID: string; options?: { limit?: number } }> = [];
+    const reader: MessageReader = {
+      readSessionMessages: async (readSessionID, options) => {
+        calls.push({ sessionID: readSessionID, options });
+        return rows;
       },
-    } as unknown as Client;
+    };
 
-    const out = await collectVisibleMessagesSinceCheckpoint(client, sessionID, {
+    const out = await collectVisibleMessagesSinceCheckpoint(reader, sessionID, {
       ...DEFAULT_CONFIG,
       memoryDir,
       collapseAssistantBursts: false,
@@ -78,7 +78,7 @@ describe("collectVisibleMessagesSinceCheckpoint", () => {
     expect(out.entries.map((e) => e.rendered).join("\n")).toContain("u1");
     expect(out.entries.map((e) => e.rendered).join("\n")).toContain("a3");
     // maxDeltaMessages default is 200; we only sent 5 rows.
-    expect(calls[0]?.limit).toBe(DEFAULT_CONFIG.maxDeltaMessages);
+    expect(calls[0]).toEqual({ sessionID, options: { limit: DEFAULT_CONFIG.maxDeltaMessages } });
   });
 
   test("with collapseAssistantBursts=true, consecutive assistant messages collapse to the last one", async () => {
@@ -93,13 +93,11 @@ describe("collectVisibleMessagesSinceCheckpoint", () => {
       makeRow("e", "user", "u2", 1400),
       makeRow("f", "assistant", "a4", 1500),
     ];
-    const client = {
-      session: {
-        messages: async () => ({ data: rows }),
-      },
-    } as unknown as Client;
+    const reader: MessageReader = {
+      readSessionMessages: async () => rows,
+    };
 
-    const out = await collectVisibleMessagesSinceCheckpoint(client, sessionID, {
+    const out = await collectVisibleMessagesSinceCheckpoint(reader, sessionID, {
       ...DEFAULT_CONFIG,
       memoryDir,
       collapseAssistantBursts: true,
@@ -117,56 +115,52 @@ describe("collectVisibleMessagesSinceCheckpoint", () => {
     expect(rendered).not.toContain("a2");
   });
 
-  test("maxDeltaMessages is passed through to the upstream session.messages call", async () => {
+  test("maxDeltaMessages is passed through to the upstream message reader", async () => {
     const sessionID = "max-delta";
     const memoryDir = join(testDir, ".opencode", "memory");
     await writeText(memoryPathFor(sessionID, memoryDir), "");
-    const calls: Array<{ limit?: number }> = [];
-    const client = {
-      session: {
-        messages: async (args: unknown) => {
-          const a = args as { query?: { limit?: number } };
-          calls.push({ limit: a?.query?.limit });
-          return { data: [] };
-        },
+    const calls: Array<{ sessionID: string; options?: { limit?: number } }> = [];
+    const reader: MessageReader = {
+      readSessionMessages: async (readSessionID, options) => {
+        calls.push({ sessionID: readSessionID, options });
+        return [];
       },
-    } as unknown as Client;
+    };
 
-    await collectVisibleMessagesSinceCheckpoint(client, sessionID, {
+    await collectVisibleMessagesSinceCheckpoint(reader, sessionID, {
       ...DEFAULT_CONFIG,
       memoryDir,
       maxDeltaMessages: 7,
     });
 
     expect(calls.length).toBe(1);
-    expect(calls[0]?.limit).toBe(7);
+    expect(calls[0]).toEqual({ sessionID, options: { limit: 7 } });
   });
 
-  test("rows beyond maxDeltaMessages are NOT fetched (the upstream enforces the cap)", async () => {
-    // The collector passes `limit: maxDeltaMessages` to the SDK. The
-    // SDK returns at most that many rows. This test verifies the
-    // collector doesn't itself trim past the SDK's response — the
-    // SDK is the gate.
+  test("rows beyond maxDeltaMessages are NOT fetched (the reader enforces the cap)", async () => {
+    // The collector passes `limit: maxDeltaMessages` to the reader. The
+    // reader returns at most that many rows. This test verifies the
+    // collector doesn't itself trim past the reader's response — the
+    // reader is the gate.
     const sessionID = "upstream-trims";
     const memoryDir = join(testDir, ".opencode", "memory");
     await writeText(memoryPathFor(sessionID, memoryDir), "");
 
-    // Build 100 rows but only return 5 from the SDK (simulating an
+    // Build 100 rows but only return 5 from the reader (simulating an
     // upstream cap).
     const rows = Array.from({ length: 100 }, (_, i) =>
       makeRow(`m${i}`, i % 2 === 0 ? "user" : "assistant", `m${i}`, 1000 + i),
     );
-    const client = {
-      session: {
-        messages: async (args: unknown) => {
-          const a = args as { query?: { limit?: number } };
-          const limit = a?.query?.limit ?? 200;
-          return { data: rows.slice(-limit) };
-        },
+    const calls: Array<{ sessionID: string; options?: { limit?: number } }> = [];
+    const reader: MessageReader = {
+      readSessionMessages: async (readSessionID, options) => {
+        calls.push({ sessionID: readSessionID, options });
+        const limit = options?.limit ?? 200;
+        return rows.slice(-limit);
       },
-    } as unknown as Client;
+    };
 
-    const out = await collectVisibleMessagesSinceCheckpoint(client, sessionID, {
+    const out = await collectVisibleMessagesSinceCheckpoint(reader, sessionID, {
       ...DEFAULT_CONFIG,
       memoryDir,
       maxDeltaMessages: 5,
@@ -175,6 +169,7 @@ describe("collectVisibleMessagesSinceCheckpoint", () => {
     // 5 rows returned. Of those, some are assistant, some user.
     expect(out.entries.length).toBeLessThanOrEqual(5);
     expect(out.rowCount).toBe(5);
+    expect(calls).toEqual([{ sessionID, options: { limit: 5 } }]);
   });
 
   test("the checkpoint limits the delta to rows AFTER the checkpoint", async () => {
@@ -191,13 +186,11 @@ describe("collectVisibleMessagesSinceCheckpoint", () => {
       makeRow("m3", "user", "new1", 1300),
       makeRow("m4", "assistant", "new2", 1400),
     ];
-    const client = {
-      session: {
-        messages: async () => ({ data: rows }),
-      },
-    } as unknown as Client;
+    const reader: MessageReader = {
+      readSessionMessages: async () => rows,
+    };
 
-    const out = await collectVisibleMessagesSinceCheckpoint(client, sessionID, {
+    const out = await collectVisibleMessagesSinceCheckpoint(reader, sessionID, {
       ...DEFAULT_CONFIG,
       memoryDir,
     });
@@ -216,13 +209,11 @@ describe("collectVisibleMessagesSinceCheckpoint", () => {
       makeRow("m1", "assistant", "thinking: I should call a tool", 1100),
       makeRow("m2", "assistant", "real assistant reply", 1200),
     ];
-    const client = {
-      session: {
-        messages: async () => ({ data: rows }),
-      },
-    } as unknown as Client;
+    const reader: MessageReader = {
+      readSessionMessages: async () => rows,
+    };
 
-    const out = await collectVisibleMessagesSinceCheckpoint(client, sessionID, {
+    const out = await collectVisibleMessagesSinceCheckpoint(reader, sessionID, {
       ...DEFAULT_CONFIG,
       memoryDir,
     });

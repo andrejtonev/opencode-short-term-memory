@@ -15,6 +15,7 @@ import type {
   CommandExecuteBeforeInput,
   CommandExecuteBeforeOutput,
 } from "./types";
+import type { RuntimeContract } from "./runtime-contract";
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import {
@@ -49,6 +50,7 @@ import {
 import { parseMemoryActionFromCommandArgument, executeMemoryAction, type CommandContext } from "./commands";
 import { appendChildMemoryToSystem, deliverMemoryViaNoReply, injectMemoryIntoSystemTransform } from "./injection";
 import { createTools, type CreateToolsContext } from "./tools";
+import type { SummarizerRuntime } from "./summarizer";
 
 import {
   type SessionRuntimeState,
@@ -64,18 +66,31 @@ import {
 } from "./session-state";
 import { maybeBootstrapSessionHistory, processMemoryChunks } from "./memory-lifecycle";
 
+type SharedRuntime = Pick<
+  RuntimeContract,
+  | "readSessionMessages"
+  | "deliverContextNoReply"
+  | "listTemporarySessions"
+  | "deleteTemporarySessionForCleanup"
+  | "getTemporarySession"
+> &
+  SummarizerRuntime;
+
 // ── Centralised constants ─────────────────────────────────
 const MEMORY_DIR_FALLBACK = ".opencode/memory";
 
 // ── Plugin factory with encapsulated instance state ─────────
 
-export const SessionMemoryPlugin = async ({
-  client,
-  directory,
-}: {
-  client: Client;
-  directory?: string;
-}): Promise<Record<string, unknown>> => {
+export const SessionMemoryPlugin = async (
+  {
+    client,
+    directory,
+  }: {
+    client: Client;
+    directory?: string;
+  },
+  runtime: SharedRuntime,
+): Promise<Record<string, unknown>> => {
   // Start-of-factory clock. We want the factory body (synchronous setup)
   // to complete in <10ms; the diff is what the e2e harness greps for.
   const __stmT0 = performance.now();
@@ -262,12 +277,7 @@ export const SessionMemoryPlugin = async ({
     // shipped the tracking file). This is a best-effort supplement.
     let liveOrphans: string[] = [];
     try {
-      const listResult = (await client.session.list()) as unknown;
-      const rows: unknown[] = Array.isArray(listResult)
-        ? (listResult as unknown[])
-        : Array.isArray((listResult as { data?: unknown[] } | undefined)?.data)
-          ? ((listResult as { data: unknown[] }).data as unknown[])
-          : [];
+      const rows = await runtime.listTemporarySessions({});
       for (const row of rows) {
         const r = row as Record<string, unknown>;
         if (typeof r?.id !== "string") continue;
@@ -294,14 +304,14 @@ export const SessionMemoryPlugin = async ({
     let deleted = 0;
     for (const id of all) {
       try {
-        const res = (await client.session.delete({ path: { id } })) as {
-          data?: unknown;
-          error?: { name?: string; data?: { message?: string } } | string;
-        };
-        if (res?.error) {
-          const errObj = typeof res.error === "object" && res.error !== null ? res.error : undefined;
+        const result = await runtime.deleteTemporarySessionForCleanup({ id });
+        if (!result.deleted) {
+          const errObj =
+            typeof result.error === "object" && result.error !== null
+              ? (result.error as { name?: string; data?: { message?: string } })
+              : undefined;
           const errName = errObj?.name;
-          const errMsg = errObj?.data?.message ?? (typeof res.error === "string" ? res.error : "");
+          const errMsg = errObj?.data?.message ?? (typeof result.error === "string" ? result.error : "");
           const isAlreadyGone =
             errName === "NotFoundError" || /not\s*found/i.test(errMsg) || /Unexpected server error/i.test(errMsg);
           if (isAlreadyGone) {
@@ -343,9 +353,8 @@ export const SessionMemoryPlugin = async ({
 
   async function isSessionDeleted(sessionID: string): Promise<boolean> {
     try {
-      const res = (await client.session.get({ path: { id: sessionID } })) as { data?: unknown; error?: unknown };
-      if (res?.error) return true;
-      return !res?.data;
+      await runtime.getTemporarySession({ id: sessionID });
+      return false;
     } catch {
       return true;
     }
@@ -372,7 +381,7 @@ export const SessionMemoryPlugin = async ({
     }, config.debounceMs);
   }
 
-  async function attemptPendingMainDcpDelivery(client: Client, sessionID: string, config: SessionMemoryConfig) {
+  async function attemptPendingMainDcpDelivery(sessionID: string, config: SessionMemoryConfig) {
     const s = sessionStates.get(sessionID);
     if (!s?.mainDcpDeliveryPending || !s.lastDcpCompressAt || isSessionTerminal(sessionID)) return;
 
@@ -380,7 +389,7 @@ export const SessionMemoryPlugin = async ({
     const memoryRevision = s.memoryRevision;
     const memory = await readText(memoryPathFor(sessionID, config.memoryDir), "");
     const delivered = await deliverMemoryViaNoReply(
-      client,
+      runtime,
       sessionID,
       `dcp:${dcpIdentity}`,
       memoryRevision,
@@ -439,7 +448,7 @@ export const SessionMemoryPlugin = async ({
             ? await readText(join(directory || ".", "AGENTS.md"), "")
             : "";
         const agentsMdContext = sanitizeMessage(agentsMdContextRaw).slice(0, config.maxUpdateInputLength);
-        const recent = await collectRecentVisibleMessages(client, sessionID, config, globalState);
+        const recent = await collectRecentVisibleMessages(runtime, client, sessionID, config, globalState);
         if (!recent.entries.length) {
           await logEvent(config, "memory_update_skipped", { sessionID, reason, detail: "no_visible_recent_messages" });
           return false;
@@ -464,6 +473,7 @@ export const SessionMemoryPlugin = async ({
         // I13 – delegate chunk processing to extracted helper
         wroteMemory = await processMemoryChunks(
           client,
+          runtime,
           sessionID,
           reason,
           config,
@@ -505,7 +515,7 @@ export const SessionMemoryPlugin = async ({
       }
     } finally {
       try {
-        await attemptPendingMainDcpDelivery(client, sessionID, config);
+        await attemptPendingMainDcpDelivery(sessionID, config);
       } catch (error) {
         try {
           await logEvent(config, "dcp_delivery_error", {
@@ -857,7 +867,7 @@ export const SessionMemoryPlugin = async ({
 
       const memoryRevision = s.memoryRevision;
       const memory = await readText(memoryPathFor(sessionID, config.memoryDir), "");
-      await deliverMemoryViaNoReply(client, sessionID, turnID, memoryRevision, memory, config, globalState, s);
+      await deliverMemoryViaNoReply(runtime, sessionID, turnID, memoryRevision, memory, config, globalState, s);
     },
 
     "experimental.chat.system.transform": async (input: SystemTransformInput, output: SystemTransformOutput) => {
