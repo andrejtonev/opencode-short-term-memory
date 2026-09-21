@@ -1,2 +1,2 @@
-export { SessionMemoryPlugin } from "./session-memory";
-export { default } from "./session-memory";
+export { SessionMemoryPlugin } from "./v1-adapter";
+export { default } from "./v1-adapter";
