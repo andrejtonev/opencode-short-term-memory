@@ -10,5 +10,5 @@ export default defineConfig({
   clean: true,
   dts: false,
   bundle: true,
-  external: ["@opencode-ai/plugin", "@opencode-ai/sdk", "jsonc-parser"],
+  external: ["@opencode/plugin", "@opencode-ai/plugin", "@opencode-ai/sdk", "jsonc-parser"],
 });

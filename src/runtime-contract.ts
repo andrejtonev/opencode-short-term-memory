@@ -63,6 +63,7 @@ export interface RuntimeTemporarySessionList {
 }
 
 export interface RuntimeMutation<TInput = unknown, TOutput = unknown> {
+  (input: TInput): void | Promise<void>;
   (input: TInput, output: TOutput): void | Promise<void>;
 }
 
