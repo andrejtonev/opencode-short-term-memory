@@ -350,16 +350,22 @@ describe("V2 adapter", () => {
     await expect(adapter.dispose()).resolves.toBeUndefined();
   });
 
-  test("keeps root and src entrypoints as the V1 callable only", () => {
-    const typedRoot: typeof RootDefault = RootNamed;
-    const typedSrc: typeof SrcDefault = SrcNamed;
-    expect(RootDefault).toBe(RootNamed);
+  test("exports one dual loader with isolated V1 and registration-only V2 entrypoints", async () => {
+    const { context, hooks, transforms } = createContext();
+
     expect(RootDefault).toBe(SrcDefault);
-    expect(SrcDefault).toBe(SrcNamed);
-    expect(typeof typedRoot).toBe("function");
-    expect(typeof typedSrc).toBe("function");
-    expect(RootDefault).not.toHaveProperty("setup");
-    expect(SrcDefault).not.toHaveProperty("setup");
+    expect(Object.keys(RootDefault)).toEqual(["id", "server", "setup"]);
+    expect(RootDefault.id).toBe("opencode-short-term-memory");
+    expect(RootDefault.server).toBe(RootNamed);
+    expect(RootNamed).toBe(SrcNamed);
+    expect(typeof RootNamed).toBe("function");
+
+    const cleanup = await RootDefault.setup(context);
+    expect(typeof cleanup).toBe("function");
+    expect(hooks).toHaveLength(0);
+    expect(transforms).toHaveLength(0);
+    await expect(cleanup()).resolves.toBeUndefined();
+    await expect(cleanup()).resolves.toBeUndefined();
   });
 
   const _disposerConformance: RuntimeDisposer = { dispose: async () => undefined };

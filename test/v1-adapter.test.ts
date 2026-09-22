@@ -68,11 +68,14 @@ describe("production V1 adapter", () => {
     await tools.stm_memory_status.execute({}, {});
   }
 
-  test("root and src default and named exports resolve to one callable factory", () => {
-    expect(RootSessionMemoryPlugin).toBe(RootNamedSessionMemoryPlugin);
+  test("root and src expose one dual default with the named callable as its V1 server", () => {
     expect(RootSessionMemoryPlugin).toBe(SrcSessionMemoryPlugin);
-    expect(RootSessionMemoryPlugin).toBe(SrcNamedSessionMemoryPlugin);
-    expect(typeof RootSessionMemoryPlugin).toBe("function");
+    expect(Object.keys(RootSessionMemoryPlugin)).toEqual(["id", "server", "setup"]);
+    expect(RootSessionMemoryPlugin.id).toBe("opencode-short-term-memory");
+    expect(typeof RootSessionMemoryPlugin).toBe("object");
+    expect(RootSessionMemoryPlugin.server).toBe(RootNamedSessionMemoryPlugin);
+    expect(RootNamedSessionMemoryPlugin).toBe(SrcNamedSessionMemoryPlugin);
+    expect(typeof RootNamedSessionMemoryPlugin).toBe("function");
   });
 
   test("constructing the runtime contract does not call the client", () => {
@@ -94,12 +97,14 @@ describe("production V1 adapter", () => {
     expect(client.calls.list).toHaveLength(1);
   });
 
-  test("the public callable returns only the exact legacy hook surface", async () => {
-    const hooks = await RootSessionMemoryPlugin(createInput());
+  test("the default V1 server returns only the exact legacy hook surface", async () => {
+    const client = createFakeClient();
+    const hooks = await RootSessionMemoryPlugin.server(createInput(client));
 
     await drainBackgroundInitialization(hooks as Record<string, unknown>);
 
     expect(Object.keys(hooks)).toEqual(legacyHookKeys);
     expect(hooks).not.toHaveProperty("runtime");
+    expect(client.calls.list).toHaveLength(1);
   });
 });
