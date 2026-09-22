@@ -352,6 +352,12 @@ describe("V2 adapter", () => {
 
   test("exports one dual loader with isolated V1 and registration-only V2 entrypoints", async () => {
     const { context, hooks, transforms } = createContext();
+    const registration = deferred<{ dispose: () => Promise<void> }>();
+    let hostDisposals = 0;
+    context.session.hook = async (name, callback) => {
+      hooks.push({ name, callback });
+      return registration.promise;
+    };
 
     expect(RootDefault).toBe(SrcDefault);
     expect(Object.keys(RootDefault)).toEqual(["id", "server", "setup"]);
@@ -360,12 +366,36 @@ describe("V2 adapter", () => {
     expect(RootNamed).toBe(SrcNamed);
     expect(typeof RootNamed).toBe("function");
 
-    const cleanup = await RootDefault.setup(context);
-    expect(typeof cleanup).toBe("function");
-    expect(hooks).toHaveLength(0);
+    let setupResolved = false;
+    const setup = RootDefault.setup(context);
+    void setup.then(() => {
+      setupResolved = true;
+    });
+    await Promise.resolve();
+
+    expect(setupResolved).toBe(false);
+    expect(hooks.map(({ name }) => name)).toEqual(["context"]);
     expect(transforms).toHaveLength(0);
+
+    registration.resolve({ dispose: async () => void hostDisposals++ });
+    const cleanup = await setup;
+    expect(typeof cleanup).toBe("function");
     await expect(cleanup()).resolves.toBeUndefined();
     await expect(cleanup()).resolves.toBeUndefined();
+    expect(hostDisposals).toBe(1);
+  });
+
+  test("dual-loader setup disposes best-effort and preserves context registration rejection", async () => {
+    const failure = new Error("context registration failure");
+    const { context, hooks, transforms } = createContext();
+    context.session.hook = async (name, callback) => {
+      hooks.push({ name, callback });
+      throw failure;
+    };
+
+    await expect(RootDefault.setup(context)).rejects.toBe(failure);
+    expect(hooks.map(({ name }) => name)).toEqual(["context"]);
+    expect(transforms).toHaveLength(0);
   });
 
   const _disposerConformance: RuntimeDisposer = { dispose: async () => undefined };
