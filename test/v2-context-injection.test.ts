@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { SessionCompaction } from "@opencode/plugin/promise/session";
 import { buildTaggedMemoryForInjection } from "../src/injection";
 import {
   DEFAULT_CONFIG,
@@ -26,6 +27,17 @@ function sessionContext(sessionID: string, system: V2SessionContext["system"] = 
     options: {},
     tools: {},
   } as unknown as V2SessionContext;
+}
+
+function sessionCompaction(
+  sessionID: string,
+  system: SessionCompaction["system"] = [],
+  result?: SessionCompaction["result"],
+): SessionCompaction {
+  return {
+    ...sessionContext(sessionID, system),
+    ...(result === undefined ? {} : { result }),
+  } as SessionCompaction;
 }
 
 describe("V2 context injection", () => {
@@ -143,6 +155,56 @@ describe("V2 context injection", () => {
     const prepopulated = sessionContext(sessionID, [existingTagged]);
     await callback(prepopulated);
     expect(prepopulated.system).toEqual([existingTagged]);
+  });
+
+  test("adds persisted memory to an exact V2 compaction without creating a result", async () => {
+    const sessionID = "compaction-no-result";
+    const memoryDir = join(testDir, "compaction-memory");
+    const memory = `${MEMORY_HEADER}\n\n### Decisions\n- Preserve compaction result absence.\n`;
+    const tagged = buildTaggedMemoryForInjection(memory, DEFAULT_CONFIG.maxMemoryLength);
+    await writeText(join(projectDir, ".opencode", "stm.json"), JSON.stringify({ memoryDir }));
+    await writeText(memoryPathFor(sessionID, memoryDir), memory);
+    const input = sessionCompaction(sessionID);
+
+    await createV2ContextInjection(projectDir)(input);
+
+    expect(input.system).toEqual([{ type: "text", text: tagged }]);
+    expect(input.result).toBeUndefined();
+    expect("result" in input).toBe(false);
+  });
+
+  test("adds persisted memory to an exact V2 compaction while preserving its result identity", async () => {
+    const sessionID = "compaction-sentinel-result";
+    const memoryDir = join(testDir, "compaction-sentinel-memory");
+    const memory = `${MEMORY_HEADER}\n\n### Decisions\n- Preserve the sentinel result.\n`;
+    const tagged = buildTaggedMemoryForInjection(memory, DEFAULT_CONFIG.maxMemoryLength);
+    const result = { summary: "sentinel compaction result", metadata: { sentinel: true } };
+    await writeText(join(projectDir, ".opencode", "stm.json"), JSON.stringify({ memoryDir }));
+    await writeText(memoryPathFor(sessionID, memoryDir), memory);
+    const input = sessionCompaction(sessionID, [], result);
+
+    await createV2ContextInjection(projectDir)(input);
+
+    expect(input.system).toEqual([{ type: "text", text: tagged }]);
+    expect(input.result).toBe(result);
+    expect(input.result).toEqual(result);
+  });
+
+  test("deduplicates tagged persisted memory across repeated exact V2 compaction callbacks", async () => {
+    const sessionID = "compaction-dedupe";
+    const memoryDir = join(testDir, "compaction-dedupe-memory");
+    const memory = `${MEMORY_HEADER}\n\n### Decisions\n- Keep one compaction memory part.\n`;
+    const tagged = buildTaggedMemoryForInjection(memory, DEFAULT_CONFIG.maxMemoryLength);
+    await writeText(join(projectDir, ".opencode", "stm.json"), JSON.stringify({ memoryDir }));
+    await writeText(memoryPathFor(sessionID, memoryDir), memory);
+    const callback = createV2ContextInjection(projectDir);
+    const input = sessionCompaction(sessionID);
+
+    await callback(input);
+    await callback(input);
+
+    expect(input.system).toEqual([{ type: "text", text: tagged }]);
+    expect(input.system.filter((part) => part.type === "text" && part.text.includes(INJECTION_PREFIX))).toHaveLength(1);
   });
 
   test("reads separator and metacharacter session IDs through memoryPathFor sanitization", async () => {

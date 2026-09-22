@@ -352,11 +352,15 @@ describe("V2 adapter", () => {
 
   test("exports one dual loader with isolated V1 and registration-only V2 entrypoints", async () => {
     const { context, hooks, transforms } = createContext();
-    const registration = deferred<{ dispose: () => Promise<void> }>();
-    let hostDisposals = 0;
+    const contextRegistration = deferred<{ dispose: () => Promise<void> }>();
+    const compactionRegistration = deferred<{ dispose: () => Promise<void> }>();
+    const compactionAttempted = deferred<void>();
+    const hostDisposals: string[] = [];
     context.session.hook = async (name, callback) => {
       hooks.push({ name, callback });
-      return registration.promise;
+      if (name === "context") return contextRegistration.promise;
+      compactionAttempted.resolve();
+      return compactionRegistration.promise;
     };
 
     expect(RootDefault).toBe(SrcDefault);
@@ -377,15 +381,29 @@ describe("V2 adapter", () => {
     expect(hooks.map(({ name }) => name)).toEqual(["context"]);
     expect(transforms).toHaveLength(0);
 
-    registration.resolve({ dispose: async () => void hostDisposals++ });
+    contextRegistration.resolve({
+      dispose: async () => {
+        hostDisposals.push("context");
+      },
+    });
+    await compactionAttempted.promise;
+    expect(setupResolved).toBe(false);
+    expect(hooks.map(({ name }) => name)).toEqual(["context", "compaction"]);
+    expect(transforms).toHaveLength(0);
+
+    compactionRegistration.resolve({
+      dispose: async () => {
+        hostDisposals.push("compaction");
+      },
+    });
     const cleanup = await setup;
     expect(typeof cleanup).toBe("function");
     await expect(cleanup()).resolves.toBeUndefined();
     await expect(cleanup()).resolves.toBeUndefined();
-    expect(hostDisposals).toBe(1);
+    expect(hostDisposals).toEqual(["compaction", "context"]);
   });
 
-  test("dual-loader setup disposes best-effort and preserves context registration rejection", async () => {
+  test("dual-loader setup preserves context registration rejection without attempting compaction", async () => {
     const failure = new Error("context registration failure");
     const { context, hooks, transforms } = createContext();
     context.session.hook = async (name, callback) => {
@@ -396,6 +414,22 @@ describe("V2 adapter", () => {
     await expect(RootDefault.setup(context)).rejects.toBe(failure);
     expect(hooks.map(({ name }) => name)).toEqual(["context"]);
     expect(transforms).toHaveLength(0);
+  });
+
+  test("dual-loader setup disposes acquired context and preserves compaction registration rejection", async () => {
+    const failure = new Error("compaction registration failure");
+    const { context, hooks, transforms } = createContext();
+    let contextDisposals = 0;
+    context.session.hook = async (name, callback) => {
+      hooks.push({ name, callback });
+      if (name === "compaction") throw failure;
+      return { dispose: async () => void contextDisposals++ };
+    };
+
+    await expect(RootDefault.setup(context)).rejects.toBe(failure);
+    expect(hooks.map(({ name }) => name)).toEqual(["context", "compaction"]);
+    expect(transforms).toHaveLength(0);
+    expect(contextDisposals).toBe(1);
   });
 
   const _disposerConformance: RuntimeDisposer = { dispose: async () => undefined };

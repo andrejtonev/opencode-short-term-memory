@@ -10,8 +10,10 @@ export default {
   server: SessionMemoryPlugin,
   async setup(context) {
     const adapter = createV2Adapter(context);
+    const callback = createV2ContextInjection(context.location.directory);
     try {
-      await adapter.runtime.registerSystemContextMutation(createV2ContextInjection(context.location.directory));
+      await adapter.runtime.registerSystemContextMutation(callback);
+      await adapter.runtime.registerCompactionMutation(callback);
     } catch (error) {
       try {
         await adapter.dispose();
