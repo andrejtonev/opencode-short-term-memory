@@ -1,0 +1,14 @@
+{
+  "name": "stm-v2-generation-probe",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "host-probe": "bun host-probe.ts",
+    "test": "bun test --isolate index.test.ts",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@opencode/cli": "2.0.12",
+    "@opencode/plugin": "2.0.12"
+  }
+}
