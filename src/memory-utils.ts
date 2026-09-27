@@ -123,43 +123,59 @@ export async function writeText(path: string, text: string) {
   });
 }
 
-export async function writeTextAtomic(path: string, text: string) {
-  await withPathWriteLock(path, async () => {
-    await ensureDir(dirname(path));
-    const tmpPath = `${path}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+async function writeTextAtomicUnlocked(path: string, text: string) {
+  await ensureDir(dirname(path));
+  const tmpPath = `${path}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
-    const tmpHandle = await open(tmpPath, "w");
+  const tmpHandle = await open(tmpPath, "w");
+  try {
+    await tmpHandle.writeFile(text, "utf8");
+    await tmpHandle.sync();
+  } finally {
+    await tmpHandle.close();
+  }
+
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 5; attempt += 1) {
     try {
-      await tmpHandle.writeFile(text, "utf8");
-      await tmpHandle.sync();
-    } finally {
-      await tmpHandle.close();
-    }
-
-    let lastError: unknown;
-    for (let attempt = 0; attempt < 5; attempt += 1) {
-      try {
-        await rename(tmpPath, path);
-        return;
-      } catch (err: unknown) {
-        lastError = err;
-        const errCode = (err as { code?: string }).code;
-        if (process.platform === "win32" && (errCode === "EPERM" || errCode === "EBUSY")) {
-          try {
-            await rm(path, { force: true });
-          } catch {}
-          try {
-            await rename(tmpPath, path);
-            return;
-          } catch {}
-        }
-        const waitMs = 10 * (attempt + 1);
-        await new Promise((resolve) => setTimeout(resolve, waitMs));
+      await rename(tmpPath, path);
+      return;
+    } catch (err: unknown) {
+      lastError = err;
+      const errCode = (err as { code?: string }).code;
+      if (process.platform === "win32" && (errCode === "EPERM" || errCode === "EBUSY")) {
+        try {
+          await rm(path, { force: true });
+        } catch {}
+        try {
+          await rename(tmpPath, path);
+          return;
+        } catch {}
       }
+      const waitMs = 10 * (attempt + 1);
+      await new Promise((resolve) => setTimeout(resolve, waitMs));
     }
+  }
 
-    await rm(tmpPath, { force: true }).catch(() => {});
-    throw lastError instanceof Error ? lastError : new Error(String(lastError ?? "atomic rename failed"));
+  await rm(tmpPath, { force: true }).catch(() => {});
+  throw lastError instanceof Error ? lastError : new Error(String(lastError ?? "atomic rename failed"));
+}
+
+export async function writeTextAtomic(path: string, text: string) {
+  await withPathWriteLock(path, () => writeTextAtomicUnlocked(path, text));
+}
+
+export async function compareAndReplaceTextAtomic(path: string, expected: string, replacement: string) {
+  return await withPathWriteLock(path, async () => {
+    let current = "";
+    try {
+      current = await readFile(path, "utf8");
+    } catch (error: unknown) {
+      if ((error as { code?: string })?.code !== "ENOENT") throw error;
+    }
+    if (current !== expected) return false;
+    await writeTextAtomicUnlocked(path, replacement);
+    return true;
   });
 }
 

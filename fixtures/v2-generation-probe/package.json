@@ -4,6 +4,7 @@
   "type": "module",
   "scripts": {
     "host-probe": "bun host-probe.ts",
+    "production-update-probe": "bun production-update-probe.ts",
     "test": "bun test --isolate index.test.ts",
     "typecheck": "tsc -p tsconfig.json"
   },

@@ -1,0 +1,269 @@
+import type { SessionMemoryConfig } from "./memory-utils";
+import {
+  DEFAULT_CONFIG,
+  MEMORY_HEADER,
+  compareAndReplaceTextAtomic,
+  ensureMemoryFile,
+  isInternalPartType,
+  isSelfInjection,
+  logEvent,
+  readConfig,
+  readText,
+} from "./memory-utils";
+import {
+  isLikelyInternalAssistantMessage,
+  readLastProcessedMessageID,
+  writeLastProcessedMessageID,
+} from "./message-collector";
+import { buildMemoryPrompt, CLEAN_SUMMARIZER_TIMEOUT, normalizeMemory } from "./summarizer";
+import type { V2Context, V2SessionContext } from "./v2-adapter";
+
+const REQUIRED_HEADINGS = [
+  "User Instructions",
+  "Long Horizon Context",
+  "Decisions",
+  "Conclusions",
+  "Active References",
+] as const;
+const TEMPLATE_MARKERS = /<\/?(?:existing_memory|conversation_update|agents_md_context)>/i;
+const inFlightSessions = new Set<string>();
+
+export type V2MemoryUpdaterTestHooks = {
+  readonly beforeRollback?: () => void | Promise<void>;
+  readonly writeCheckpoint?: typeof writeLastProcessedMessageID;
+};
+
+type VisibleEntry = { readonly id: string; readonly rendered: string; readonly role: "user" | "assistant" };
+type ChunkUnit = {
+  readonly entries: VisibleEntry[];
+  readonly consumed: number;
+  readonly checkpointID: string;
+  readonly fragments?: readonly VisibleEntry[];
+};
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error ?? "");
+}
+
+async function safeLog(config: SessionMemoryConfig, event: string, data: Record<string, unknown>): Promise<void> {
+  try {
+    await logEvent(config, event, data);
+  } catch {}
+}
+
+function messageText(message: V2SessionContext["messages"][number]): string {
+  const parts = Array.isArray(message.content) ? message.content : [];
+  return parts
+    .filter((part) => {
+      const value = part as Record<string, unknown>;
+      const type = String(value.type ?? "").toLowerCase();
+      return type === "text" && !isInternalPartType(type) && value.synthetic !== true;
+    })
+    .map((part) => String((part as Record<string, unknown>).text ?? ""))
+    .filter(Boolean)
+    .join("\n")
+    .replace(/<think>[\s\S]*?<\/think>/gi, "")
+    .replace(/```thinking[\s\S]*?```/gi, "")
+    .trim();
+}
+
+function visibleMessages(input: V2SessionContext): VisibleEntry[] | undefined {
+  const entries: VisibleEntry[] = [];
+  const ids = new Set<string>();
+  for (const message of input.messages) {
+    if (message.role !== "user" && message.role !== "assistant") continue;
+    const text = messageText(message);
+    if (!text || isSelfInjection(text) || text.includes("<memory_summary>")) continue;
+    if (message.role === "assistant" && isLikelyInternalAssistantMessage({ parts: message.content }, text)) continue;
+    const id = String(message.id ?? "").trim();
+    if (!id || ids.has(id)) return undefined;
+    ids.add(id);
+    entries.push({ id, rendered: `${message.role.toUpperCase()}:\n${text}`, role: message.role });
+  }
+  return entries;
+}
+
+function oversizedFragments(entry: VisibleEntry, maxLength: number): VisibleEntry[] {
+  const prefix = `${entry.role.toUpperCase()}:\n[OVERSIZED_ENTRY_CONTINUATION]\n`;
+  const payloadLength = Math.max(1, maxLength - prefix.length);
+  const fragments: VisibleEntry[] = [];
+  for (let offset = 0; offset < entry.rendered.length; offset += payloadLength) {
+    fragments.push({ ...entry, rendered: `${prefix}${entry.rendered.slice(offset, offset + payloadLength)}` });
+  }
+  return fragments;
+}
+
+function boundedChunk(entries: VisibleEntry[], config: SessionMemoryConfig): ChunkUnit | undefined {
+  const result: VisibleEntry[] = [];
+  let length = 0;
+  for (let index = 0; index < entries.length && index < config.maxDeltaMessages; index += 1) {
+    const entry = entries[index]!;
+    if (entry.rendered.length > config.maxUpdateInputLength) {
+      if (result.length) {
+        return { entries: result, consumed: result.length, checkpointID: result[result.length - 1]!.id };
+      }
+      const fragments = oversizedFragments(entry, config.maxUpdateInputLength);
+      return { entries: [fragments[0]!], consumed: 0, checkpointID: "", fragments };
+    }
+    const separator = result.length ? "\n\n---\n\n" : "";
+    if (length + separator.length + entry.rendered.length <= config.maxUpdateInputLength) {
+      result.push(entry);
+      length += separator.length + entry.rendered.length;
+      continue;
+    }
+    break;
+  }
+  if (!result.length) return undefined;
+  return { entries: result, consumed: result.length, checkpointID: result[result.length - 1]!.id };
+}
+
+function validateRawMemory(raw: string): void {
+  if (!raw.trim()) throw new Error("empty_generation");
+  if (!raw.includes(MEMORY_HEADER)) throw new Error("missing_memory_header");
+  for (const heading of REQUIRED_HEADINGS) {
+    if (!raw.includes(`### ${heading}`)) throw new Error(`missing_heading:${heading}`);
+  }
+  if (TEMPLATE_MARKERS.test(raw)) throw new Error("raw_template_marker");
+}
+
+async function generateWithTimeout(operation: (signal: AbortSignal) => Promise<{ text: string }>): Promise<string> {
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const operationPromise = Promise.resolve().then(() => operation(controller.signal));
+  operationPromise.catch(() => undefined);
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      reject(new Error(`summarizer_timeout:${CLEAN_SUMMARIZER_TIMEOUT.ms}ms`));
+    }, CLEAN_SUMMARIZER_TIMEOUT.ms);
+  });
+  try {
+    return (await Promise.race([operationPromise, timeoutPromise])).text;
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+export function createV2MemoryUpdater(
+  context: V2Context,
+  directory?: string,
+  hooks?: V2MemoryUpdaterTestHooks,
+): (input: V2SessionContext) => Promise<void> {
+  return async (input) => {
+    let config: SessionMemoryConfig | undefined;
+    const sessionID = input.sessionID;
+    const key = inFlightKey(directory ?? context.location.directory, sessionID);
+    if (inFlightSessions.has(key)) return;
+    inFlightSessions.add(key);
+    try {
+      config = await readConfig(undefined, directory);
+      if (!config.enabled) return;
+      const visible = visibleMessages(input);
+      if (!visible) {
+        await logEvent(config, "v2_memory_update_skipped", { sessionID, reason: "invalid_visible_ids" });
+        return;
+      }
+      const checkpoint = await readLastProcessedMessageID(sessionID, config);
+      const checkpointIndex = checkpoint ? visible.findIndex((entry) => entry.id === checkpoint) : -1;
+      const delta = checkpoint && checkpointIndex >= 0 ? visible.slice(checkpointIndex + 1) : visible;
+      if (checkpoint && checkpointIndex < 0) {
+        await logEvent(config, "v2_memory_update_skipped", {
+          sessionID,
+          reason: "checkpoint_rebase",
+          absentCheckpoint: checkpoint,
+        });
+      }
+      if (!delta.some((entry) => entry.role === "assistant")) {
+        await logEvent(config, "v2_memory_update_skipped", { sessionID, reason: "no_assistant_in_delta" });
+        return;
+      }
+
+      const memoryPath = await ensureMemoryFile(sessionID, config);
+      let consumed = 0;
+      let fragmentState: { fragments: readonly VisibleEntry[]; index: number; entryID: string } | undefined;
+      while (consumed < delta.length) {
+        const bounded = fragmentState
+          ? {
+              entries: [fragmentState.fragments[fragmentState.index]!],
+              consumed: 0,
+              checkpointID: fragmentState.index === fragmentState.fragments.length - 1 ? fragmentState.entryID : "",
+            }
+          : boundedChunk(delta.slice(consumed), config);
+        if (!bounded) break;
+        const existingMemory = await readText(memoryPath, "");
+        const conversation = bounded.entries.map((entry) => entry.rendered).join("\n\n---\n\n");
+        const prompt = buildMemoryPrompt(existingMemory, conversation, config);
+        const raw =
+          config.summarizerMode === "active"
+            ? await generateWithTimeout((signal) => context.session.generate({ sessionID, prompt }, { signal }))
+            : await generateWithTimeout((signal) => context.generate.text({ prompt, model: input.model }, { signal }));
+        validateRawMemory(raw);
+        const nextMemory = normalizeMemory(raw, config);
+        if (!(await compareAndReplaceTextAtomic(memoryPath, existingMemory, nextMemory))) {
+          await logEvent(config, "v2_memory_update_skipped", { sessionID, reason: "concurrent_memory_change" });
+          return;
+        }
+        if (bounded.checkpointID) {
+          try {
+            await (hooks?.writeCheckpoint ?? writeLastProcessedMessageID)(sessionID, bounded.checkpointID, config);
+          } catch (error) {
+            try {
+              await hooks?.beforeRollback?.();
+              if (!(await compareAndReplaceTextAtomic(memoryPath, nextMemory, existingMemory))) {
+                await safeLog(config, "v2_memory_update_error", {
+                  sessionID,
+                  reason: "checkpoint_write_failed_restore_conflict",
+                  detail: "memory_changed_before_rollback",
+                });
+              }
+            } catch (restoreError) {
+              await safeLog(config, "v2_memory_update_error", {
+                sessionID,
+                reason: "checkpoint_write_failed_restore_failed",
+                detail: `${errorMessage(error)}; ${errorMessage(restoreError)}`,
+              });
+            }
+            throw error;
+          }
+        }
+        if (fragmentState) {
+          if (fragmentState.index === fragmentState.fragments.length - 1) {
+            consumed += 1;
+            fragmentState = undefined;
+          } else {
+            fragmentState = { ...fragmentState, index: fragmentState.index + 1 };
+          }
+        } else if (bounded.fragments) {
+          fragmentState = { fragments: bounded.fragments, index: 1, entryID: delta[consumed]!.id };
+          if (bounded.fragments.length === 1) {
+            consumed += 1;
+            fragmentState = undefined;
+          }
+        } else {
+          consumed += bounded.consumed;
+        }
+        await logEvent(config, "v2_memory_update_committed", {
+          sessionID,
+          reason: "fresh_context",
+          checkpointID: bounded.checkpointID,
+        });
+      }
+    } catch (error) {
+      await safeLog(config ?? DEFAULT_CONFIG, "v2_memory_update_error", {
+        sessionID,
+        reason: "operational_failure",
+        detail: errorMessage(error),
+      });
+    } finally {
+      inFlightSessions.delete(key);
+    }
+  };
+}
+
+function inFlightKey(directory: string, sessionID: string): string {
+  return `${directory}\u0000${sessionID}`;
+}
+
+export function isV2MemoryUpdateInFlight(directory: string, sessionID: string): boolean {
+  return inFlightSessions.has(inFlightKey(directory, sessionID));
+}

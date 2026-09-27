@@ -8,11 +8,14 @@ import { Model, type Plugin, Provider } from "@opencode/plugin";
 import probe, {
   PROBE_COMPACTION_SUMMARY,
   PROBE_GENERATE_SENTINEL,
+  PROBE_MEMORY_SENTINEL,
   PROBE_MODEL_ID,
   PROBE_PROVIDER_ID,
   PROBE_SESSION_PROMPT_SENTINEL,
   PROBE_STANDALONE_PROMPT_SENTINEL,
   PROBE_STREAM_SENTINEL,
+  isMemoryUpdatePrompt,
+  memoryUpdateResponse,
 } from "./index.js";
 import {
   evaluateCompaction,
@@ -2141,4 +2144,32 @@ test("setup failure performs best-effort reverse cleanup and preserves the origi
   }
   expect(failure).toBe(original);
   expect(setupDisposals).toEqual(["session.context", "aisdk.language", "provider.transform"]);
+});
+
+test("detects only the production memory-update prompt shape", () => {
+  const prompt = [
+    {
+      role: "user",
+      content:
+        "You are a short‑term session memory processor for an OpenCode plugin. <conversation_update> " +
+        "### User Instructions ### Long Horizon Context ### Decisions ### Conclusions ### Active References",
+    },
+  ] as unknown as LanguageModelV3CallOptions["prompt"];
+  expect(isMemoryUpdatePrompt({ prompt })).toBe(true);
+  expect(
+    isMemoryUpdatePrompt({
+      prompt: [{ role: "user", content: [{ type: "text", text: "ordinary prompt" }] }],
+    }),
+  ).toBe(false);
+});
+
+test("returns a valid five-section memory document with a run-unique sentinel", () => {
+  const response = memoryUpdateResponse("run-specific");
+  expect(response).toContain("## Session Memory");
+  expect(response).toContain("### User Instructions");
+  expect(response).toContain("### Long Horizon Context");
+  expect(response).toContain("### Decisions");
+  expect(response).toContain("### Conclusions");
+  expect(response).toContain("### Active References");
+  expect(response).toContain(`${PROBE_MEMORY_SENTINEL}:run-specific`);
 });

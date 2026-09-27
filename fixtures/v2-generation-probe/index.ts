@@ -14,6 +14,7 @@ export const PROBE_PROVIDER_ID = "stm-probe";
 export const PROBE_MODEL_ID = "deterministic";
 export const PROBE_GENERATE_SENTINEL = "STM_PROBE_GENERATE_SENTINEL";
 export const PROBE_STREAM_SENTINEL = "STM_PROBE_STREAM_SENTINEL";
+export const PROBE_MEMORY_SENTINEL = "STM_PROBE_MEMORY_SENTINEL";
 export const PROBE_COMPACTION_SUMMARY = `## Objective
 Preserve deterministic probe context across compaction.
 
@@ -59,6 +60,16 @@ const COMPACTION_TEMPLATE_HEADINGS = [
   "## Important Context",
 ] as const;
 
+const MEMORY_UPDATE_PROMPT_MARKERS = [
+  "You are a short‑term session memory processor for an OpenCode plugin.",
+  "<conversation_update>",
+  "### User Instructions",
+  "### Long Horizon Context",
+  "### Decisions",
+  "### Conclusions",
+  "### Active References",
+] as const;
+
 function isCompactionPrompt(options: LanguageModelV3CallOptions): boolean {
   try {
     const prompt = JSON.stringify(options.prompt);
@@ -66,6 +77,35 @@ function isCompactionPrompt(options: LanguageModelV3CallOptions): boolean {
   } catch {
     return false;
   }
+}
+
+export function isMemoryUpdatePrompt(options: LanguageModelV3CallOptions): boolean {
+  try {
+    const prompt = JSON.stringify(options.prompt);
+    return MEMORY_UPDATE_PROMPT_MARKERS.every((marker) => prompt.includes(marker));
+  } catch {
+    return false;
+  }
+}
+
+export function memoryUpdateResponse(runId: string): string {
+  return `## Session Memory
+
+### User Instructions
+- Preserve the deterministic production update probe.
+
+### Long Horizon Context
+- The production V2 updater generated this memory document.
+
+### Decisions
+- Use the clean summarizer path.
+
+### Conclusions
+- ${PROBE_MEMORY_SENTINEL}:${runId}
+
+### Active References
+- fixtures/v2-generation-probe/production-update-probe.ts
+`;
 }
 
 const ZERO_USAGE: LanguageModelV3Usage = {
@@ -278,7 +318,11 @@ const probe = {
               supportedUrls: {},
               async doGenerate(options) {
                 const invocation = ++modelInvocation;
-                const responseText = isCompactionPrompt(options) ? PROBE_COMPACTION_SUMMARY : PROBE_GENERATE_SENTINEL;
+                const responseText = isCompactionPrompt(options)
+                  ? PROBE_COMPACTION_SUMMARY
+                  : isMemoryUpdatePrompt(options)
+                    ? memoryUpdateResponse(writer.runId)
+                    : PROBE_GENERATE_SENTINEL;
                 await writer.emit({
                   event: "model.invocation",
                   provider: PROBE_PROVIDER_ID,
@@ -296,7 +340,11 @@ const probe = {
               },
               async doStream(options) {
                 const invocation = ++modelInvocation;
-                const responseText = isCompactionPrompt(options) ? PROBE_COMPACTION_SUMMARY : PROBE_STREAM_SENTINEL;
+                const responseText = isCompactionPrompt(options)
+                  ? PROBE_COMPACTION_SUMMARY
+                  : isMemoryUpdatePrompt(options)
+                    ? memoryUpdateResponse(writer.runId)
+                    : PROBE_STREAM_SENTINEL;
                 await writer.emit({
                   event: "model.invocation",
                   provider: PROBE_PROVIDER_ID,

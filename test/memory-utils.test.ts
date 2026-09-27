@@ -8,6 +8,7 @@ import {
   MEMORY_HEADER,
   appendText,
   clampText,
+  compareAndReplaceTextAtomic,
   createProjectExampleConfig,
   ensureMemoryFile,
   getMessageText,
@@ -234,6 +235,15 @@ describe("memory-utils general behavior", () => {
     const final = await readText(target, "");
     const acceptable = new Set(chunks.map((text) => text).concat(chunks.map((text) => `${text}\n`)));
     expect(acceptable.has(final)).toBe(true);
+  });
+
+  test("compareAndReplaceTextAtomic compares and replaces under one path lock", async () => {
+    const target = join(DEFAULT_CONFIG.memoryDir, "compare-replace.md");
+    await writeText(target, "before");
+    expect(await compareAndReplaceTextAtomic(target, "wrong", "next")).toBe(false);
+    expect(await readText(target, "")).toBe("before");
+    expect(await compareAndReplaceTextAtomic(target, "before", "next")).toBe(true);
+    expect(await readText(target, "")).toBe("next");
   });
 
   test("createProjectExampleConfig creates only a project-local stm.jsonc example", async () => {
