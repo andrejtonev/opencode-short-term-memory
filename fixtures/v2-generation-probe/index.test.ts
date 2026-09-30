@@ -216,6 +216,14 @@ function callbackInput(sessionID = "session-1", messages: readonly unknown[] = [
 }
 
 const modelCall: LanguageModelV3CallOptions = { prompt: [] };
+const toolCall: LanguageModelV3CallOptions = {
+  prompt: [],
+  tools: [
+    { type: "function", name: "stm_memory_status", description: "status", inputSchema: {} },
+    { type: "function", name: "stm_memory_read", description: "read", inputSchema: {} },
+    { type: "provider", id: "ignored.tool", name: "ignored", args: {} },
+  ],
+};
 const compactionCall: LanguageModelV3CallOptions = {
   prompt: [
     {
@@ -1068,6 +1076,42 @@ describe("operation source parser", () => {
       }),
     ).toThrow("source has unknown value unknown");
   });
+
+  test("accepts object details on model invocation records", () => {
+    const record = evaluatorRecords("ordinary", [
+      {
+        event: "model.invocation",
+        provider: PROBE_PROVIDER_ID,
+        model: PROBE_MODEL_ID,
+        requestKind: "doStream",
+        invocation: 1,
+        sentinel: PROBE_STREAM_SENTINEL,
+        details: { toolNames: ["stm_memory_read"] },
+      },
+    ])[0]!;
+    expect(parseProbeTelemetryJsonl(JSON.stringify(record), { runId: record.runId, mode: "ordinary" })).toEqual([
+      record,
+    ]);
+  });
+
+  test("rejects non-object model invocation details", () => {
+    const record = {
+      ...evaluatorRecords("ordinary", [
+        {
+          event: "model.invocation",
+          provider: PROBE_PROVIDER_ID,
+          model: PROBE_MODEL_ID,
+          requestKind: "doStream",
+          invocation: 1,
+          sentinel: PROBE_STREAM_SENTINEL,
+        },
+      ])[0]!,
+      details: [],
+    };
+    expect(() => parseProbeTelemetryJsonl(JSON.stringify(record), { runId: record.runId, mode: "ordinary" })).toThrow(
+      "details must be an object",
+    );
+  });
 });
 
 function validOrdinaryRecords(): ProbeTelemetryRecord[] {
@@ -1588,6 +1632,54 @@ describe("generation evaluator adversarial coverage", () => {
 });
 
 describe("V2 deterministic provider and model", () => {
+  test("records sorted function tool names without changing ordinary, memory, or compaction responses", async () => {
+    const harness = await makeHarness("ordinary");
+    const memoryCall: LanguageModelV3CallOptions = {
+      ...toolCall,
+      prompt: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "text",
+              text:
+                "You are a short‑term session memory processor for an OpenCode plugin. <conversation_update> " +
+                "### User Instructions ### Long Horizon Context ### Decisions ### Conclusions ### Active References",
+            },
+          ],
+        },
+      ],
+    };
+    try {
+      const input: LanguageInput = {
+        model: harness.addedProviders[0]!.models[0]!,
+        sdk: {},
+        options: {},
+      };
+      await harness.languageCallback()(input);
+      const language = input.language!;
+      expect((await language.doGenerate(toolCall)).content).toEqual([{ type: "text", text: PROBE_GENERATE_SENTINEL }]);
+      expect((await language.doGenerate(memoryCall)).content).toEqual([
+        { type: "text", text: memoryUpdateResponse(harness.runId) },
+      ]);
+      const compaction = await language.doStream({ ...toolCall, ...compactionCall });
+      const parts: LanguageModelV3StreamPart[] = [];
+      for await (const part of compaction.stream) parts.push(part);
+      expect(parts.find((part) => part.type === "text-delta")).toMatchObject({
+        delta: PROBE_COMPACTION_SUMMARY,
+      });
+    } finally {
+      await harness.cleanup();
+      harness.restoreEnvironment();
+    }
+    const invocations = (await telemetry(harness.path)).filter(hasEvent("model.invocation"));
+    expect(invocations.map((record) => record.details?.toolNames)).toEqual([
+      ["stm_memory_read", "stm_memory_status"],
+      ["stm_memory_read", "stm_memory_status"],
+      ["stm_memory_read", "stm_memory_status"],
+    ]);
+  });
+
   test("registers exact inventory/order/scope and replaces only its model", async () => {
     const harness = await makeHarness("ordinary");
     try {

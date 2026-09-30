@@ -113,6 +113,16 @@ const ZERO_USAGE: LanguageModelV3Usage = {
   outputTokens: { total: 0, text: 0, reasoning: 0 },
 };
 
+function availableFunctionToolNames(options: LanguageModelV3CallOptions): string[] {
+  if (!Array.isArray(options.tools)) return [];
+  return options.tools
+    .flatMap((tool) => {
+      if (tool.type !== "function" || typeof tool.name !== "string") return [];
+      return [tool.name];
+    })
+    .sort();
+}
+
 class ProbeTimeoutError extends Error {
   constructor(operationId: string) {
     super(`${operationId} timed out after ${PROBE_GENERATION_TIMEOUT_MS}ms`);
@@ -330,6 +340,7 @@ const probe = {
                   requestKind: "doGenerate",
                   invocation,
                   sentinel: responseText,
+                  details: { toolNames: availableFunctionToolNames(options) },
                 });
                 return {
                   content: [{ type: "text", text: responseText }],
@@ -352,6 +363,7 @@ const probe = {
                   requestKind: "doStream",
                   invocation,
                   sentinel: responseText,
+                  details: { toolNames: availableFunctionToolNames(options) },
                 });
                 const textId = `stm-probe-text-${invocation}`;
                 return {

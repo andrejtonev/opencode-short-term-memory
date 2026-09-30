@@ -65,6 +65,7 @@ export type ProbeTelemetryRecord =
       readonly requestKind: "doGenerate" | "doStream";
       readonly invocation: number;
       readonly sentinel: string;
+      readonly details?: Record<string, unknown>;
     })
   | (RecordBase & {
       readonly event: "operation.start" | "operation.success" | "operation.failure" | "operation.timeout";

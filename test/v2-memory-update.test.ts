@@ -77,6 +77,9 @@ function makeContext(
         return options.clean ? options.clean(input, request?.signal) : { text: VALID_MEMORY };
       },
     },
+    tool: {
+      transform: async () => ({ dispose: async () => undefined }),
+    },
   };
   return { context: value as unknown as V2Context, calls };
 }

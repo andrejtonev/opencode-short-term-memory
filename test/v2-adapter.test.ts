@@ -398,6 +398,8 @@ describe("V2 adapter", () => {
     });
     const cleanup = await setup;
     expect(typeof cleanup).toBe("function");
+    expect(transforms).toHaveLength(2);
+    expect(transforms.map(({ kind }) => kind)).toEqual(["tool", "tool"]);
     await expect(cleanup()).resolves.toBeUndefined();
     await expect(cleanup()).resolves.toBeUndefined();
     expect(hostDisposals).toEqual(["compaction", "context"]);

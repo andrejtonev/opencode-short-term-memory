@@ -53,6 +53,8 @@ interface Evidence {
   readonly requiredHeadingsPresent: boolean;
   readonly memorySentinelPresent: boolean;
   readonly telemetryRecordCount: number;
+  readonly observedToolNames: readonly string[];
+  readonly primaryModelToolNames: readonly string[];
   readonly ordinaryEvaluator: { readonly passed: boolean; readonly failures: readonly string[] } | null;
   readonly injectionObservable: boolean;
   readonly sandboxDisposition: "removed" | "retained";
@@ -73,6 +75,12 @@ async function exists(path: string): Promise<boolean> {
 
 function assert(condition: unknown, message: string, failures: string[]): void {
   if (!condition) failures.push(message);
+}
+
+function invocationToolNames(record: Awaited<ReturnType<typeof parseProbeTelemetryJsonl>>[number]): readonly string[] {
+  if (record.event !== "model.invocation" || record.details === undefined) return [];
+  const names = record.details.toolNames;
+  return Array.isArray(names) ? names.filter((name): name is string => typeof name === "string") : [];
 }
 
 async function withOverallTimeout<T>(operation: Promise<T>, timeoutMs: number): Promise<T> {
@@ -112,7 +120,6 @@ import productionDefault from ${JSON.stringify(pathToFileURL(productionPluginPat
 
 const markers = ${JSON.stringify(markers)};
 const mark = (name) => writeFile(join(markers, name), name + "\\n");
-
 export default {
   id: productionDefault.id,
   server(...args) {
@@ -120,7 +127,7 @@ export default {
   },
   async setup(...args) {
     await mark("setup-entered");
-    const cleanup = await productionDefault.setup.apply(productionDefault, args);
+    const cleanup = await productionDefault.setup(...args);
     if (typeof cleanup !== "function") throw new TypeError("production setup did not return cleanup");
     await mark("setup-loaded");
     return async (...cleanupArgs) => {
@@ -152,6 +159,8 @@ async function run(): Promise<Evidence> {
   let requiredHeadingsPresent = false;
   let memorySentinelPresent = false;
   let telemetryRecordCount = 0;
+  let observedToolNames: string[] = [];
+  let primaryModelToolNames: string[] = [];
   let ordinaryEvaluator: Evidence["ordinaryEvaluator"] = null;
   let injectionObservable = false;
   let cleanupCompleted = false;
@@ -293,6 +302,34 @@ async function run(): Promise<Evidence> {
   try {
     telemetryRecords = parseProbeTelemetryJsonl(await readFile(telemetryPath, "utf8"), { runId, mode: "ordinary" });
     telemetryRecordCount = telemetryRecords.length;
+    observedToolNames = [...new Set(telemetryRecords.flatMap((record) => invocationToolNames(record)))].sort();
+    const primaryRequests = telemetryRecords
+      .filter((record) => record.event === "model.request" && record.requestKind === "primary")
+      .map((record) => record.seq);
+    const primaryInvocations = telemetryRecords.filter(
+      (record) =>
+        record.event === "model.invocation" &&
+        primaryRequests.some(
+          (requestSeq) =>
+            requestSeq < record.seq &&
+            !telemetryRecords.some(
+              (boundary) =>
+                boundary.event === "model.request" && boundary.seq > requestSeq && boundary.seq < record.seq,
+            ),
+        ),
+    );
+    const primaryToolNames = [...new Set(primaryInvocations.flatMap((record) => invocationToolNames(record)))];
+    primaryModelToolNames = primaryToolNames;
+    assert(
+      primaryToolNames.includes("stm_memory_read") && primaryToolNames.includes("stm_memory_status"),
+      "primary model invocation did not expose both stm_memory_read and stm_memory_status",
+      failures,
+    );
+    assert(
+      !primaryToolNames.some((name) => /^stm_memory_(?:reset|update|aggregate)$/.test(name)),
+      "primary model invocation exposed a forbidden V2 reset/update/aggregate tool",
+      failures,
+    );
     assert(
       telemetryRecords.some((record) => record.event === "setup" && record.name === "stm-v2-generation-probe"),
       "deterministic provider setup missing",
@@ -349,6 +386,8 @@ async function run(): Promise<Evidence> {
     requiredHeadingsPresent,
     memorySentinelPresent,
     telemetryRecordCount,
+    observedToolNames,
+    primaryModelToolNames,
     ordinaryEvaluator,
     injectionObservable,
     sandboxDisposition: failures.length === 0 ? "removed" : "retained",

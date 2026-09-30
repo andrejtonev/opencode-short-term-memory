@@ -221,6 +221,7 @@ function validateTelemetryRecord(
       if (typeof value.text !== "string") malformed(line, "text must be a string");
       break;
     case "model.invocation":
+      validateDetails(value, line);
       requireMember(value, "requestKind", INVOCATION_KINDS, line);
       requireNumber(value, "invocation", line);
       requireString(value, "sentinel", line);
