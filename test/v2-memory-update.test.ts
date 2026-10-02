@@ -15,6 +15,7 @@ import {
 import { CLEAN_SUMMARIZER_TIMEOUT } from "../src/summarizer";
 import type { V2Context, V2SessionContext } from "../src/v2-adapter";
 import { createV2MemoryUpdater, isV2MemoryUpdateInFlight } from "../src/v2-memory-update";
+import { withV2MemoryMutation } from "../src/v2-mutation-coordination";
 
 const VALID_MEMORY = `${MEMORY_HEADER}
 
@@ -353,6 +354,57 @@ describe("V2 fresh memory updater", () => {
     await Promise.all([first, second, other]);
   });
 
+  test("explicit mutations wait for an updater, then automatic updates skip manual ownership", async () => {
+    const generated = deferred<void>();
+    const generationGate = deferred<{ text: string }>();
+    const mutationGate = deferred<void>();
+    const mutationEntered = deferred<void>();
+    const { context, calls } = makeContext(directory, {
+      clean: async () => {
+        generated.resolve();
+        return generationGate.promise;
+      },
+    });
+    const updater = createV2MemoryUpdater(context);
+    const snapshot = input("coordinated", [message("u1", "user", "Q"), message("a1", "assistant", "A")]);
+    const update = updater(snapshot);
+    expect(isV2MemoryUpdateInFlight(directory, "coordinated")).toBe(true);
+    await generated.promise;
+    let mutationRan = false;
+    const mutation = withV2MemoryMutation(directory, "coordinated", async () => {
+      mutationRan = true;
+      expect(isV2MemoryUpdateInFlight(directory, "coordinated")).toBe(false);
+      expect(await readText(checkpointPathFor("coordinated", memoryDir))).toBe("a1\n");
+      mutationEntered.resolve();
+      await mutationGate.promise;
+    });
+    expect(mutationRan).toBe(false);
+    generationGate.resolve({ text: VALID_MEMORY });
+    await update;
+    await mutationEntered.promise;
+    await updater(input("coordinated", [message("a2", "assistant", "New answer")]));
+    expect(calls.clean).toHaveLength(1);
+    mutationGate.resolve();
+    await mutation;
+    await updater(input("coordinated", [message("a2", "assistant", "New answer")]));
+    expect(calls.clean).toHaveLength(2);
+    expect(isV2MemoryUpdateInFlight(directory, "coordinated")).toBe(false);
+  });
+
+  test("releases shared ownership after updater failure and early return", async () => {
+    const { context } = makeContext(directory, {
+      clean: async () => {
+        throw new Error("generation failure");
+      },
+    });
+    const updater = createV2MemoryUpdater(context);
+    for (const messages of [[message("a1", "assistant", "A")], [message("u1", "user", "Q")]]) {
+      await updater(input("released", messages));
+      expect(isV2MemoryUpdateInFlight(directory, "released")).toBe(false);
+      expect(await withV2MemoryMutation(directory, "released", () => "released")).toBe("released");
+    }
+  });
+
   test("does not suppress the same session ID in a different project directory", async () => {
     const otherDirectory = await mkdtemp(join(tmpdir(), "stm-v2-other-project-"));
     try {
@@ -478,11 +530,18 @@ describe("V2 fresh memory updater", () => {
     let nestedCheckpoint = "";
     let nestedInvocations = 0;
     let nestedSystemLength = -1;
+    let queuedMutation: Promise<void> | undefined;
+    let mutationRan = false;
     const base = makeContext(directory, {
       active: async ({ sessionID }) => {
         nestedInvocations += 1;
+        queuedMutation = withV2MemoryMutation(directory, sessionID, () => {
+          mutationRan = true;
+          expect(isV2MemoryUpdateInFlight(directory, sessionID)).toBe(false);
+        });
         const nestedInput = input(sessionID, [message("u1", "user", "Q"), message("a1", "assistant", "A")]);
         await nestedCallback?.(nestedInput);
+        expect(mutationRan).toBe(false);
         nestedSystemLength = nestedInput.system.length;
         nestedCheckpoint = await readText(checkpointPathFor(sessionID, memoryDir));
         return { text: VALID_MEMORY };
@@ -499,6 +558,8 @@ describe("V2 fresh memory updater", () => {
     const cleanup = await Root.setup(base.context);
     nestedCallback = hooks.find((hook) => hook.name === "context")?.callback;
     await nestedCallback!(input("recursive", [message("u1", "user", "Q"), message("a1", "assistant", "A")]));
+    await queuedMutation;
+    expect(mutationRan).toBe(true);
     expect(nestedInvocations).toBe(1);
     expect(base.calls.clean).toHaveLength(0);
     expect(base.calls.active).toHaveLength(1);

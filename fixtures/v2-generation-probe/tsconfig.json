@@ -8,5 +8,12 @@
     "skipLibCheck": true,
     "types": ["bun"]
   },
-  "include": ["host-probe.ts", "production-update-probe.ts", "index.ts", "index.test.ts"]
+  "include": [
+    "host-probe.ts",
+    "production-update-probe.ts",
+    "reset-evidence.ts",
+    "reset-evidence.test.ts",
+    "index.ts",
+    "index.test.ts"
+  ]
 }

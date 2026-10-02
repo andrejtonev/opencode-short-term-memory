@@ -1,5 +1,7 @@
 import { Model, Plugin, Provider } from "@opencode/plugin";
 import type { LanguageModelV3, LanguageModelV3CallOptions, LanguageModelV3Usage } from "@ai-sdk/provider";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 
 import {
   createProbeTelemetryWriter,
@@ -46,6 +48,10 @@ Ordinary generation sentinels remain unchanged.`;
 export const PROBE_SESSION_PROMPT_SENTINEL = "STM_PROBE_SESSION_GENERATE_PROMPT";
 export const PROBE_STANDALONE_PROMPT_SENTINEL = "STM_PROBE_STANDALONE_GENERATE_PROMPT";
 export const PROBE_GENERATION_TIMEOUT_MS = 5_000;
+const RESET_TOOL_NAME = "stm_memory_reset";
+const RESET_PROMPT_MARKER = "Use stm_memory_reset to reset this session. Confirm only after the first refusal.";
+const RESET_REFUSAL_CALL_ID = "stm-probe-reset-refusal";
+const RESET_CONFIRMED_CALL_ID = "stm-probe-reset-confirmed";
 
 const COMPACTION_TEMPLATE_HEADINGS = [
   "## Objective",
@@ -141,6 +147,28 @@ function isNonArrayObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+async function resetExecutionEvidence(event: Record<string, unknown>): Promise<Record<string, unknown>> {
+  const data = event;
+  const sessionID = typeof data.sessionID === "string" ? data.sessionID : undefined;
+  const memoryDir = Bun.env.PROBE_MEMORY_DIR;
+  if (sessionID === undefined || memoryDir === undefined) return { eventData: data };
+  const safe = sessionID.replace(/[^A-Za-z0-9._-]/g, "_");
+  const read = async (path: string): Promise<string | null> => {
+    try {
+      return await readFile(path, "utf8");
+    } catch (error) {
+      if (error instanceof Error && "code" in error && error.code === "ENOENT") return null;
+      throw error;
+    }
+  };
+  return {
+    eventData: data,
+    memory: await read(join(memoryDir, `session_${safe}.md`)),
+    checkpoint: await read(join(memoryDir, "checkpoints", `${safe}.last-message-id.txt`)),
+    boundary: await read(join(memoryDir, "reset-boundaries", `${safe}.json`)),
+  };
+}
+
 async function withTimeout<T>(operationId: string, operation: Promise<T>): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<never>((_, reject) => {
@@ -156,6 +184,88 @@ async function withTimeout<T>(operationId: string, operation: Promise<T>): Promi
 function eventType(value: unknown): string {
   if (typeof value !== "object" || value === null || !("type" in value)) return "unknown";
   return typeof value.type === "string" ? value.type : "unknown";
+}
+
+export function resetToolCallPhase(options: LanguageModelV3CallOptions): 0 | 1 | 2 {
+  const knownResetCallIDs = new Set<string>();
+  const toolResults = new Map<string, string>();
+  const outputText = (output: unknown): string | undefined => {
+    if (!isNonArrayObject(output) || typeof output.type !== "string") return undefined;
+    if ((output.type === "text" || output.type === "error-text") && typeof output.value === "string")
+      return output.value;
+    if (output.type === "content" && Array.isArray(output.value)) {
+      const text = output.value
+        .filter((part): part is Record<string, unknown> => isNonArrayObject(part) && part.type === "text")
+        .map((part) => (typeof part.text === "string" ? part.text : ""))
+        .join("");
+      return text === "" ? undefined : text;
+    }
+    return undefined;
+  };
+  const visit = (value: unknown): void => {
+    if (Array.isArray(value)) {
+      for (const item of value) visit(item);
+      return;
+    }
+    if (!isNonArrayObject(value)) return;
+    if (value.role === "assistant" && Array.isArray(value.content)) {
+      for (const part of value.content) {
+        if (
+          isNonArrayObject(part) &&
+          part.type === "tool-call" &&
+          part.toolName === RESET_TOOL_NAME &&
+          typeof part.toolCallId === "string"
+        )
+          knownResetCallIDs.add(part.toolCallId);
+      }
+    }
+    if (value.role === "tool" && Array.isArray(value.content)) {
+      for (const part of value.content) {
+        if (
+          isNonArrayObject(part) &&
+          part.type === "tool-result" &&
+          part.toolName === RESET_TOOL_NAME &&
+          typeof part.toolCallId === "string"
+        ) {
+          const text = outputText(part.output);
+          if (text !== undefined) toolResults.set(part.toolCallId, text);
+        }
+      }
+    }
+    for (const child of Object.values(value)) visit(child);
+  };
+  visit(options.prompt);
+  const resultLines = (result: string): Set<string> =>
+    new Set(
+      result
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter((line) => line !== ""),
+    );
+  const results = [...toolResults.entries()].filter(([callID]) => knownResetCallIDs.has(callID));
+  if (
+    results.some(
+      ([callID, result]) => callID === RESET_CONFIRMED_CALL_ID && resultLines(result).has("reset: completed"),
+    )
+  )
+    return 2;
+  if (
+    results.some(
+      ([callID, result]) =>
+        callID === RESET_REFUSAL_CALL_ID &&
+        [...resultLines(result)].some((line) => line.startsWith("Refused to reset V2 short-term memory:")),
+    )
+  )
+    return 1;
+  return 0;
+}
+
+function isResetToolRequest(options: LanguageModelV3CallOptions): boolean {
+  return (
+    Bun.env.PROBE_SCENARIO === "reset" &&
+    availableFunctionToolNames(options).includes(RESET_TOOL_NAME) &&
+    JSON.stringify(options.prompt).includes(RESET_PROMPT_MARKER)
+  );
 }
 
 async function emitSnapshots(writer: ProbeTelemetryWriter, messages: readonly unknown[]): Promise<void> {
@@ -340,7 +450,10 @@ const probe = {
                   requestKind: "doGenerate",
                   invocation,
                   sentinel: responseText,
-                  details: { toolNames: availableFunctionToolNames(options) },
+                  details: {
+                    toolNames: availableFunctionToolNames(options),
+                    ...(Bun.env.PROBE_SCENARIO === "reset" ? { prompt: JSON.stringify(options.prompt) } : {}),
+                  },
                 });
                 return {
                   content: [{ type: "text", text: responseText }],
@@ -355,15 +468,55 @@ const probe = {
                   ? PROBE_COMPACTION_SUMMARY
                   : isMemoryUpdatePrompt(options)
                     ? memoryUpdateResponse(writer.runId)
-                    : PROBE_STREAM_SENTINEL;
+                    : undefined;
+                const resetPhase = isResetToolRequest(options) ? resetToolCallPhase(options) : 2;
+                if (responseText === undefined && isResetToolRequest(options) && resetPhase < 2) {
+                  const confirm = resetPhase === 1;
+                  const toolCallId = confirm ? "stm-probe-reset-confirmed" : "stm-probe-reset-refusal";
+                  await writer.emit({
+                    event: "model.invocation",
+                    provider: PROBE_PROVIDER_ID,
+                    model: PROBE_MODEL_ID,
+                    requestKind: "doStream",
+                    invocation,
+                    sentinel: `${RESET_TOOL_NAME}:${String(confirm)}`,
+                    details: {
+                      toolNames: availableFunctionToolNames(options),
+                      toolCall: { toolCallId, toolName: RESET_TOOL_NAME, input: { confirm } },
+                    },
+                  });
+                  return {
+                    stream: new ReadableStream({
+                      start(controller) {
+                        controller.enqueue({ type: "stream-start", warnings: [] });
+                        controller.enqueue({
+                          type: "tool-call",
+                          toolCallId,
+                          toolName: RESET_TOOL_NAME,
+                          input: JSON.stringify({ confirm }),
+                        });
+                        controller.enqueue({
+                          type: "finish",
+                          usage: ZERO_USAGE,
+                          finishReason: { unified: "tool-calls", raw: "tool-calls" },
+                        });
+                        controller.close();
+                      },
+                    }),
+                  };
+                }
+                const text = responseText ?? PROBE_STREAM_SENTINEL;
                 await writer.emit({
                   event: "model.invocation",
                   provider: PROBE_PROVIDER_ID,
                   model: PROBE_MODEL_ID,
                   requestKind: "doStream",
                   invocation,
-                  sentinel: responseText,
-                  details: { toolNames: availableFunctionToolNames(options) },
+                  sentinel: text,
+                  details: {
+                    toolNames: availableFunctionToolNames(options),
+                    ...(Bun.env.PROBE_SCENARIO === "reset" ? { prompt: JSON.stringify(options.prompt) } : {}),
+                  },
                 });
                 const textId = `stm-probe-text-${invocation}`;
                 return {
@@ -371,7 +524,7 @@ const probe = {
                     start(controller) {
                       controller.enqueue({ type: "stream-start", warnings: [] });
                       controller.enqueue({ type: "text-start", id: textId });
-                      controller.enqueue({ type: "text-delta", id: textId, delta: responseText });
+                      controller.enqueue({ type: "text-delta", id: textId, delta: text });
                       controller.enqueue({ type: "text-end", id: textId });
                       controller.enqueue({
                         type: "finish",
@@ -444,6 +597,29 @@ const probe = {
             .then(() => undefined),
         ),
       );
+
+      if (Bun.env.PROBE_SCENARIO === "reset") {
+        await acquire(
+          "tool.execute.before",
+          context.tool.hook("execute.before", async (input) => {
+            await writer.emit({
+              event: "event.observed",
+              observedEvent: "tool.execute.before",
+              details: await resetExecutionEvidence({ ...input, snapshotPhase: "before" }),
+            });
+          }),
+        );
+        await acquire(
+          "tool.execute.after",
+          context.tool.hook("execute.after", async (input) => {
+            await writer.emit({
+              event: "event.observed",
+              observedEvent: "tool.execute.after",
+              details: await resetExecutionEvidence({ ...input, snapshotPhase: "after" }),
+            });
+          }),
+        );
+      }
 
       eventConsumer = (async () => {
         try {

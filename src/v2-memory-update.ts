@@ -8,6 +8,8 @@ import {
   isSelfInjection,
   logEvent,
   readConfig,
+  readRawFile,
+  resetBoundaryPathFor,
   readText,
 } from "./memory-utils";
 import {
@@ -17,6 +19,10 @@ import {
 } from "./message-collector";
 import { buildMemoryPrompt, CLEAN_SUMMARIZER_TIMEOUT, normalizeMemory } from "./summarizer";
 import type { V2Context, V2SessionContext } from "./v2-adapter";
+import { tryAcquireV2MemoryUpdate } from "./v2-mutation-coordination";
+import { parseV2ResetBoundary } from "./v2-reset-boundary";
+
+export { isV2MemoryUpdateInFlight } from "./v2-mutation-coordination";
 
 const REQUIRED_HEADINGS = [
   "User Instructions",
@@ -26,7 +32,6 @@ const REQUIRED_HEADINGS = [
   "Active References",
 ] as const;
 const TEMPLATE_MARKERS = /<\/?(?:existing_memory|conversation_update|agents_md_context)>/i;
-const inFlightSessions = new Set<string>();
 
 export type V2MemoryUpdaterTestHooks = {
   readonly beforeRollback?: () => void | Promise<void>;
@@ -152,13 +157,30 @@ export function createV2MemoryUpdater(
   return async (input) => {
     let config: SessionMemoryConfig | undefined;
     const sessionID = input.sessionID;
-    const key = inFlightKey(directory ?? context.location.directory, sessionID);
-    if (inFlightSessions.has(key)) return;
-    inFlightSessions.add(key);
+    const release = tryAcquireV2MemoryUpdate(directory ?? context.location.directory, sessionID);
+    if (!release) return;
     try {
       config = await readConfig(undefined, directory);
       if (!config.enabled) return;
-      const visible = visibleMessages(input);
+      const boundaryRaw = await readRawFile(resetBoundaryPathFor(sessionID, config.memoryDir));
+      let boundedInput = input;
+      if (boundaryRaw !== null) {
+        const boundary = parseV2ResetBoundary(boundaryRaw);
+        const matches = input.messages.reduce<number[]>((indices, message, index) => {
+          if (typeof message.id === "string" && message.id === boundary.anchorID) indices.push(index);
+          return indices;
+        }, []);
+        if (matches.length !== 1) {
+          await logEvent(config, "v2_memory_update_skipped", {
+            sessionID,
+            reason: matches.length === 0 ? "reset_boundary_anchor_missing" : "reset_boundary_anchor_duplicate",
+            anchorID: boundary.anchorID,
+          });
+          return;
+        }
+        boundedInput = { ...input, messages: input.messages.slice(matches[0]! + 1) };
+      }
+      const visible = visibleMessages(boundedInput);
       if (!visible) {
         await logEvent(config, "v2_memory_update_skipped", { sessionID, reason: "invalid_visible_ids" });
         return;
@@ -255,15 +277,7 @@ export function createV2MemoryUpdater(
         detail: errorMessage(error),
       });
     } finally {
-      inFlightSessions.delete(key);
+      release();
     }
   };
-}
-
-function inFlightKey(directory: string, sessionID: string): string {
-  return `${directory}\u0000${sessionID}`;
-}
-
-export function isV2MemoryUpdateInFlight(directory: string, sessionID: string): boolean {
-  return inFlightSessions.has(inFlightKey(directory, sessionID));
 }

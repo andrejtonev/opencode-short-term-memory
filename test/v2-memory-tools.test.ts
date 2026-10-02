@@ -1,10 +1,10 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Info as ToolDefinition, ToolContext } from "@opencode/plugin/promise/tool";
 import Root from "../src/index";
-import { checkpointPathFor, memoryPathFor, writeText } from "../src/memory-utils";
+import { checkpointPathFor, memoryPathFor, readRawFile, resetBoundaryPathFor, writeText } from "../src/memory-utils";
 import type { V2Context } from "../src/v2-adapter";
 import { createV2MemoryToolRegistrations, createV2MemoryTools } from "../src/v2-memory-tools";
 import { createV2ContextInjection } from "../src/v2-context-injection";
@@ -78,11 +78,15 @@ describe("V2 memory tools", () => {
     }));
     editors.forEach((editor, index) => transformed[index]!(editor));
     const definitions = editors.flatMap(({ added }) => added) as ToolDefinition[];
-    expect(definitions.map(({ name }) => name)).toEqual(["stm_memory_read", "stm_memory_status"]);
-    expect(editors).toHaveLength(2);
+    expect(definitions.map(({ name }) => name)).toEqual(["stm_memory_read", "stm_memory_status", "stm_memory_reset"]);
+    expect(editors).toHaveLength(3);
     expect(editors[0]!.added[0]).toBe(definitions[0]);
     expect(editors[1]!.added[0]).toBe(definitions[1]);
-    expect(definitions.map(({ options }) => options)).toEqual([{ codemode: false }, { codemode: false }]);
+    expect(definitions.map(({ options }) => options)).toEqual([
+      { codemode: false },
+      { codemode: false },
+      { codemode: false },
+    ]);
 
     const expectedInputSchema = {
       type: "object",
@@ -91,6 +95,12 @@ describe("V2 memory tools", () => {
     };
     expect(definitions[0]!.input).toEqual(expectedInputSchema);
     expect(definitions[1]!.input).toEqual(expectedInputSchema);
+    expect(definitions[2]!.input).toEqual({
+      type: "object",
+      properties: { confirm: { type: "boolean" } },
+      required: ["confirm"],
+      additionalProperties: false,
+    });
     expect({}).toEqual({});
     expect({ unexpected: true }).not.toEqual({});
     expect(expectedInputSchema.additionalProperties).toBe(false);
@@ -120,6 +130,9 @@ describe("V2 memory tools", () => {
             "memoryDir: .opencode/memory",
             "memoryPath: .opencode/memory/session_authoritative.md",
             "checkpointPath: .opencode/memory/checkpoints/authoritative.last-message-id.txt",
+            "resetBoundaryPath: .opencode/memory/reset-boundaries/authoritative.json",
+            "resetBoundary: absent",
+            "resetPolicy: pause if anchor absent",
             `memoryBytes: ${Buffer.byteLength(await readFile(memoryPathFor("authoritative"), "utf8"), "utf8")}`,
             "checkpoint: none",
             "updaterBusy: false",
@@ -140,6 +153,74 @@ describe("V2 memory tools", () => {
     const result = await readTool.execute({}, toolContext("actual"));
     expect(result).toEqual({ content: [{ type: "text", text: memory }] });
     expect((result as { content?: unknown }).content).not.toEqual(expect.any(String));
+  });
+
+  test("requires literal confirmation and resets using the authoritative message anchor", async () => {
+    const sessionID = "reset-session";
+    const messageID = "message-anchor";
+    const memoryPath = memoryPathFor(sessionID);
+    const checkpointPath = checkpointPathFor(sessionID);
+    await writeText(memoryPath, "old memory");
+    await writeText(checkpointPath, "old-checkpoint\n");
+    const [, , resetTool] = createV2MemoryTools(context(testDir));
+    for (const input of [{ confirm: false }, { confirm: "true" }, {}]) {
+      await expect(resetTool.execute(input, toolContext(sessionID))).resolves.toEqual({
+        content: [
+          {
+            type: "text",
+            text: "Refused to reset V2 short-term memory: set confirm to literal true to confirm this destructive action.",
+          },
+        ],
+      });
+    }
+    expect(await readFile(memoryPath, "utf8")).toBe("old memory");
+    expect(await readFile(checkpointPath, "utf8")).toBe("old-checkpoint\n");
+
+    const result = await resetTool.execute({ confirm: true }, { ...toolContext(sessionID), messageID });
+    expect((result.content as readonly [{ text: string }])[0]!.text).toBe(
+      [
+        "generation: v2",
+        "reset: completed",
+        "scope: memory, checkpoint, and reset boundary",
+        `authoritative sessionID: ${sessionID}`,
+        `resetBoundaryAnchor: ${messageID}`,
+        "resetPolicy: pause if anchor absent",
+        "crashAtomic: false",
+        "semanticErasure: false",
+      ].join("\n"),
+    );
+    expect(await readFile(checkpointPath, "utf8")).toBe("");
+    expect(await readFile(join(testDir, ".opencode", "memory", "reset-boundaries", `${sessionID}.json`), "utf8")).toBe(
+      JSON.stringify({ version: 1, anchorID: messageID }) + "\n",
+    );
+  });
+
+  test("rejects invalid reset identities without touching persisted files", async () => {
+    const sessionID = "identity-session";
+    const memoryPath = memoryPathFor(sessionID);
+    await writeText(memoryPath, "protected");
+    const [, , resetTool] = createV2MemoryTools(context(testDir));
+    for (const invalid of [
+      { sessionID: "", messageID: "anchor" },
+      { sessionID, messageID: "" },
+      { sessionID, messageID: undefined },
+    ]) {
+      await expect(
+        resetTool.execute({ confirm: true }, { ...toolContext(sessionID), ...invalid } as ToolContext),
+      ).rejects.toThrow("reset");
+    }
+    expect(await readFile(memoryPath, "utf8")).toBe("protected");
+  });
+
+  test("rejects reset session aliases before touching the sanitized session file", async () => {
+    const safeCollisionPath = memoryPathFor("a_b");
+    await writeText(safeCollisionPath, "protected collision");
+    const [, , resetTool] = createV2MemoryTools(context(testDir));
+
+    await expect(resetTool.execute({ confirm: true }, { ...toolContext("a/b"), messageID: "anchor" })).rejects.toThrow(
+      "unsafe path characters",
+    );
+    expect(await readFile(safeCollisionPath, "utf8")).toBe("protected collision");
   });
 
   test("reports deterministic persisted status, model selection, bytes, and checkpoints", async () => {
@@ -163,6 +244,9 @@ describe("V2 memory tools", () => {
         "memoryDir: .opencode/memory",
         `memoryPath: .opencode/memory/session_${sessionID}.md`,
         `checkpointPath: .opencode/memory/checkpoints/${sessionID}.last-message-id.txt`,
+        `resetBoundaryPath: .opencode/memory/reset-boundaries/${sessionID}.json`,
+        "resetBoundary: absent",
+        "resetPolicy: pause if anchor absent",
         `memoryBytes: ${Buffer.byteLength(memory, "utf8")}`,
         "checkpoint: none",
         "updaterBusy: false",
@@ -195,6 +279,27 @@ describe("V2 memory tools", () => {
     expect(text).toContain("configuredMemoryModel: none");
     expect(text).toContain("effectiveMemoryModel: current-session");
     expect(text).toContain("checkpoint: message-42");
+  });
+
+  test("reports valid, malformed, and unreadable persisted reset boundaries", async () => {
+    const sessionID = "boundary-status";
+    const [, statusTool] = createV2MemoryTools(context(testDir));
+    const boundaryPath = resetBoundaryPathFor(sessionID);
+
+    await writeText(boundaryPath, '{"version":1,"anchorID":"anchor-1"}\n');
+    let text = ((await statusTool.execute({}, toolContext(sessionID))).content as readonly [{ text: string }])[0]!.text;
+    expect(text).toContain("resetBoundary: valid");
+    expect(text).toContain("resetBoundaryAnchor: anchor-1");
+
+    await writeText(boundaryPath, '{"version":1,"anchorID":"anchor-1","extra":true}\n');
+    text = ((await statusTool.execute({}, toolContext(sessionID))).content as readonly [{ text: string }])[0]!.text;
+    expect(text).toContain("resetBoundary: invalid");
+    expect(text).not.toContain("resetBoundaryAnchor:");
+
+    await rm(boundaryPath, { force: true });
+    await mkdir(boundaryPath, { recursive: true });
+    text = ((await statusTool.execute({}, toolContext(sessionID))).content as readonly [{ text: string }])[0]!.text;
+    expect(text).toContain("resetBoundary: unreadable");
   });
 
   test("distinguishes configured model from the current model used by clean V2 generation", async () => {
@@ -279,11 +384,46 @@ describe("V2 memory tools", () => {
     await update;
   });
 
+  test("refuses reset reentry from active generation without deadlocking or writing a boundary", async () => {
+    const sessionID = "reentry-session";
+    await writeText(join(testDir, ".opencode", "stm.json"), JSON.stringify({ summarizerMode: "active" }));
+    let resetResult: Awaited<ReturnType<ToolDefinition["execute"]>> | undefined;
+    let resetTool!: ToolDefinition;
+    const activeContext = {
+      ...context(testDir),
+      session: {
+        ...context(testDir).session,
+        generate: async ({ sessionID: generatedSessionID }: { sessionID: string }) => {
+          resetResult = await resetTool.execute({ confirm: true }, toolContext(generatedSessionID));
+          return {
+            text: "## Session Memory\n\n### User Instructions\n- x\n### Long Horizon Context\n- x\n### Decisions\n- x\n### Conclusions\n- x\n### Active References\n- x\n",
+          };
+        },
+      },
+    } as unknown as V2Context;
+    [, , resetTool] = createV2MemoryTools(activeContext);
+    const updater = createV2MemoryUpdater(activeContext, testDir);
+
+    await updater({
+      sessionID,
+      messages: [{ id: "assistant-1", role: "assistant", content: [{ type: "text", text: "answer" }] }],
+    } as never);
+
+    expect((resetResult?.content as readonly [{ text: string }])[0]!.text).toContain(
+      "an update is active for this session; retry after it finishes",
+    );
+    expect(await readRawFile(resetBoundaryPathFor(sessionID))).toBeNull();
+    const laterReset = await resetTool.execute({ confirm: true }, toolContext(sessionID));
+    expect((laterReset.content as readonly [{ text: string }])[0]!.text).toContain("reset: completed");
+    expect(await readRawFile(resetBoundaryPathFor(sessionID))).not.toBeNull();
+  });
+
   test("returns registrations in exact order with definition identity", () => {
     const registrations = createV2MemoryToolRegistrations(context(testDir));
-    expect(registrations.map(({ name }) => name)).toEqual(["stm_memory_read", "stm_memory_status"]);
+    expect(registrations.map(({ name }) => name)).toEqual(["stm_memory_read", "stm_memory_status", "stm_memory_reset"]);
     expect(registrations.map(({ definition }) => definition.name)).toEqual(registrations.map(({ name }) => name));
     expect(registrations.map(({ definition }) => definition.options)).toEqual([
+      { codemode: false },
       { codemode: false },
       { codemode: false },
     ]);
@@ -309,7 +449,7 @@ describe("V2 memory tools", () => {
       tool: {
         transform: async (callback: (editor: ToolEditor) => void) => {
           toolAttempts += 1;
-          const toolName = toolAttempts === 1 ? "read" : "status";
+          const toolName = toolAttempts === 1 ? "read" : toolAttempts === 2 ? "status" : "reset";
           const added: unknown[] = [];
           callback({ add: (definition) => added.push(definition) });
           events.push(`acquire:${toolName}`);
@@ -386,7 +526,7 @@ describe("V2 memory tools", () => {
         transform: async (callback: (editor: ToolEditor) => void) => {
           callback({ add: () => undefined });
           toolNumber += 1;
-          const name = toolNumber === 1 ? "read" : "status";
+          const name = toolNumber === 1 ? "read" : toolNumber === 2 ? "status" : "reset";
           events.push(`acquire:${name}`);
           return { dispose: async () => events.push(`dispose:${name}`) };
         },
@@ -400,6 +540,8 @@ describe("V2 memory tools", () => {
       "acquire:compaction",
       "acquire:read",
       "acquire:status",
+      "acquire:reset",
+      "dispose:reset",
       "dispose:status",
       "dispose:read",
       "dispose:compaction",

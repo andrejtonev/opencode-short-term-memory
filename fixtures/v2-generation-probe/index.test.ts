@@ -16,6 +16,7 @@ import probe, {
   PROBE_STREAM_SENTINEL,
   isMemoryUpdatePrompt,
   memoryUpdateResponse,
+  resetToolCallPhase,
 } from "./index.js";
 import {
   evaluateCompaction,
@@ -32,6 +33,45 @@ import {
   type ProbeMode,
   type ProbeTelemetryRecord,
 } from "./telemetry.js";
+
+test("reset provider dispatches refusal, confirmation, then text phases causally", () => {
+  const options = (prompt: unknown) => ({ prompt }) as LanguageModelV3CallOptions;
+  const call = (id: string) => ({
+    role: "assistant",
+    content: [{ type: "tool-call", toolCallId: id, toolName: "stm_memory_reset" }],
+  });
+  const result = (id: string, value: string) => ({
+    role: "tool",
+    content: [{ type: "tool-result", toolCallId: id, toolName: "stm_memory_reset", output: { type: "text", value } }],
+  });
+  expect(resetToolCallPhase(options([]))).toBe(0);
+  expect(
+    resetToolCallPhase(
+      options([
+        call("stm-probe-reset-refusal"),
+        result("stm-probe-reset-refusal", "Refused to reset V2 short-term memory: set confirm to literal true."),
+      ]),
+    ),
+  ).toBe(1);
+  expect(
+    resetToolCallPhase(
+      options([
+        call("stm-probe-reset-refusal"),
+        result("stm-probe-reset-refusal", "Refused to reset V2 short-term memory: set confirm to literal true."),
+        call("stm-probe-reset-confirmed"),
+        result("stm-probe-reset-confirmed", "generation: v2\nreset: completed\nscope: session"),
+      ]),
+    ),
+  ).toBe(2);
+  expect(
+    resetToolCallPhase(
+      options([
+        { metadata: { text: "reset: completed" } },
+        result("unknown", "generation: v2\nreset: completed\nscope: session"),
+      ]),
+    ),
+  ).toBe(0);
+});
 
 type Registration = Awaited<ReturnType<Plugin.Context["provider"]["transform"]>>;
 type ProviderEditor = Parameters<Parameters<Plugin.Context["provider"]["transform"]>[0]>[0];

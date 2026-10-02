@@ -17,6 +17,7 @@ import {
   type IsolatedServiceState,
 } from "./host-api.js";
 import { evaluateOrdinary, normalizeExternalMessages, parseProbeTelemetryJsonl } from "./evaluator.js";
+import { evaluateResetEvidence } from "./reset-evidence.js";
 
 const FIXTURE_DIRECTORY = import.meta.dir;
 const REPOSITORY_DIRECTORY = resolve(FIXTURE_DIRECTORY, "../..");
@@ -33,6 +34,10 @@ const REQUIRED_HEADINGS = [
 ] as const;
 const FIRST_PROMPT = "First ordinary production update probe turn.";
 const SECOND_PROMPT = "Second ordinary production update probe turn.";
+const RESET_PROMPT = "Use stm_memory_reset to reset this session. Confirm only after the first refusal.";
+const POST_RESET_PROMPT = "Continue after the confirmed reset with a fresh post-reset message.";
+const POST_RESET_FOLLOWUP_PROMPT = "Acknowledge the post-reset continuation with one final ordinary response.";
+const SCENARIO = Bun.env.PROBE_SCENARIO === "reset" ? "reset" : "ordinary";
 
 interface Evidence {
   readonly runId: string;
@@ -58,6 +63,9 @@ interface Evidence {
   readonly ordinaryEvaluator: { readonly passed: boolean; readonly failures: readonly string[] } | null;
   readonly injectionObservable: boolean;
   readonly sandboxDisposition: "removed" | "retained";
+  readonly scenario: "ordinary" | "reset";
+  readonly resetBoundaryAnchor?: string;
+  readonly resetExecutionEvents: number;
 }
 
 function errorText(error: unknown): string {
@@ -169,6 +177,7 @@ async function run(): Promise<Evidence> {
   let observableOutput: unknown;
   let telemetryRecords: Awaited<ReturnType<typeof parseProbeTelemetryJsonl>> = [];
   let telemetryPath = "";
+  let resetBoundaryAnchor: string | undefined;
   try {
     productionPluginPath = await findProductionPlugin();
     await mkdir(SANDBOX_PARENT, { recursive: true });
@@ -217,14 +226,40 @@ async function run(): Promise<Evidence> {
         NO_COLOR: "1",
         PROBE_RUN_ID: runId,
         PROBE_MODE: "ordinary",
+        PROBE_SCENARIO: SCENARIO,
+        PROBE_MEMORY_DIR: memoryDirectory,
         PROBE_TELEMETRY_PATH: telemetryPath,
       },
     };
     service = await bounded(() => startIsolatedService(options), OPERATION_TIMEOUT_MS);
     const session = await createModeledSession(service.client, project, OPERATION_TIMEOUT_MS);
     initialObservation = await observeSession(service.client, session.id, OPERATION_TIMEOUT_MS);
-    await submitOrdinaryPrompt(service.client, session.id, FIRST_PROMPT, OPERATION_TIMEOUT_MS);
-    observableOutput = await submitOrdinaryPrompt(service.client, session.id, SECOND_PROMPT, OPERATION_TIMEOUT_MS);
+    if (SCENARIO === "reset") {
+      const boundaryPath = join(
+        memoryDirectory,
+        "reset-boundaries",
+        `${session.id.replace(/[^A-Za-z0-9._-]/g, "_")}.json`,
+      );
+      await submitOrdinaryPrompt(service.client, session.id, FIRST_PROMPT, OPERATION_TIMEOUT_MS);
+      await submitOrdinaryPrompt(service.client, session.id, SECOND_PROMPT, OPERATION_TIMEOUT_MS);
+      await submitOrdinaryPrompt(service.client, session.id, RESET_PROMPT, OPERATION_TIMEOUT_MS);
+      try {
+        const boundary = JSON.parse(await readFile(boundaryPath, "utf8")) as { anchorID?: unknown };
+        if (typeof boundary.anchorID === "string") resetBoundaryAnchor = boundary.anchorID;
+      } catch (error) {
+        failures.push(`reset boundary unavailable: ${errorText(error)}`);
+      }
+      await submitOrdinaryPrompt(service.client, session.id, POST_RESET_PROMPT, OPERATION_TIMEOUT_MS);
+      observableOutput = await submitOrdinaryPrompt(
+        service.client,
+        session.id,
+        POST_RESET_FOLLOWUP_PROMPT,
+        OPERATION_TIMEOUT_MS,
+      );
+    } else {
+      await submitOrdinaryPrompt(service.client, session.id, FIRST_PROMPT, OPERATION_TIMEOUT_MS);
+      observableOutput = await submitOrdinaryPrompt(service.client, session.id, SECOND_PROMPT, OPERATION_TIMEOUT_MS);
+    }
     finalObservation = await observeSession(service.client, session.id, OPERATION_TIMEOUT_MS);
     memoryPath = join(memoryDirectory, `session_${session.id.replace(/[^A-Za-z0-9._-]/g, "_")}.md`);
     checkpointPath = join(
@@ -238,7 +273,7 @@ async function run(): Promise<Evidence> {
     assert(requiredHeadingsPresent, "memory document is missing a required heading", failures);
     memorySentinelPresent = memory.includes(`${PROBE_MEMORY_SENTINEL}:${runId}`);
     assert(memorySentinelPresent, "generated memory sentinel missing", failures);
-    assert(checkpointValue.length > 0, "checkpoint is empty", failures);
+    if (SCENARIO === "ordinary") assert(checkpointValue.length > 0, "checkpoint is empty", failures);
     const contextText = JSON.stringify(finalObservation.context);
     const durable = normalizeExternalMessages(finalObservation.messages).messages.filter(
       (message) => message.role === "user" || message.role === "assistant",
@@ -260,7 +295,16 @@ async function run(): Promise<Evidence> {
       "durable user/assistant IDs are not stable and unique",
       failures,
     );
-    const secondUsers = durable.filter((message) => message.role === "user" && message.text === SECOND_PROMPT);
+    if (SCENARIO === "reset") {
+      for (const prompt of [FIRST_PROMPT, SECOND_PROMPT, RESET_PROMPT, POST_RESET_PROMPT, POST_RESET_FOLLOWUP_PROMPT]) {
+        const occurrences = durable.filter((message) => message.role === "user" && message.text === prompt).length;
+        assert(occurrences === 1, `expected exactly one durable reset prompt occurrence for ${prompt}`, failures);
+      }
+    }
+    const secondUsers = durable.filter(
+      (message) =>
+        message.role === "user" && message.text === (SCENARIO === "reset" ? POST_RESET_FOLLOWUP_PROMPT : SECOND_PROMPT),
+    );
     expectedCheckpointSourceMessageID = secondUsers.length === 1 ? (secondUsers[0]!.id ?? "") : "";
     assert(
       secondUsers.length === 1,
@@ -268,11 +312,19 @@ async function run(): Promise<Evidence> {
       failures,
     );
     assert(expectedCheckpointSourceMessageID.length > 0, "second-turn user message has no stable ID", failures);
-    assert(
-      checkpointValue === expectedCheckpointSourceMessageID,
-      "checkpoint does not match the second-turn user message ID",
-      failures,
-    );
+    if (SCENARIO === "ordinary") {
+      assert(
+        checkpointValue === expectedCheckpointSourceMessageID,
+        "checkpoint does not match the second-turn user message ID",
+        failures,
+      );
+    } else {
+      assert(
+        checkpointValue === expectedCheckpointSourceMessageID,
+        "post-reset message was not processed into the checkpoint",
+        failures,
+      );
+    }
     injectionObservable = contextText.includes("Session Memory") || contextText.includes(PROBE_MEMORY_SENTINEL);
     if (!injectionObservable) {
       console.warn(
@@ -320,16 +372,57 @@ async function run(): Promise<Evidence> {
     );
     const primaryToolNames = [...new Set(primaryInvocations.flatMap((record) => invocationToolNames(record)))];
     primaryModelToolNames = primaryToolNames;
-    assert(
-      primaryToolNames.includes("stm_memory_read") && primaryToolNames.includes("stm_memory_status"),
-      "primary model invocation did not expose both stm_memory_read and stm_memory_status",
-      failures,
-    );
-    assert(
-      !primaryToolNames.some((name) => /^stm_memory_(?:reset|update|aggregate)$/.test(name)),
-      "primary model invocation exposed a forbidden V2 reset/update/aggregate tool",
-      failures,
-    );
+    if (SCENARIO === "ordinary") {
+      assert(
+        primaryToolNames.includes("stm_memory_read") && primaryToolNames.includes("stm_memory_status"),
+        "primary model invocation did not expose both stm_memory_read and stm_memory_status",
+        failures,
+      );
+      assert(
+        !primaryToolNames.some((name) => /^stm_memory_(?:update|aggregate)$/.test(name)),
+        "primary model invocation exposed a forbidden V2 update/aggregate tool",
+        failures,
+      );
+    } else {
+      assert(
+        primaryToolNames.includes("stm_memory_reset"),
+        "reset tool was not exposed to the primary model",
+        failures,
+      );
+      assert(
+        !primaryToolNames.includes("stm_memory_update") && !primaryToolNames.includes("stm_memory_aggregate"),
+        "update/aggregate leaked into reset acceptance",
+        failures,
+      );
+      const invocations = telemetryRecords.filter((record) => record.event === "model.invocation");
+      assert(
+        invocations.some((record) => record.sentinel === "stm_memory_reset:false"),
+        "refusal tool call missing",
+        failures,
+      );
+      assert(
+        invocations.some((record) => record.sentinel === "stm_memory_reset:true"),
+        "confirmed tool call missing",
+        failures,
+      );
+      const executionEvents = telemetryRecords.filter(
+        (record) => record.event === "event.observed" && /^tool.execute\.(before|after)$/.test(record.observedEvent),
+      );
+      assert(executionEvents.length >= 4, "reset execution before/after evidence is incomplete", failures);
+      const boundary = checkpointValue;
+      assert(boundary.length > 0, "post-reset checkpoint is empty", failures);
+      assert(resetBoundaryAnchor !== undefined, "reset boundary anchor is missing", failures);
+      const resetEvaluation = evaluateResetEvidence({
+        records: telemetryRecords,
+        resetBoundaryAnchor,
+        firstPrompt: FIRST_PROMPT,
+        secondPrompt: SECOND_PROMPT,
+        resetPrompt: RESET_PROMPT,
+        postResetPrompt: POST_RESET_PROMPT,
+        postResetFollowupPrompt: POST_RESET_FOLLOWUP_PROMPT,
+      });
+      failures.push(...resetEvaluation.failures);
+    }
     assert(
       telemetryRecords.some((record) => record.event === "setup" && record.name === "stm-v2-generation-probe"),
       "deterministic provider setup missing",
@@ -340,9 +433,9 @@ async function run(): Promise<Evidence> {
       "deterministic provider not selected",
       failures,
     );
-    if (initialObservation !== undefined && finalObservation !== undefined) {
+    if (SCENARIO === "ordinary" && initialObservation !== undefined && finalObservation !== undefined) {
       const evaluation = evaluateOrdinary({
-        mode: "ordinary",
+        mode: SCENARIO,
         records: telemetryRecords,
         externalBefore: initialObservation,
         externalAfter: finalObservation,
@@ -351,8 +444,8 @@ async function run(): Promise<Evidence> {
       });
       ordinaryEvaluator = { passed: evaluation.passed, failures: evaluation.failures };
       failures.push(...evaluation.failures);
-    } else {
-      ordinaryEvaluator = { passed: false, failures: ["ordinary evaluator observations were unavailable"] };
+    } else if (SCENARIO === "ordinary") {
+      ordinaryEvaluator = { passed: false, failures: [`${SCENARIO} evaluator observations were unavailable`] };
       failures.push(...ordinaryEvaluator.failures);
     }
   } catch (error) {
@@ -391,6 +484,11 @@ async function run(): Promise<Evidence> {
     ordinaryEvaluator,
     injectionObservable,
     sandboxDisposition: failures.length === 0 ? "removed" : "retained",
+    scenario: SCENARIO,
+    resetExecutionEvents: telemetryRecords.filter(
+      (record) => record.event === "event.observed" && /^tool.execute\.(before|after)$/.test(record.observedEvent),
+    ).length,
+    resetBoundaryAnchor,
   };
   await writeFile(evidencePath, `${JSON.stringify(evidence, null, 2)}\n`);
   if (failures.length === 0 && sandbox) await rm(sandbox, { recursive: true, force: true });

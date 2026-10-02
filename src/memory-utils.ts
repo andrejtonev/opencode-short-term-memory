@@ -161,6 +161,85 @@ async function writeTextAtomicUnlocked(path: string, text: string) {
   throw lastError instanceof Error ? lastError : new Error(String(lastError ?? "atomic rename failed"));
 }
 
+export type RawFileSnapshot = Buffer | null;
+
+export type PreparedRawFile = {
+  readonly path: string;
+  readonly committed: Buffer;
+  commit: (expected: RawFileSnapshot) => Promise<boolean>;
+  discard: () => Promise<void>;
+};
+
+export async function readRawFile(path: string): Promise<RawFileSnapshot> {
+  await waitForPathWrites(path);
+  try {
+    return await readFile(path);
+  } catch (error: unknown) {
+    if ((error as { code?: string })?.code === "ENOENT") return null;
+    throw error;
+  }
+}
+
+export async function prepareRawFile(path: string, data: Buffer): Promise<PreparedRawFile> {
+  await ensureDir(dirname(path));
+  const tempPath = `${path}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const handle = await open(tempPath, "wx");
+  try {
+    await handle.writeFile(data);
+    await handle.sync();
+  } catch (error) {
+    await handle.close().catch(() => {});
+    await rm(tempPath, { force: true }).catch(() => {});
+    throw error;
+  }
+  try {
+    await handle.close();
+  } catch (error) {
+    await rm(tempPath, { force: true }).catch(() => {});
+    throw error;
+  }
+  let consumed = false;
+  return {
+    path,
+    committed: data,
+    commit: async (expected) =>
+      await withPathWriteLock(path, async () => {
+        let current: RawFileSnapshot;
+        try {
+          current = await readFile(path);
+        } catch (error: unknown) {
+          if ((error as { code?: string })?.code !== "ENOENT") throw error;
+          current = null;
+        }
+        const matches = current === null ? expected === null : expected !== null && current.equals(expected);
+        if (!matches || consumed) return false;
+        await rename(tempPath, path);
+        consumed = true;
+        return true;
+      }),
+    discard: async () => {
+      if (consumed) return;
+      await rm(tempPath, { force: true });
+    },
+  };
+}
+
+export async function removeRawFileIfCurrent(path: string, expected: Buffer): Promise<boolean> {
+  return await withPathWriteLock(path, async () => {
+    let current: RawFileSnapshot;
+    try {
+      current = await readFile(path);
+    } catch (error: unknown) {
+      if ((error as { code?: string })?.code !== "ENOENT") throw error;
+      current = null;
+    }
+    const matches = current !== null && current.equals(expected);
+    if (!matches) return false;
+    await rm(path, { force: true });
+    return true;
+  });
+}
+
 export async function writeTextAtomic(path: string, text: string) {
   await withPathWriteLock(path, () => writeTextAtomicUnlocked(path, text));
 }
@@ -454,11 +533,34 @@ export function checkpointPathFor(sessionID: string, memoryDir = DEFAULT_CONFIG.
   return join(memoryDir, "checkpoints", `${safeSessionID(sessionID)}.last-message-id.txt`);
 }
 
+export function resetBoundaryPathFor(sessionID: string, memoryDir = DEFAULT_CONFIG.memoryDir) {
+  return join(memoryDir, "reset-boundaries", `${safeSessionID(sessionID)}.json`);
+}
+
 export function logPath(memoryDir = DEFAULT_CONFIG.memoryDir) {
   return join(memoryDir, "session-memory.log");
 }
 
 export const SIDE_SESSION_TITLE = "Session Memory Summarizer";
+
+export const STANDARD_MEMORY_TEMPLATE = `${MEMORY_FORMAT_VERSION}
+${MEMORY_HEADER}
+
+### User Instructions
+- None captured yet.
+
+### Long Horizon Context
+- None captured yet.
+
+### Decisions
+- None captured yet.
+
+### Conclusions
+- None captured yet.
+
+### Active References
+- None captured yet.
+`;
 
 export function sideSessionsStatePath(memoryDir = DEFAULT_CONFIG.memoryDir) {
   return join(memoryDir, "side-sessions.json");
@@ -509,10 +611,7 @@ export async function ensureMemoryFile(sessionID: string, config: SessionMemoryC
   const path = memoryPathFor(sessionID, config.memoryDir);
   const existing = await readText(path, "");
   if (existing.trim()) return path;
-  await writeText(
-    path,
-    `${MEMORY_FORMAT_VERSION}\n${MEMORY_HEADER}\n\n### User Instructions\n- None captured yet.\n\n### Long Horizon Context\n- None captured yet.\n\n### Decisions\n- None captured yet.\n\n### Conclusions\n- None captured yet.\n\n### Active References\n- None captured yet.\n`,
-  );
+  await writeText(path, STANDARD_MEMORY_TEMPLATE);
   return path;
 }
 
