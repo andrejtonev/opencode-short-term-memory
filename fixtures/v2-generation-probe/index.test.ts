@@ -17,10 +17,14 @@ import probe, {
   isMemoryUpdatePrompt,
   memoryUpdateResponse,
   resetToolCallPhase,
+  manualToolDispatch,
 } from "./index.js";
+import { MANUAL_CALL_IDS, MANUAL_FIRST_PROMPT, MANUAL_SECOND_PROMPT } from "./manual-evidence.js";
 import {
+  countToolExecutionEvents,
   evaluateCompaction,
   evaluateOrdinary,
+  evaluatePrimaryMemoryToolInventory,
   evaluateSessionGenerate,
   evaluateSessionGenerateHistory,
   evaluateStandaloneGenerate,
@@ -33,6 +37,20 @@ import {
   type ProbeMode,
   type ProbeTelemetryRecord,
 } from "./telemetry.js";
+
+test("primary memory inventory requires all four intentional tools and still forbids aggregate", () => {
+  const tools = ["stm_memory_read", "stm_memory_status", "stm_memory_reset", "stm_memory_update"];
+  expect(evaluatePrimaryMemoryToolInventory([...tools, "read", "shell"])).toEqual([]);
+  for (const missing of tools) {
+    expect(evaluatePrimaryMemoryToolInventory(tools.filter((name) => name !== missing))).toEqual([
+      `primary model invocation did not expose ${missing}`,
+    ]);
+  }
+  expect(evaluatePrimaryMemoryToolInventory([...tools, "stm_memory_aggregate"])).toEqual([
+    "primary model invocation exposed a forbidden V2 aggregate tool",
+  ]);
+  expect(evaluatePrimaryMemoryToolInventory([])).toHaveLength(4);
+});
 
 test("reset provider dispatches refusal, confirmation, then text phases causally", () => {
   const options = (prompt: unknown) => ({ prompt }) as LanguageModelV3CallOptions;
@@ -256,6 +274,67 @@ function callbackInput(sessionID = "session-1", messages: readonly unknown[] = [
 }
 
 const modelCall: LanguageModelV3CallOptions = { prompt: [] };
+test("manual scenario streams real empty-input tool call then text after paired result", async () => {
+  const previousScenario = Bun.env.PROBE_SCENARIO;
+  const harness = await makeHarness("ordinary");
+  try {
+    Bun.env.PROBE_SCENARIO = "manual-update";
+    const input: LanguageInput = { model: harness.addedProviders[0]!.models[0]!, sdk: {}, options: {} };
+    await harness.languageCallback()(input);
+    const options: LanguageModelV3CallOptions = {
+      prompt: [{ role: "user", content: [{ type: "text", text: MANUAL_FIRST_PROMPT }] }],
+      tools: [{ type: "function", name: "stm_memory_update", inputSchema: {} }],
+    };
+    const stream = async (request: LanguageModelV3CallOptions) => {
+      const result = await input.language!.doStream(request);
+      const parts: LanguageModelV3StreamPart[] = [];
+      for await (const part of result.stream) parts.push(part);
+      return parts;
+    };
+    expect((await stream(options)).filter((part) => part.type === "tool-call")).toEqual([
+      { type: "tool-call", toolCallId: MANUAL_CALL_IDS[0], toolName: "stm_memory_update", input: "{}" },
+    ]);
+    const completed: LanguageModelV3CallOptions = {
+      ...options,
+      prompt: [
+        ...options.prompt,
+        {
+          role: "assistant",
+          content: [{ type: "tool-call", toolCallId: MANUAL_CALL_IDS[0], toolName: "stm_memory_update", input: {} }],
+        },
+        {
+          role: "tool",
+          content: [
+            {
+              type: "tool-result",
+              toolCallId: MANUAL_CALL_IDS[0],
+              toolName: "stm_memory_update",
+              output: { type: "text", value: "generation: v2\nupdate: committed" },
+            },
+          ],
+        },
+      ],
+    };
+    expect(manualToolDispatch(completed)?.completed).toBe(true);
+    expect((await stream(completed)).some((part) => part.type === "tool-call")).toBe(false);
+    expect((await stream(completed)).filter((part) => part.type === "text-delta").map((part) => part.delta)).toEqual([
+      PROBE_STREAM_SENTINEL,
+    ]);
+    const second = {
+      ...options,
+      prompt: [{ role: "user" as const, content: [{ type: "text" as const, text: MANUAL_SECOND_PROMPT }] }],
+    };
+    expect((await stream(second)).filter((part) => part.type === "tool-call").map((part) => part.toolCallId)).toEqual([
+      MANUAL_CALL_IDS[1],
+    ]);
+    expect((await stream({ ...options, tools: [] })).some((part) => part.type === "tool-call")).toBe(false);
+  } finally {
+    await harness.cleanup();
+    harness.restoreEnvironment();
+    if (previousScenario === undefined) delete Bun.env.PROBE_SCENARIO;
+    else Bun.env.PROBE_SCENARIO = previousScenario;
+  }
+});
 const toolCall: LanguageModelV3CallOptions = {
   prompt: [],
   tools: [
@@ -357,6 +436,56 @@ function evaluatorRecords(mode: ProbeMode, inputs: readonly TelemetryInput[]): P
       }) as ProbeTelemetryRecord,
   );
 }
+
+test("execution reporting counts only actual hooks for the exact tool", () => {
+  const records = evaluatorRecords("ordinary", [
+    ...["stm_memory_update", "stm_memory_reset"].flatMap((tool) =>
+      ["tool.execute.before", "tool.execute.after", "tool.execute.before", "tool.execute.after"].map(
+        (observedEvent): TelemetryInput => ({
+          event: "event.observed",
+          observedEvent,
+          details: { eventData: { tool } },
+        }),
+      ),
+    ),
+    {
+      event: "model.invocation",
+      provider: PROBE_PROVIDER_ID,
+      model: PROBE_MODEL_ID,
+      requestKind: "doStream",
+      invocation: 1,
+      sentinel: "stm_memory_reset:true",
+      details: {
+        toolNames: ["stm_memory_update", "stm_memory_reset"],
+        eventData: { tool: "stm_memory_reset" },
+      },
+    },
+    { event: "event.observed", observedEvent: "tool.execute.before" },
+    {
+      event: "event.observed",
+      observedEvent: "tool.execute.after",
+      details: { eventData: { tool: "stm_memory_reset_extra" } },
+    },
+    {
+      event: "event.observed",
+      observedEvent: "tool.execute.before.extra",
+      details: { eventData: { tool: "stm_memory_reset" } },
+    },
+  ]);
+  expect(countToolExecutionEvents(records, "stm_memory_update")).toBe(4);
+  expect(countToolExecutionEvents(records, "stm_memory_reset")).toBe(4);
+  const withoutResetHooks = records.filter(
+    (record) =>
+      !(
+        record.event === "event.observed" &&
+        record.details?.eventData &&
+        (record.details.eventData as { tool?: unknown }).tool === "stm_memory_reset"
+      ),
+  );
+  expect(countToolExecutionEvents(withoutResetHooks, "stm_memory_update")).toBe(4);
+  expect(countToolExecutionEvents(withoutResetHooks, "stm_memory_reset")).toBe(0);
+  expect(countToolExecutionEvents([], "stm_memory_reset")).toBe(0);
+});
 
 function resequence(records: readonly ProbeTelemetryRecord[]): ProbeTelemetryRecord[] {
   return records.map((record, index) => ({ ...record, seq: index + 1 }));

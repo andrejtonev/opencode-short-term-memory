@@ -33,7 +33,60 @@ function toolContext(sessionID: string): ToolContext {
     messageID: "message",
     id: "call",
     progress: async () => undefined,
-  } as ToolContext;
+  } as unknown as ToolContext;
+}
+
+function resultText(result: Awaited<ReturnType<ToolDefinition["execute"]>> | undefined): string {
+  if (!result || !Array.isArray(result.content) || result.content.length !== 1 || result.content[0]?.type !== "text")
+    throw new Error("expected one text result");
+  return result.content[0].text;
+}
+
+const generatedMemory =
+  "## Session Memory\n\n### User Instructions\n- learned\n### Long Horizon Context\n- x\n### Decisions\n- x\n### Conclusions\n- x\n### Active References\n- x\n";
+const currentModel = { providerID: "host-provider", id: "host-model", variant: "host-variant" };
+const settledAssistant = (id: string, text = "settled answer", completed: number | null = 2) => ({
+  id,
+  type: "assistant",
+  agent: "agent",
+  model: { providerID: "historical-provider", id: "historical-model" },
+  content: [
+    { type: "text", text },
+    { type: "reasoning", text: "hidden reasoning" },
+  ],
+  time: { created: 1, ...(completed === null ? {} : { completed }) },
+});
+
+function updateHost(directory: string, sessionID: string, records: unknown) {
+  const reads: { method: string; input: unknown; signal?: AbortSignal | null }[] = [];
+  const generations: { prompt: string; model: unknown }[] = [];
+  const pluginContext = {
+    ...context(directory),
+    session: {
+      ...context(directory).session,
+      context: async (input: unknown, options?: { signal?: AbortSignal | null }) => {
+        reads.push({ method: "context", input, signal: options?.signal });
+        return records;
+      },
+      get: async (input: unknown, options?: { signal?: AbortSignal | null }) => {
+        reads.push({ method: "get", input, signal: options?.signal });
+        return { id: sessionID, model: currentModel };
+      },
+    },
+    generate: {
+      text: async (request: { prompt: string; model: unknown }) => {
+        generations.push(request);
+        return { text: generatedMemory };
+      },
+    },
+  } as unknown as V2Context;
+  const [, , , tool] = createV2MemoryTools(pluginContext);
+  return { pluginContext, reads, generations, tool };
+}
+
+async function updateText(tool: ToolDefinition, sessionID: string, input: unknown = {}) {
+  const result = await tool.execute(input, toolContext(sessionID));
+  return resultText(result);
 }
 
 describe("V2 memory tools", () => {
@@ -58,7 +111,7 @@ describe("V2 memory tools", () => {
     await rm(testDir, { recursive: true, force: true });
   });
 
-  test("defines exactly two tools and executes the exact transformed definitions", async () => {
+  test("defines exactly four tools and executes the exact transformed definitions", async () => {
     const transformed: Array<(editor: ToolEditor) => void> = [];
     const setupContext = {
       ...context(testDir),
@@ -78,11 +131,16 @@ describe("V2 memory tools", () => {
     }));
     editors.forEach((editor, index) => transformed[index]!(editor));
     const definitions = editors.flatMap(({ added }) => added) as ToolDefinition[];
-    expect(definitions.map(({ name }) => name)).toEqual(["stm_memory_read", "stm_memory_status", "stm_memory_reset"]);
-    expect(editors).toHaveLength(3);
-    expect(editors[0]!.added[0]).toBe(definitions[0]);
-    expect(editors[1]!.added[0]).toBe(definitions[1]);
+    expect(definitions.map(({ name }) => name)).toEqual([
+      "stm_memory_read",
+      "stm_memory_status",
+      "stm_memory_reset",
+      "stm_memory_update",
+    ]);
+    expect(editors).toHaveLength(4);
+    editors.forEach((editor, index) => expect(editor.added[0]).toBe(definitions[index]));
     expect(definitions.map(({ options }) => options)).toEqual([
+      { codemode: false },
       { codemode: false },
       { codemode: false },
       { codemode: false },
@@ -95,6 +153,7 @@ describe("V2 memory tools", () => {
     };
     expect(definitions[0]!.input).toEqual(expectedInputSchema);
     expect(definitions[1]!.input).toEqual(expectedInputSchema);
+    expect(definitions[3]!.input).toEqual(expectedInputSchema);
     expect(definitions[2]!.input).toEqual({
       type: "object",
       properties: { confirm: { type: "boolean" } },
@@ -140,9 +199,7 @@ describe("V2 memory tools", () => {
         },
       ],
     });
-    expect((statusResult.content as readonly [{ text: string }])[0]!.text).toContain(
-      "authoritative sessionID: authoritative",
-    );
+    expect(resultText(statusResult)).toContain("authoritative sessionID: authoritative");
     await cleanup();
   });
 
@@ -153,6 +210,249 @@ describe("V2 memory tools", () => {
     const result = await readTool.execute({}, toolContext("actual"));
     expect(result).toEqual({ content: [{ type: "text", text: memory }] });
     expect((result as { content?: unknown }).content).not.toEqual(expect.any(String));
+  });
+
+  test("updates the fresh settled prefix with exact host identity and model, ignoring malicious input", async () => {
+    const sessionID = "manual-session";
+    await writeText(join(testDir, ".opencode", "stm.json"), JSON.stringify({ memoryModel: "override/model" }));
+    const h = updateHost(testDir, sessionID, [
+      { id: "msg_user", type: "user", text: "fresh user text", time: { created: 1 } },
+      settledAssistant("msg_settled"),
+      settledAssistant("msg_pending", "unfinished text", null),
+      settledAssistant("msg_future", "future text"),
+    ]);
+    const result = await h.tool.execute(
+      { sessionID: "attacker", model: { id: "attacker", providerID: "attacker" }, force: true },
+      { ...toolContext(sessionID), messageID: undefined } as unknown as ToolContext,
+    );
+    const text = resultText(result);
+    expect(text).toBe(
+      [
+        "generation: v2",
+        `sessionID: ${sessionID}`,
+        "update: committed",
+        "reason: delta_exhausted",
+        "source: durable-visible-text",
+        "stoppedBeforeMessageID: msg_pending",
+        'progress: cumulative-invocation {"checkpointedChunks":1,"checkpointedMessages":2,"persistedPartialFragments":0}',
+        "rollback: not-applicable",
+        "detail: none",
+      ].join("\n"),
+    );
+    expect(h.reads.map(({ method, input }) => ({ method, input }))).toEqual([
+      { method: "context", input: { sessionID } },
+      { method: "get", input: { sessionID } },
+    ]);
+    expect(h.reads[0]!.signal).toBeInstanceOf(AbortSignal);
+    expect(h.reads[1]!.signal).toBe(h.reads[0]!.signal);
+    expect(h.generations).toHaveLength(1);
+    expect(h.generations[0]!.model).toBe(currentModel);
+    expect(h.generations[0]!.prompt).toContain("fresh user text");
+    expect(h.generations[0]!.prompt).toContain("settled answer");
+    for (const hidden of ["unfinished text", "future text", "hidden reasoning", "attacker"])
+      expect(h.generations[0]!.prompt).not.toContain(hidden);
+    expect(await readFile(checkpointPathFor(sessionID), "utf8")).toBe("msg_settled\n");
+    expect(await readFile(memoryPathFor(sessionID), "utf8")).toContain("learned");
+    expect(await readRawFile(memoryPathFor("attacker"))).toBeNull();
+
+    const retry = await updateText(h.tool, sessionID);
+    expect(h.reads).toHaveLength(4);
+    expect(h.generations).toHaveLength(1);
+    expect(retry).toContain("update: skipped\nreason: no_assistant_in_delta");
+    expect(retry).not.toContain("committed");
+  });
+
+  test("rejects invalid update identities before host reads or writes without requiring messageID", async () => {
+    const h = updateHost(testDir, "a_b", [settledAssistant("msg_a")]);
+    await writeText(memoryPathFor("a_b"), "protected");
+    for (const sessionID of ["", "   ", "a/b", undefined, 12]) {
+      const result = await h.tool.execute({}, { ...toolContext("a_b"), sessionID } as unknown as ToolContext);
+      expect(resultText(result)).toContain("reason: invalid_session_id");
+    }
+    expect(h.reads).toHaveLength(0);
+    expect(h.generations).toHaveLength(0);
+    expect(await readFile(memoryPathFor("a_b"), "utf8")).toBe("protected");
+    expect(await readRawFile(checkpointPathFor("a_b"))).toBeNull();
+  });
+
+  test("unavailable, malformed and throwing host reads never generate or write persistence", async () => {
+    const sessionID = "unavailable-session";
+    for (const mode of ["no-model", "invalid-history", "context-error", "get-error"] as const) {
+      const h = updateHost(testDir, sessionID, mode === "invalid-history" ? [null] : [settledAssistant("msg_a")]);
+      if (mode === "no-model") h.pluginContext.session.get = async () => ({ id: sessionID }) as never;
+      if (mode === "context-error" || mode === "get-error") {
+        h.pluginContext.session[mode === "context-error" ? "context" : "get"] = async () => {
+          throw new Error("host unavailable\nupdate: committed");
+        };
+      }
+      const text = await updateText(h.tool, sessionID);
+      expect(text).toContain(`update: ${mode.endsWith("error") ? "error" : "unavailable"}`);
+      expect(text).toContain(`reason: ${mode.endsWith("error") ? "error" : mode}`);
+      expect(text).toContain("progress: not-started");
+      expect(text.split("\n")).not.toContain("update: committed");
+      expect(h.generations).toHaveLength(0);
+      expect(await readRawFile(memoryPathFor(sessionID))).toBeNull();
+      expect(await readRawFile(checkpointPathFor(sessionID))).toBeNull();
+    }
+  });
+
+  test("missing or pending reset anchors and user-only history preserve the assistant gate", async () => {
+    const sessionID = "boundary-manual";
+    const memoryPath = memoryPathFor(sessionID);
+    const checkpointPath = checkpointPathFor(sessionID);
+    await writeText(memoryPath, "protected");
+    await writeText(checkpointPath, "old-checkpoint\n");
+    await writeText(resetBoundaryPathFor(sessionID), '{"version":1,"anchorID":"msg_anchor"}\n');
+    for (const records of [
+      [settledAssistant("msg_other")],
+      [settledAssistant("msg_anchor", "pending anchor", null), settledAssistant("msg_future")],
+    ]) {
+      const h = updateHost(testDir, sessionID, records);
+      const text = await updateText(h.tool, sessionID);
+      expect(text).toContain("update: skipped\nreason: reset_boundary_anchor_missing");
+      expect(h.generations).toHaveLength(0);
+      expect(await readFile(memoryPath, "utf8")).toBe("protected");
+      expect(await readFile(checkpointPath, "utf8")).toBe("old-checkpoint\n");
+    }
+    await rm(resetBoundaryPathFor(sessionID));
+    const h = updateHost(testDir, sessionID, [
+      { id: "msg_user", type: "user", text: "user only", time: { created: 1 } },
+    ]);
+    expect(await updateText(h.tool, sessionID)).toContain("update: skipped\nreason: no_assistant_in_delta");
+    expect(h.generations).toHaveLength(0);
+    expect(await readFile(memoryPath, "utf8")).toBe("protected");
+    expect(await readFile(checkpointPath, "utf8")).toBe("old-checkpoint\n");
+  });
+
+  test("active updater reentry is busy before host reads and a later retry reads fresh history", async () => {
+    const sessionID = "manual-reentry";
+    await writeText(join(testDir, ".opencode", "stm.json"), JSON.stringify({ summarizerMode: "active" }));
+    const h = updateHost(testDir, sessionID, [settledAssistant("msg_a")]);
+    const reentries: string[] = [];
+    h.pluginContext.session.generate = async () => {
+      const readsBefore = h.reads.length;
+      reentries.push(await updateText(h.tool, sessionID));
+      expect(h.reads).toHaveLength(readsBefore);
+      return { text: generatedMemory } as never;
+    };
+    const updater = createV2MemoryUpdater(h.pluginContext, testDir);
+    const result = await updater({
+      sessionID,
+      model: currentModel as never,
+      messages: [{ id: "msg_previous", role: "assistant", content: [{ type: "text", text: "previous" }] }],
+    });
+    expect(result.status).toBe("committed");
+    expect(h.reads).toHaveLength(0);
+    expect(reentries[0]).toContain("update: busy\nreason: update_in_flight\nsource: not-read");
+    expect(await updateText(h.tool, sessionID)).toContain("update: committed");
+    expect(h.reads).toHaveLength(2);
+    expect(reentries).toHaveLength(2);
+    expect(await readFile(checkpointPathFor(sessionID), "utf8")).toBe("msg_a\n");
+  });
+
+  test("ownership acquired while fresh history is pending returns busy without generating", async () => {
+    const sessionID = "manual-race";
+    const h = updateHost(testDir, sessionID, [settledAssistant("msg_manual")]);
+    let releaseRead!: (records: unknown) => void;
+    let readStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      readStarted = resolve;
+    });
+    h.pluginContext.session.context = async () => {
+      readStarted();
+      return await new Promise<never>((resolve) => {
+        releaseRead = resolve as (records: unknown) => void;
+      });
+    };
+    const manual = updateText(h.tool, sessionID);
+    await started;
+    let releaseGeneration!: () => void;
+    let generationStarted!: () => void;
+    let generationCalls = 0;
+    const generating = new Promise<void>((resolve) => {
+      generationStarted = resolve;
+    });
+    h.pluginContext.generate.text = async () => {
+      generationCalls += 1;
+      generationStarted();
+      await new Promise<void>((resolve) => {
+        releaseGeneration = resolve;
+      });
+      return { text: generatedMemory } as never;
+    };
+    const automatic = createV2MemoryUpdater(
+      h.pluginContext,
+      testDir,
+    )({
+      sessionID,
+      model: currentModel as never,
+      messages: [{ id: "msg_auto", role: "assistant", content: [{ type: "text", text: "automatic" }] }],
+    });
+    await generating;
+    try {
+      releaseRead([settledAssistant("msg_manual")]);
+      const text = await manual;
+      expect(text).toContain("update: busy\nreason: update_in_flight\nsource: durable-visible-text");
+      expect(text).toContain('progress: cumulative-invocation {"checkpointedChunks":0');
+      expect(h.generations).toHaveLength(0);
+      expect(generationCalls).toBe(1);
+      expect(await readRawFile(checkpointPathFor(sessionID))).toBeNull();
+    } finally {
+      releaseGeneration();
+      await automatic;
+    }
+    expect(await readFile(checkpointPathFor(sessionID), "utf8")).toBe("msg_auto\n");
+  });
+
+  test("partial generation failure reports cumulative fragment writes without claiming completion", async () => {
+    const sessionID = "manual-partial";
+    await writeText(join(testDir, ".opencode", "stm.json"), JSON.stringify({ maxUpdateInputLength: 500 }));
+    const h = updateHost(testDir, sessionID, [settledAssistant("msg_large", "x".repeat(1200))]);
+    let calls = 0;
+    h.pluginContext.generate.text = async () => {
+      calls += 1;
+      if (calls === 2) throw new Error("second fragment failed");
+      return { text: generatedMemory } as never;
+    };
+    const text = await updateText(h.tool, sessionID);
+    expect(text).toContain("update: error\nreason: operational_failure");
+    expect(text).toContain(
+      'progress: cumulative-invocation {"checkpointedChunks":0,"checkpointedMessages":0,"persistedPartialFragments":1}',
+    );
+    expect(text).toContain('rollback: none-reported\ndetail: "second fragment failed"');
+    expect(text).not.toContain("completed");
+    expect(text).not.toContain("unchanged");
+    expect(calls).toBe(2);
+    expect(await readFile(memoryPathFor(sessionID), "utf8")).toContain("learned");
+    expect(await readRawFile(checkpointPathFor(sessionID))).toBeNull();
+  });
+
+  test("checkpoint write failure reports rollback without inferring unchanged state from zero counters", async () => {
+    const sessionID = "manual-rollback";
+    await writeText(memoryPathFor(sessionID), "previous memory");
+    await mkdir(checkpointPathFor(sessionID), { recursive: true });
+    const h = updateHost(testDir, sessionID, [settledAssistant("msg_a")]);
+    const text = await updateText(h.tool, sessionID);
+    expect(h.generations).toHaveLength(1);
+    expect(text).toContain("update: error\nreason: operational_failure");
+    expect(text).toContain(
+      'progress: cumulative-invocation {"checkpointedChunks":0,"checkpointedMessages":0,"persistedPartialFragments":0}',
+    );
+    expect(text).toContain("rollback: restored");
+    expect(text).toContain("detail:");
+    expect(text).not.toContain("unchanged");
+    expect(text).not.toContain("committed");
+    expect(await readFile(memoryPathFor(sessionID), "utf8")).toBe("previous memory");
+  });
+
+  test("disabled configuration remains a skipped update with no generation or persistence", async () => {
+    const sessionID = "manual-disabled";
+    await writeText(join(testDir, ".opencode", "stm.json"), JSON.stringify({ enabled: false }));
+    const h = updateHost(testDir, sessionID, [settledAssistant("msg_a")]);
+    expect(await updateText(h.tool, sessionID)).toContain("update: skipped\nreason: disabled");
+    expect(h.generations).toHaveLength(0);
+    expect(await readRawFile(memoryPathFor(sessionID))).toBeNull();
+    expect(await readRawFile(checkpointPathFor(sessionID))).toBeNull();
   });
 
   test("requires literal confirmation and resets using the authoritative message anchor", async () => {
@@ -176,8 +476,11 @@ describe("V2 memory tools", () => {
     expect(await readFile(memoryPath, "utf8")).toBe("old memory");
     expect(await readFile(checkpointPath, "utf8")).toBe("old-checkpoint\n");
 
-    const result = await resetTool.execute({ confirm: true }, { ...toolContext(sessionID), messageID });
-    expect((result.content as readonly [{ text: string }])[0]!.text).toBe(
+    const result = await resetTool.execute(
+      { confirm: true },
+      { ...toolContext(sessionID), messageID: messageID as ToolContext["messageID"] },
+    );
+    expect(resultText(result)).toBe(
       [
         "generation: v2",
         "reset: completed",
@@ -217,9 +520,9 @@ describe("V2 memory tools", () => {
     await writeText(safeCollisionPath, "protected collision");
     const [, , resetTool] = createV2MemoryTools(context(testDir));
 
-    await expect(resetTool.execute({ confirm: true }, { ...toolContext("a/b"), messageID: "anchor" })).rejects.toThrow(
-      "unsafe path characters",
-    );
+    await expect(
+      resetTool.execute({ confirm: true }, { ...toolContext("a/b"), messageID: "anchor" as ToolContext["messageID"] }),
+    ).rejects.toThrow("unsafe path characters");
     expect(await readFile(safeCollisionPath, "utf8")).toBe("protected collision");
   });
 
@@ -232,7 +535,7 @@ describe("V2 memory tools", () => {
     const readResult = await readTool.execute({}, toolContext(sessionID));
     expect(readResult).toEqual({ content: [{ type: "text", text: memory }] });
     const statusResult = await statusTool.execute({}, toolContext(sessionID));
-    const text = (statusResult.content as readonly [{ text: string }])[0]!.text;
+    const text = resultText(statusResult);
     expect(text).toBe(
       [
         "generation: v2",
@@ -275,7 +578,7 @@ describe("V2 memory tools", () => {
     await writeText(checkpointPathFor(sessionID), "message-42\n");
     const [, statusTool] = createV2MemoryTools(context(testDir));
     const result = await statusTool.execute({}, toolContext(sessionID));
-    const text = (result.content as readonly [{ text: string }])[0]!.text;
+    const text = resultText(result);
     expect(text).toContain("configuredMemoryModel: none");
     expect(text).toContain("effectiveMemoryModel: current-session");
     expect(text).toContain("checkpoint: message-42");
@@ -287,18 +590,18 @@ describe("V2 memory tools", () => {
     const boundaryPath = resetBoundaryPathFor(sessionID);
 
     await writeText(boundaryPath, '{"version":1,"anchorID":"anchor-1"}\n');
-    let text = ((await statusTool.execute({}, toolContext(sessionID))).content as readonly [{ text: string }])[0]!.text;
+    let text = resultText(await statusTool.execute({}, toolContext(sessionID)));
     expect(text).toContain("resetBoundary: valid");
     expect(text).toContain("resetBoundaryAnchor: anchor-1");
 
     await writeText(boundaryPath, '{"version":1,"anchorID":"anchor-1","extra":true}\n');
-    text = ((await statusTool.execute({}, toolContext(sessionID))).content as readonly [{ text: string }])[0]!.text;
+    text = resultText(await statusTool.execute({}, toolContext(sessionID)));
     expect(text).toContain("resetBoundary: invalid");
     expect(text).not.toContain("resetBoundaryAnchor:");
 
     await rm(boundaryPath, { force: true });
     await mkdir(boundaryPath, { recursive: true });
-    text = ((await statusTool.execute({}, toolContext(sessionID))).content as readonly [{ text: string }])[0]!.text;
+    text = resultText(await statusTool.execute({}, toolContext(sessionID)));
     expect(text).toContain("resetBoundary: unreadable");
   });
 
@@ -330,7 +633,7 @@ describe("V2 memory tools", () => {
 
     const [, statusTool] = createV2MemoryTools(context(testDir));
     const status = await statusTool.execute({}, toolContext(sessionID));
-    const text = (status.content as readonly [{ text: string }])[0]!.text;
+    const text = resultText(status);
     expect(text).toContain("configuredMemoryModel: provider/configured");
     expect(text).toContain("effectiveMemoryModel: current-session");
   });
@@ -343,7 +646,7 @@ describe("V2 memory tools", () => {
     await writeText(memoryPathFor(sessionID, memoryDir), memory);
     const [, statusTool] = createV2MemoryTools(context(testDir));
     const status = await statusTool.execute({}, toolContext(sessionID));
-    const text = (status.content as readonly [{ text: string }])[0]!.text;
+    const text = resultText(status);
     expect(text).toContain(`memoryPath: ${memoryDir}/session_${sessionID}.md`);
     const injection = createV2ContextInjection(testDir);
     const input = { sessionID, system: [] } as never;
@@ -379,7 +682,7 @@ describe("V2 memory tools", () => {
     await Promise.resolve();
     const [, statusTool] = createV2MemoryTools(context(testDir));
     const status = await statusTool.execute({}, toolContext(sessionID));
-    expect((status.content as readonly [{ text: string }])[0]!.text).toContain("updaterBusy: true");
+    expect(resultText(status)).toContain("updaterBusy: true");
     release();
     await update;
   });
@@ -409,20 +712,24 @@ describe("V2 memory tools", () => {
       messages: [{ id: "assistant-1", role: "assistant", content: [{ type: "text", text: "answer" }] }],
     } as never);
 
-    expect((resetResult?.content as readonly [{ text: string }])[0]!.text).toContain(
-      "an update is active for this session; retry after it finishes",
-    );
+    expect(resultText(resetResult)).toContain("an update is active for this session; retry after it finishes");
     expect(await readRawFile(resetBoundaryPathFor(sessionID))).toBeNull();
     const laterReset = await resetTool.execute({ confirm: true }, toolContext(sessionID));
-    expect((laterReset.content as readonly [{ text: string }])[0]!.text).toContain("reset: completed");
+    expect(resultText(laterReset)).toContain("reset: completed");
     expect(await readRawFile(resetBoundaryPathFor(sessionID))).not.toBeNull();
   });
 
   test("returns registrations in exact order with definition identity", () => {
     const registrations = createV2MemoryToolRegistrations(context(testDir));
-    expect(registrations.map(({ name }) => name)).toEqual(["stm_memory_read", "stm_memory_status", "stm_memory_reset"]);
+    expect(registrations.map(({ name }) => name)).toEqual([
+      "stm_memory_read",
+      "stm_memory_status",
+      "stm_memory_reset",
+      "stm_memory_update",
+    ]);
     expect(registrations.map(({ definition }) => definition.name)).toEqual(registrations.map(({ name }) => name));
     expect(registrations.map(({ definition }) => definition.options)).toEqual([
+      { codemode: false },
       { codemode: false },
       { codemode: false },
       { codemode: false },
@@ -526,7 +833,7 @@ describe("V2 memory tools", () => {
         transform: async (callback: (editor: ToolEditor) => void) => {
           callback({ add: () => undefined });
           toolNumber += 1;
-          const name = toolNumber === 1 ? "read" : toolNumber === 2 ? "status" : "reset";
+          const name = ["read", "status", "reset", "update"][toolNumber - 1]!;
           events.push(`acquire:${name}`);
           return { dispose: async () => events.push(`dispose:${name}`) };
         },
@@ -541,6 +848,8 @@ describe("V2 memory tools", () => {
       "acquire:read",
       "acquire:status",
       "acquire:reset",
+      "acquire:update",
+      "dispose:update",
       "dispose:reset",
       "dispose:status",
       "dispose:read",

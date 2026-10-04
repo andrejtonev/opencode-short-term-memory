@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -9,13 +9,18 @@ import {
   checkpointPathFor,
   logPath,
   memoryPathFor,
+  readRawFile,
   readText,
+  resetBoundaryPathFor,
   writeText,
 } from "../src/memory-utils";
 import { CLEAN_SUMMARIZER_TIMEOUT } from "../src/summarizer";
+import { writeLastProcessedMessageID } from "../src/message-collector";
 import type { V2Context, V2SessionContext } from "../src/v2-adapter";
 import { createV2MemoryUpdater, isV2MemoryUpdateInFlight } from "../src/v2-memory-update";
 import { withV2MemoryMutation } from "../src/v2-mutation-coordination";
+import { readV2CurrentHistory, type V2CurrentHistoryContext } from "../src/v2-current-history";
+import { resetV2MemoryPersistence } from "../src/v2-reset-persistence";
 
 const VALID_MEMORY = `${MEMORY_HEADER}
 
@@ -98,9 +103,43 @@ function input(sessionID: string, messages: unknown[], model = { providerID: "pr
 }
 
 function conversationBody(prompt: string): string {
-  const start = prompt.indexOf("<conversation_update>");
-  const end = prompt.indexOf("</conversation_update>");
+  const start = prompt.lastIndexOf("<conversation_update>");
+  const end = prompt.lastIndexOf("</conversation_update>");
   return start >= 0 && end > start ? prompt.slice(start + "<conversation_update>".length, end) : "";
+}
+
+function historyHost(sessionID: string, records: unknown, model: V2SessionContext["model"]) {
+  return {
+    session: {
+      context: async () => records,
+      get: async () => ({ id: sessionID, model }),
+    },
+  } as unknown as V2CurrentHistoryContext;
+}
+
+function durableAssistant(id: string, text: string, completed?: number) {
+  return {
+    id,
+    type: "assistant",
+    agent: "agent",
+    model: { providerID: "historical-provider", id: "historical-model" },
+    content: [
+      { type: "text", text },
+      { type: "reasoning", text: "REASONING_SENTINEL" },
+      {
+        type: "tool",
+        id: "call",
+        name: "read",
+        state: {
+          status: "completed",
+          input: {},
+          content: [{ type: "text", text: "TOOL_SENTINEL" }],
+        },
+        time: { created: 1, completed: 2 },
+      },
+    ],
+    time: completed === undefined ? { created: 1 } : { created: 1, completed },
+  };
 }
 
 describe("V2 fresh memory updater", () => {
@@ -133,12 +172,158 @@ describe("V2 fresh memory updater", () => {
     await rm(directory, { recursive: true, force: true });
   });
 
+  test("accepts the actual context hook input structurally", () => {
+    const register = (context: V2Context) => {
+      const update = createV2MemoryUpdater(context);
+      return context.session.hook("context", async (snapshot) => {
+        await update(snapshot);
+      });
+    };
+    expect(typeof register).toBe("function");
+  });
+
+  test("directly updates the reader's settled prefix with the exact current model variant", async () => {
+    const model = { ...input("reader", []).model, variant: "current-variant" } as V2SessionContext["model"];
+    const snapshot = await readV2CurrentHistory(
+      historyHost(
+        "reader",
+        [
+          { id: "msg_user", type: "user", text: "CURRENT_QUESTION", time: { created: 1 } },
+          durableAssistant("msg_answer", "CURRENT_ANSWER", 2),
+          durableAssistant("msg_pending", "PENDING_SENTINEL"),
+          durableAssistant("msg_future", "FUTURE_SENTINEL", 2),
+        ],
+        model,
+      ),
+      "reader",
+    );
+    expect(snapshot.status).toBe("ready");
+    if (snapshot.status !== "ready") throw new Error("expected ready history");
+    expect(snapshot.history.stoppedBeforeMessageID).toBe("msg_pending");
+    let generated: { prompt: string; model?: unknown } | undefined;
+    const { context, calls } = makeContext(directory, {
+      clean: async (request) => {
+        generated = request;
+        return { text: VALID_MEMORY };
+      },
+    });
+    expect(await createV2MemoryUpdater(context)(snapshot.history)).toEqual({
+      status: "committed",
+      checkpointedChunks: 1,
+      checkpointedMessages: 2,
+      persistedPartialFragments: 0,
+    });
+    expect(calls.clean).toHaveLength(1);
+    expect(calls.active).toHaveLength(0);
+    expect(generated?.model).toBe(model);
+    expect(generated?.model).toEqual({ providerID: "provider", id: "model", variant: "current-variant" });
+    expect(conversationBody(generated!.prompt).trim()).toBe(
+      "USER:\nCURRENT_QUESTION\n\n---\n\nASSISTANT:\nCURRENT_ANSWER",
+    );
+    for (const excluded of ["REASONING_SENTINEL", "TOOL_SENTINEL", "PENDING_SENTINEL", "FUTURE_SENTINEL"])
+      expect(generated!.prompt).not.toContain(excluded);
+    expect(await readText(memoryPathFor("reader", memoryDir))).toContain("Keep the instruction.");
+    expect(await readText(checkpointPathFor("reader", memoryDir))).toBe("msg_answer\n");
+  });
+
+  test("direct reader composition preserves an excluded reset anchor and summarizes only new history", async () => {
+    await resetV2MemoryPersistence("reader-reset", directory, "msg_anchor");
+    const boundary = await readRawFile(resetBoundaryPathFor("reader-reset", memoryDir));
+    const snapshot = await readV2CurrentHistory(
+      historyHost(
+        "reader-reset",
+        [
+          durableAssistant("msg_old", "OLD_SENTINEL", 2),
+          { id: "msg_anchor", type: "synthetic", text: "ANCHOR_SENTINEL", time: { created: 1 } },
+          { id: "msg_new", type: "user", text: "NEW_QUESTION", time: { created: 1 } },
+          durableAssistant("msg_answer", "NEW_ANSWER", 2),
+        ],
+        input("reader-reset", []).model,
+      ),
+      "reader-reset",
+    );
+    expect(snapshot.status).toBe("ready");
+    if (snapshot.status !== "ready") throw new Error("expected ready history");
+    expect(snapshot.history.messages[1]).toEqual({ id: "msg_anchor", role: "tool", content: [] });
+    let prompt = "";
+    const { context, calls } = makeContext(directory, {
+      clean: async (request) => {
+        prompt = request.prompt;
+        return { text: VALID_MEMORY };
+      },
+    });
+    expect(await createV2MemoryUpdater(context)(snapshot.history)).toEqual({
+      status: "committed",
+      checkpointedChunks: 1,
+      checkpointedMessages: 2,
+      persistedPartialFragments: 0,
+    });
+    expect(calls.clean).toHaveLength(1);
+    expect(calls.active).toHaveLength(0);
+    expect(conversationBody(prompt).trim()).toBe("USER:\nNEW_QUESTION\n\n---\n\nASSISTANT:\nNEW_ANSWER");
+    expect(prompt).not.toContain("OLD_SENTINEL");
+    expect(prompt).not.toContain("ANCHOR_SENTINEL");
+    expect(await readText(memoryPathFor("reader-reset", memoryDir))).toContain("Keep the instruction.");
+    expect(await readText(checkpointPathFor("reader-reset", memoryDir))).toBe("msg_answer\n");
+    expect(await readRawFile(resetBoundaryPathFor("reader-reset", memoryDir))).toEqual(boundary);
+  });
+
+  test.each(["missing", "pending", "no-assistant"] as const)(
+    "direct reader composition pauses %s history without generation or memory/checkpoint writes",
+    async (scenario) => {
+      const sessionID = `reader-${scenario}`;
+      if (scenario !== "no-assistant") await resetV2MemoryPersistence(sessionID, directory, "msg_anchor");
+      const records =
+        scenario === "no-assistant"
+          ? [
+              { id: "msg_user", type: "user", text: "QUESTION", time: { created: 1 } },
+              durableAssistant("msg_pending", "PENDING"),
+            ]
+          : [
+              durableAssistant("msg_old", "OLD", 2),
+              ...(scenario === "pending" ? [durableAssistant("msg_anchor", "PENDING")] : []),
+              durableAssistant("msg_future", "FUTURE", 2),
+            ];
+      const paths = [
+        memoryPathFor(sessionID, memoryDir),
+        checkpointPathFor(sessionID, memoryDir),
+        resetBoundaryPathFor(sessionID, memoryDir),
+      ];
+      const before = await Promise.all(paths.map(readRawFile));
+      const snapshot = await readV2CurrentHistory(
+        historyHost(sessionID, records, input(sessionID, []).model),
+        sessionID,
+      );
+      expect(snapshot.status).toBe("ready");
+      if (snapshot.status !== "ready") throw new Error("expected ready history");
+      if (scenario !== "missing")
+        expect(snapshot.history.stoppedBeforeMessageID).toBe(scenario === "pending" ? "msg_anchor" : "msg_pending");
+      const { context, calls } = makeContext(directory);
+      expect(await createV2MemoryUpdater(context)(snapshot.history)).toEqual({
+        status: "skipped",
+        reason: scenario === "no-assistant" ? "no_assistant_in_delta" : "reset_boundary_anchor_missing",
+        checkpointedChunks: 0,
+        checkpointedMessages: 0,
+        persistedPartialFragments: 0,
+      });
+      expect(calls.clean).toHaveLength(0);
+      expect(calls.active).toHaveLength(0);
+      expect(await Promise.all(paths.map(readRawFile))).toEqual(before);
+    },
+  );
+
   test("active mode generates, validates, writes memory, and advances checkpoint", async () => {
     await writeText(join(directory, ".opencode", "stm.json"), JSON.stringify({ memoryDir, summarizerMode: "active" }));
     const { context, calls } = makeContext(directory);
-    await createV2MemoryUpdater(context)(
+    const result = await createV2MemoryUpdater(context)(
       input("active", [message("u1", "user", "Remember this"), message("a1", "assistant", "Done")]),
     );
+    expect(result).toEqual({
+      status: "committed",
+      checkpointedChunks: 1,
+      checkpointedMessages: 2,
+      persistedPartialFragments: 0,
+    });
     expect(calls.active).toHaveLength(1);
     expect(calls.clean).toHaveLength(0);
     expect(await readText(memoryPathFor("active", memoryDir))).toContain(MEMORY_HEADER);
@@ -170,7 +355,13 @@ describe("V2 fresh memory updater", () => {
     ],
   ])("skips %s snapshots without generating", async (name, messages, reason) => {
     const { context, calls } = makeContext(directory);
-    await createV2MemoryUpdater(context)(input(name, messages));
+    expect(await createV2MemoryUpdater(context)(input(name, messages))).toEqual({
+      status: "skipped",
+      reason,
+      checkpointedChunks: 0,
+      checkpointedMessages: 0,
+      persistedPartialFragments: 0,
+    });
     expect(calls.active).toHaveLength(0);
     expect(calls.clean).toHaveLength(0);
     expect(await readText(logPath(memoryDir))).toContain(`"reason":"${reason}"`);
@@ -191,6 +382,70 @@ describe("V2 fresh memory updater", () => {
     expect(await readText(logPath(memoryDir))).toContain('"absentCheckpoint":"gone"');
   });
 
+  test("disabled configuration returns a skip without changing existing persistence", async () => {
+    await writeText(join(directory, ".opencode", "stm.json"), JSON.stringify({ memoryDir, enabled: false }));
+    await writeText(memoryPathFor("disabled", memoryDir), "existing memory\n");
+    await writeText(checkpointPathFor("disabled", memoryDir), "before\n");
+    const { context, calls } = makeContext(directory);
+    expect(await createV2MemoryUpdater(context)(input("disabled", [message("a1", "assistant", "Answer")]))).toEqual({
+      status: "skipped",
+      reason: "disabled",
+      checkpointedChunks: 0,
+      checkpointedMessages: 0,
+      persistedPartialFragments: 0,
+    });
+    expect(calls.clean).toHaveLength(0);
+    expect(calls.active).toHaveLength(0);
+    expect(await readText(memoryPathFor("disabled", memoryDir))).toBe("existing memory\n");
+    expect(await readText(checkpointPathFor("disabled", memoryDir))).toBe("before\n");
+  });
+
+  test.each(["generation", "restored", "conflict", "failed"] as const)(
+    "retains earlier checkpoint progress after a later chunk failure (%s)",
+    async (failure) => {
+      await writeText(join(directory, ".opencode", "stm.json"), JSON.stringify({ memoryDir, maxDeltaMessages: 20 }));
+      let generation = 0;
+      const { context, calls } = makeContext(directory, {
+        clean: async () => {
+          generation += 1;
+          if (generation === 2 && failure === "generation") throw new Error("later generation failure");
+          return { text: VALID_MEMORY.replace("Keep the instruction.", `chunk-${generation}`) };
+        },
+      });
+      const result = await createV2MemoryUpdater(context, undefined, {
+        writeCheckpoint: async (sessionID, checkpointID, config) => {
+          if (checkpointID === "a1") throw new Error("later checkpoint failure");
+          await writeLastProcessedMessageID(sessionID, checkpointID, config);
+        },
+        beforeRollback: async () => {
+          if (failure === "failed") throw new Error("restore failure");
+          if (failure === "conflict") await writeText(memoryPathFor("later", memoryDir), "external writer\n");
+        },
+      })(
+        input("later", [
+          ...Array.from({ length: 20 }, (_, index) => message(`u${index}`, "user", `Question-${index}`)),
+          message("a1", "assistant", "Answer"),
+        ]),
+      );
+      expect(result).toEqual({
+        status: "error",
+        reason: "operational_failure",
+        detail: failure === "generation" ? "later generation failure" : "later checkpoint failure",
+        ...(failure === "generation" ? {} : { rollback: failure }),
+        checkpointedChunks: 1,
+        checkpointedMessages: 20,
+        persistedPartialFragments: 0,
+      });
+      expect(calls.clean).toHaveLength(2);
+      expect(await readText(checkpointPathFor("later", memoryDir))).toBe("u19\n");
+      const persisted = await readText(memoryPathFor("later", memoryDir));
+      if (failure === "conflict") expect(persisted).toBe("external writer\n");
+      else expect(persisted).toContain(failure === "failed" ? "chunk-2" : "chunk-1");
+      if (failure === "failed")
+        expect(await readText(logPath(memoryDir))).toContain('"reason":"checkpoint_write_failed_restore_failed"');
+    },
+  );
+
   test("processes oversized entries as lossless continuation fragments", async () => {
     await writeText(join(directory, ".opencode", "stm.json"), JSON.stringify({ memoryDir, maxUpdateInputLength: 500 }));
     await writeText(checkpointPathFor("oversized", memoryDir), "before\n");
@@ -201,7 +456,7 @@ describe("V2 fresh memory updater", () => {
         return { text: VALID_MEMORY };
       },
     });
-    await createV2MemoryUpdater(context)(
+    const result = await createV2MemoryUpdater(context)(
       input("oversized", [
         message("before", "user", "old"),
         message("large", "user", `BEGIN_SENTINEL${"x".repeat(800)}MIDDLE_SENTINEL${"y".repeat(800)}END_SENTINEL`),
@@ -220,6 +475,12 @@ describe("V2 fresh memory updater", () => {
       (prompt) => !conversationBody(prompt).includes("OVERSIZED_ENTRY_CONTINUATION"),
     );
     expect(fragmentPrompts.length).toBeGreaterThan(1);
+    expect(result).toEqual({
+      status: "committed",
+      checkpointedChunks: 2,
+      checkpointedMessages: 2,
+      persistedPartialFragments: fragmentPrompts.length - 1,
+    });
     expect(normalPrompts).toHaveLength(1);
     expect(conversationBody(normalPrompts[0]!)).toContain("answered");
     expect(conversationBody(normalPrompts[0]!)).not.toContain("OVERSIZED_ENTRY_CONTINUATION");
@@ -241,7 +502,7 @@ describe("V2 fresh memory updater", () => {
         return callsSeen === 1 ? { text: VALID_MEMORY } : { text: "malformed" };
       },
     });
-    await createV2MemoryUpdater(context)(
+    const result = await createV2MemoryUpdater(context)(
       input("fragment-failure", [
         message("before", "user", "old"),
         message("large", "user", `BEGIN${"x".repeat(1800)}END`),
@@ -249,7 +510,92 @@ describe("V2 fresh memory updater", () => {
       ]),
     );
     expect(calls.clean.length).toBe(2);
+    expect(result).toEqual({
+      status: "error",
+      reason: "operational_failure",
+      detail: "missing_memory_header",
+      checkpointedChunks: 0,
+      checkpointedMessages: 0,
+      persistedPartialFragments: 1,
+    });
+    expect(await readText(memoryPathFor("fragment-failure", memoryDir))).toContain("Keep the instruction.");
     expect(await readText(checkpointPathFor("fragment-failure", memoryDir))).toBe("before\n");
+  });
+
+  test.each(["restored", "failed"] as const)(
+    "reports cumulative partial writes when the final oversized fragment checkpoint fails (%s)",
+    async (rollback) => {
+      await writeText(
+        join(directory, ".opencode", "stm.json"),
+        JSON.stringify({ memoryDir, maxUpdateInputLength: 500 }),
+      );
+      await writeText(checkpointPathFor("final-fragment", memoryDir), "before\n");
+      let generation = 0;
+      const { context, calls } = makeContext(directory, {
+        clean: async () => ({ text: VALID_MEMORY.replace("Keep the instruction.", `fragment-${++generation}`) }),
+      });
+      const result = await createV2MemoryUpdater(context, undefined, {
+        writeCheckpoint: async () => {
+          throw new Error("final checkpoint failure");
+        },
+        beforeRollback: () => {
+          if (rollback === "failed") throw new Error("restore failure");
+        },
+      })(input("final-fragment", [message("before", "user", "old"), message("large", "assistant", "x".repeat(1100))]));
+      expect(calls.clean.length).toBeGreaterThan(1);
+      expect(result).toEqual({
+        status: "error",
+        reason: "operational_failure",
+        detail: "final checkpoint failure",
+        rollback,
+        checkpointedChunks: 0,
+        checkpointedMessages: 0,
+        persistedPartialFragments: calls.clean.length - 1,
+      });
+      expect(await readText(checkpointPathFor("final-fragment", memoryDir))).toBe("before\n");
+      expect(await readText(memoryPathFor("final-fragment", memoryDir))).toContain(
+        `fragment-${generation - (rollback === "restored" ? 1 : 0)}`,
+      );
+    },
+  );
+
+  test("postcommit logging failure retains persisted counters and the legacy error event", async () => {
+    const { context, calls } = makeContext(directory);
+    const clock = spyOn(Date.prototype, "toISOString");
+    try {
+      const result = await createV2MemoryUpdater(context, undefined, {
+        writeCheckpoint: async (sessionID, checkpointID, config) => {
+          await writeLastProcessedMessageID(sessionID, checkpointID, config);
+          // Filesystem log failures are swallowed by logEvent; fail entry construction instead.
+          clock.mockImplementationOnce(() => {
+            throw new Error("log construction failure");
+          });
+        },
+      })(input("log-failure", [message("u1", "user", "Q"), message("a1", "assistant", "A")]));
+      expect(result).toEqual({
+        status: "error",
+        reason: "postcommit_logging_failure",
+        detail: "log construction failure",
+        checkpointedChunks: 1,
+        checkpointedMessages: 2,
+        persistedPartialFragments: 0,
+      });
+      expect(calls.clean).toHaveLength(1);
+      expect(await readText(memoryPathFor("log-failure", memoryDir))).toContain("Keep the instruction.");
+      expect(await readText(checkpointPathFor("log-failure", memoryDir))).toBe("a1\n");
+      const entries = (await readText(logPath(memoryDir)))
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line));
+      expect(entries.at(-1)).toMatchObject({
+        event: "v2_memory_update_error",
+        reason: "operational_failure",
+        detail: "log construction failure",
+      });
+      expect(isV2MemoryUpdateInFlight(directory, "log-failure")).toBe(false);
+    } finally {
+      clock.mockRestore();
+    }
   });
 
   test("applies the assistant gate to the bounded chunk", async () => {
@@ -257,7 +603,12 @@ describe("V2 fresh memory updater", () => {
     const messages = Array.from({ length: 20 }, (_, index) => message(`u${index}`, "user", `user-${index}`));
     messages.push(message("a20", "assistant", "answer outside bounded chunk"));
     const { context, calls } = makeContext(directory);
-    await createV2MemoryUpdater(context)(input("bounded-assistant", messages));
+    expect(await createV2MemoryUpdater(context)(input("bounded-assistant", messages))).toEqual({
+      status: "committed",
+      checkpointedChunks: 2,
+      checkpointedMessages: 21,
+      persistedPartialFragments: 0,
+    });
     expect(calls.clean).toHaveLength(2);
     expect(await readText(checkpointPathFor("bounded-assistant", memoryDir))).toBe("a20\n");
   });
@@ -306,7 +657,7 @@ describe("V2 fresh memory updater", () => {
     await writeText(memoryPathFor("bad", memoryDir), existing);
     await writeText(checkpointPathFor("bad", memoryDir), "before\n");
     const { context, calls } = makeContext(directory, { clean: async () => ({ text }) });
-    await createV2MemoryUpdater(context)(
+    const result = await createV2MemoryUpdater(context)(
       input("bad", [
         message("before", "user", "Earlier checkpoint"),
         message("u1", "user", "Question"),
@@ -314,6 +665,14 @@ describe("V2 fresh memory updater", () => {
       ]),
     );
     expect(calls.clean).toHaveLength(1);
+    expect(result).toEqual({
+      status: "error",
+      reason: "operational_failure",
+      detail,
+      checkpointedChunks: 0,
+      checkpointedMessages: 0,
+      persistedPartialFragments: 0,
+    });
     expect(await readText(memoryPathFor("bad", memoryDir))).toBe(existing);
     expect(await readText(checkpointPathFor("bad", memoryDir))).toBe("before\n");
     const entries = (await readText(logPath(memoryDir)))
@@ -351,7 +710,21 @@ describe("V2 fresh memory updater", () => {
     expect(calls.clean).toHaveLength(2);
     expect(secondInstance.calls.clean).toHaveLength(0);
     gate.resolve({ text: VALID_MEMORY });
-    await Promise.all([first, second, other]);
+    const results = await Promise.all([first, second, other]);
+    expect(results[0]).toEqual({
+      status: "committed",
+      checkpointedChunks: 1,
+      checkpointedMessages: 2,
+      persistedPartialFragments: 0,
+    });
+    expect(results[1]).toEqual({
+      status: "busy",
+      reason: "update_in_flight",
+      checkpointedChunks: 0,
+      checkpointedMessages: 0,
+      persistedPartialFragments: 0,
+    });
+    expect(results[2]).toEqual(results[0]!);
   });
 
   test("explicit mutations wait for an updater, then automatic updates skip manual ownership", async () => {
@@ -435,7 +808,14 @@ describe("V2 fresh memory updater", () => {
     });
     await expect(
       createV2MemoryUpdater(context)(input("reject", [message("u1", "user", "Q"), message("a1", "assistant", "A")])),
-    ).resolves.toBeUndefined();
+    ).resolves.toEqual({
+      status: "error",
+      reason: "operational_failure",
+      detail: "generation rejected",
+      checkpointedChunks: 0,
+      checkpointedMessages: 0,
+      persistedPartialFragments: 0,
+    });
     expect(calls.clean).toHaveLength(1);
     expect(await readText(logPath(memoryDir))).toContain('"detail":"generation rejected"');
     CLEAN_SUMMARIZER_TIMEOUT.ms = 1;
@@ -453,7 +833,14 @@ describe("V2 fresh memory updater", () => {
       input("timeout", [message("u1", "user", "Q"), message("a1", "assistant", "A")]),
     );
     await timeoutEntered.promise;
-    await expect(timeoutUpdate).resolves.toBeUndefined();
+    await expect(timeoutUpdate).resolves.toEqual({
+      status: "error",
+      reason: "operational_failure",
+      detail: "summarizer_timeout:1ms",
+      checkpointedChunks: 0,
+      checkpointedMessages: 0,
+      persistedPartialFragments: 0,
+    });
     expect(timeoutCalls).toBe(1);
     expect(await readText(logPath(memoryDir))).toContain('"detail":"summarizer_timeout:1ms"');
     lateOperation.reject(new Error("late timeout rejection"));
@@ -477,7 +864,13 @@ describe("V2 fresh memory updater", () => {
     expect(calls.clean).toHaveLength(1);
     await writeText(memoryPathFor("stale", memoryDir), "changed externally\n");
     gate.resolve({ text: VALID_MEMORY });
-    await update;
+    expect(await update).toEqual({
+      status: "skipped",
+      reason: "concurrent_memory_change",
+      checkpointedChunks: 0,
+      checkpointedMessages: 0,
+      persistedPartialFragments: 0,
+    });
     expect(await readText(memoryPathFor("stale", memoryDir))).toBe("changed externally\n");
     expect(await readText(checkpointPathFor("stale", memoryDir))).toBe("");
   });
@@ -487,9 +880,18 @@ describe("V2 fresh memory updater", () => {
     await writeText(memoryPathFor("rollback", memoryDir), existing);
     await writeFile(join(memoryDir, "checkpoints"), "not a directory");
     const { context, calls } = makeContext(directory);
-    await createV2MemoryUpdater(context)(
+    const result = await createV2MemoryUpdater(context)(
       input("rollback", [message("u1", "user", "Q"), message("a1", "assistant", "A")]),
     );
+    expect(result).toMatchObject({
+      status: "error",
+      reason: "operational_failure",
+      rollback: "restored",
+      checkpointedChunks: 0,
+      checkpointedMessages: 0,
+      persistedPartialFragments: 0,
+    });
+    expect(result.status === "error" && result.detail).toBeString();
     expect(calls.clean).toHaveLength(1);
     expect(await readText(memoryPathFor("rollback", memoryDir))).toBe(existing);
     const entries = (await readText(logPath(memoryDir)))
@@ -504,7 +906,7 @@ describe("V2 fresh memory updater", () => {
     const existing = `${MEMORY_FORMAT_VERSION}\n${VALID_MEMORY}`;
     await writeText(memoryPathFor("rollback-conflict", memoryDir), existing);
     const { context, calls } = makeContext(directory);
-    await createV2MemoryUpdater(context, undefined, {
+    const result = await createV2MemoryUpdater(context, undefined, {
       writeCheckpoint: async () => {
         throw new Error("checkpoint failure");
       },
@@ -512,6 +914,15 @@ describe("V2 fresh memory updater", () => {
         await writeText(memoryPathFor("rollback-conflict", memoryDir), "external writer\n");
       },
     })(input("rollback-conflict", [message("u1", "user", "Q"), message("a1", "assistant", "A")]));
+    expect(result).toEqual({
+      status: "error",
+      reason: "operational_failure",
+      detail: "checkpoint failure",
+      rollback: "conflict",
+      checkpointedChunks: 0,
+      checkpointedMessages: 0,
+      persistedPartialFragments: 0,
+    });
     expect(calls.clean).toHaveLength(1);
     expect(await readText(memoryPathFor("rollback-conflict", memoryDir))).toBe("external writer\n");
     expect(await readText(checkpointPathFor("rollback-conflict", memoryDir))).toBe("");
@@ -521,6 +932,32 @@ describe("V2 fresh memory updater", () => {
       .map((line) => JSON.parse(line));
     expect(entries.some((entry) => entry.reason === "checkpoint_write_failed_restore_conflict")).toBe(true);
     expect(entries.at(-1)).toMatchObject({ reason: "operational_failure", detail: "checkpoint failure" });
+  });
+
+  test("zero counters do not imply unchanged memory after failed first-chunk rollback", async () => {
+    await writeText(memoryPathFor("restore-failed", memoryDir), "original memory\n");
+    const { context } = makeContext(directory);
+    const result = await createV2MemoryUpdater(context, undefined, {
+      writeCheckpoint: async () => {
+        throw new Error("checkpoint failure");
+      },
+      beforeRollback: () => {
+        throw new Error("restore failure");
+      },
+    })(input("restore-failed", [message("a1", "assistant", "Answer")]));
+    expect(result).toEqual({
+      status: "error",
+      reason: "operational_failure",
+      detail: "checkpoint failure",
+      rollback: "failed",
+      checkpointedChunks: 0,
+      checkpointedMessages: 0,
+      persistedPartialFragments: 0,
+    });
+    expect(await readText(memoryPathFor("restore-failed", memoryDir))).toContain("Keep the instruction.");
+    expect(await readText(checkpointPathFor("restore-failed", memoryDir))).toBe("");
+    expect(await readText(logPath(memoryDir))).toContain('"reason":"checkpoint_write_failed_restore_failed"');
+    expect(isV2MemoryUpdateInFlight(directory, "restore-failed")).toBe(false);
   });
 
   test("does not recurse through a combined active context callback", async () => {

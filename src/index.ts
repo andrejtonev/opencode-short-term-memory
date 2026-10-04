@@ -1,6 +1,6 @@
 import type { Plugin } from "@opencode/plugin";
 import { SessionMemoryPlugin } from "./v1-adapter";
-import { createV2Adapter } from "./v2-adapter";
+import { createV2Adapter, type V2SessionContext } from "./v2-adapter";
 import { createV2ContextInjection } from "./v2-context-injection";
 import { createV2MemoryUpdater, isV2MemoryUpdateInFlight } from "./v2-memory-update";
 import { createV2MemoryToolRegistrations } from "./v2-memory-tools";
@@ -14,7 +14,7 @@ export default {
     const adapter = createV2Adapter(context);
     const injection = createV2ContextInjection(context.location.directory);
     const updater = createV2MemoryUpdater(context, context.location.directory);
-    const callback = async (input: Parameters<typeof updater>[0]) => {
+    const callback = async (input: V2SessionContext) => {
       if (isV2MemoryUpdateInFlight(context.location.directory, input.sessionID)) return;
       await updater(input);
       await injection(input);

@@ -150,7 +150,13 @@ describe("V2 reset boundary", () => {
     await writeFile(memoryPath, Buffer.from("original memory\n"));
     await writeFile(checkpointPath, Buffer.from("original checkpoint\n"));
     const calls = { prompts: [] as string[] };
-    await createV2MemoryUpdater(context(directory, calls), directory)(input("closed", messages));
+    expect(await createV2MemoryUpdater(context(directory, calls), directory)(input("closed", messages))).toEqual({
+      status: "skipped",
+      reason: _name === "duplicate" ? "reset_boundary_anchor_duplicate" : "reset_boundary_anchor_missing",
+      checkpointedChunks: 0,
+      checkpointedMessages: 0,
+      persistedPartialFragments: 0,
+    });
     expect(calls.prompts).toHaveLength(0);
     expect(await readFile(memoryPath, "utf8")).toBe("original memory\n");
     expect(await readFile(checkpointPath, "utf8")).toBe("original checkpoint\n");

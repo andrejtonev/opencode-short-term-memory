@@ -2,6 +2,7 @@ import { Model, Plugin, Provider } from "@opencode/plugin";
 import type { LanguageModelV3, LanguageModelV3CallOptions, LanguageModelV3Usage } from "@ai-sdk/provider";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import { MANUAL_FIRST_PROMPT, MANUAL_SECOND_PROMPT, MANUAL_CALL_IDS } from "./manual-evidence.js";
 
 import {
   createProbeTelemetryWriter,
@@ -186,8 +187,8 @@ function eventType(value: unknown): string {
   return typeof value.type === "string" ? value.type : "unknown";
 }
 
-export function resetToolCallPhase(options: LanguageModelV3CallOptions): 0 | 1 | 2 {
-  const knownResetCallIDs = new Set<string>();
+function pairedToolResults(options: LanguageModelV3CallOptions, toolName: string): Map<string, string> {
+  const knownCallIDs = new Set<string>();
   const toolResults = new Map<string, string>();
   const outputText = (output: unknown): string | undefined => {
     if (!isNonArrayObject(output) || typeof output.type !== "string") return undefined;
@@ -213,10 +214,10 @@ export function resetToolCallPhase(options: LanguageModelV3CallOptions): 0 | 1 |
         if (
           isNonArrayObject(part) &&
           part.type === "tool-call" &&
-          part.toolName === RESET_TOOL_NAME &&
+          part.toolName === toolName &&
           typeof part.toolCallId === "string"
         )
-          knownResetCallIDs.add(part.toolCallId);
+          knownCallIDs.add(part.toolCallId);
       }
     }
     if (value.role === "tool" && Array.isArray(value.content)) {
@@ -224,7 +225,7 @@ export function resetToolCallPhase(options: LanguageModelV3CallOptions): 0 | 1 |
         if (
           isNonArrayObject(part) &&
           part.type === "tool-result" &&
-          part.toolName === RESET_TOOL_NAME &&
+          part.toolName === toolName &&
           typeof part.toolCallId === "string"
         ) {
           const text = outputText(part.output);
@@ -235,6 +236,10 @@ export function resetToolCallPhase(options: LanguageModelV3CallOptions): 0 | 1 |
     for (const child of Object.values(value)) visit(child);
   };
   visit(options.prompt);
+  return new Map([...toolResults].filter(([callID]) => knownCallIDs.has(callID)));
+}
+
+export function resetToolCallPhase(options: LanguageModelV3CallOptions): 0 | 1 | 2 {
   const resultLines = (result: string): Set<string> =>
     new Set(
       result
@@ -242,7 +247,7 @@ export function resetToolCallPhase(options: LanguageModelV3CallOptions): 0 | 1 |
         .map((line) => line.trim())
         .filter((line) => line !== ""),
     );
-  const results = [...toolResults.entries()].filter(([callID]) => knownResetCallIDs.has(callID));
+  const results = [...pairedToolResults(options, RESET_TOOL_NAME)];
   if (
     results.some(
       ([callID, result]) => callID === RESET_CONFIRMED_CALL_ID && resultLines(result).has("reset: completed"),
@@ -262,10 +267,36 @@ export function resetToolCallPhase(options: LanguageModelV3CallOptions): 0 | 1 |
 
 function isResetToolRequest(options: LanguageModelV3CallOptions): boolean {
   return (
-    Bun.env.PROBE_SCENARIO === "reset" &&
+    (Bun.env.PROBE_SCENARIO === "reset" || Bun.env.PROBE_SCENARIO === "manual-update") &&
     availableFunctionToolNames(options).includes(RESET_TOOL_NAME) &&
-    JSON.stringify(options.prompt).includes(RESET_PROMPT_MARKER)
+    (Bun.env.PROBE_SCENARIO === "reset"
+      ? JSON.stringify(options.prompt).includes(RESET_PROMPT_MARKER)
+      : primaryMarker(options) === RESET_PROMPT_MARKER)
   );
+}
+
+function primaryMarker(options: LanguageModelV3CallOptions): string | undefined {
+  if (isMemoryUpdatePrompt(options) || isCompactionPrompt(options)) return undefined;
+  const users = options.prompt.filter((message) => message.role === "user");
+  const content = users.at(-1)?.content;
+  if (!Array.isArray(content) || content.some((part) => part.type !== "text")) return undefined;
+  return content.map((part) => (part.type === "text" ? part.text : "")).join("");
+}
+
+export function manualToolDispatch(
+  options: LanguageModelV3CallOptions,
+): { callID: string; completed: boolean } | undefined {
+  if (!availableFunctionToolNames(options).includes("stm_memory_update")) return undefined;
+  const marker = primaryMarker(options);
+  const callID =
+    marker === MANUAL_FIRST_PROMPT
+      ? MANUAL_CALL_IDS[0]
+      : marker === MANUAL_SECOND_PROMPT
+        ? MANUAL_CALL_IDS[1]
+        : undefined;
+  if (callID === undefined) return undefined;
+  const result = pairedToolResults(options, "stm_memory_update").get(callID);
+  return { callID, completed: result?.split(/\r?\n/).includes("update: committed") === true };
 }
 
 async function emitSnapshots(writer: ProbeTelemetryWriter, messages: readonly unknown[]): Promise<void> {
@@ -452,7 +483,9 @@ const probe = {
                   sentinel: responseText,
                   details: {
                     toolNames: availableFunctionToolNames(options),
-                    ...(Bun.env.PROBE_SCENARIO === "reset" ? { prompt: JSON.stringify(options.prompt) } : {}),
+                    ...(Bun.env.PROBE_SCENARIO === "reset" || Bun.env.PROBE_SCENARIO === "manual-update"
+                      ? { prompt: JSON.stringify(options.prompt) }
+                      : {}),
                   },
                 });
                 return {
@@ -470,6 +503,40 @@ const probe = {
                     ? memoryUpdateResponse(writer.runId)
                     : undefined;
                 const resetPhase = isResetToolRequest(options) ? resetToolCallPhase(options) : 2;
+                const manual = Bun.env.PROBE_SCENARIO === "manual-update" ? manualToolDispatch(options) : undefined;
+                if (responseText === undefined && manual !== undefined && !manual.completed) {
+                  await writer.emit({
+                    event: "model.invocation",
+                    provider: PROBE_PROVIDER_ID,
+                    model: PROBE_MODEL_ID,
+                    requestKind: "doStream",
+                    invocation,
+                    sentinel: "stm_memory_update:{}",
+                    details: {
+                      toolNames: availableFunctionToolNames(options),
+                      toolCall: { toolCallId: manual.callID, toolName: "stm_memory_update", input: {} },
+                    },
+                  });
+                  return {
+                    stream: new ReadableStream({
+                      start(controller) {
+                        controller.enqueue({ type: "stream-start", warnings: [] });
+                        controller.enqueue({
+                          type: "tool-call",
+                          toolCallId: manual.callID,
+                          toolName: "stm_memory_update",
+                          input: "{}",
+                        });
+                        controller.enqueue({
+                          type: "finish",
+                          usage: ZERO_USAGE,
+                          finishReason: { unified: "tool-calls", raw: "tool-calls" },
+                        });
+                        controller.close();
+                      },
+                    }),
+                  };
+                }
                 if (responseText === undefined && isResetToolRequest(options) && resetPhase < 2) {
                   const confirm = resetPhase === 1;
                   const toolCallId = confirm ? "stm-probe-reset-confirmed" : "stm-probe-reset-refusal";
@@ -515,7 +582,9 @@ const probe = {
                   sentinel: text,
                   details: {
                     toolNames: availableFunctionToolNames(options),
-                    ...(Bun.env.PROBE_SCENARIO === "reset" ? { prompt: JSON.stringify(options.prompt) } : {}),
+                    ...(Bun.env.PROBE_SCENARIO === "reset" || Bun.env.PROBE_SCENARIO === "manual-update"
+                      ? { prompt: JSON.stringify(options.prompt) }
+                      : {}),
                   },
                 });
                 const textId = `stm-probe-text-${invocation}`;
@@ -598,14 +667,30 @@ const probe = {
         ),
       );
 
-      if (Bun.env.PROBE_SCENARIO === "reset") {
+      if (Bun.env.PROBE_SCENARIO === "manual-update") {
+        await writer.emit({
+          event: "event.observed",
+          observedEvent: "manual.automatic-context-suppression",
+          details: { scope: "production.session.context", strategy: "registered-no-op" },
+        });
+      }
+      if (Bun.env.PROBE_SCENARIO === "reset" || Bun.env.PROBE_SCENARIO === "manual-update") {
         await acquire(
           "tool.execute.before",
           context.tool.hook("execute.before", async (input) => {
             await writer.emit({
               event: "event.observed",
               observedEvent: "tool.execute.before",
-              details: await resetExecutionEvidence({ ...input, snapshotPhase: "before" }),
+              details: {
+                ...(await resetExecutionEvidence({ ...input, snapshotPhase: "before" })),
+                ...(Bun.env.PROBE_SCENARIO === "manual-update" &&
+                (input.tool === "stm_memory_update" || input.tool === RESET_TOOL_NAME)
+                  ? {
+                      hostHistory: await context.session.context({ sessionID: input.sessionID }),
+                      hostSession: await context.session.get({ sessionID: input.sessionID }),
+                    }
+                  : {}),
+              },
             });
           }),
         );
@@ -615,7 +700,16 @@ const probe = {
             await writer.emit({
               event: "event.observed",
               observedEvent: "tool.execute.after",
-              details: await resetExecutionEvidence({ ...input, snapshotPhase: "after" }),
+              details: {
+                ...(await resetExecutionEvidence({ ...input, snapshotPhase: "after" })),
+                ...(Bun.env.PROBE_SCENARIO === "manual-update" &&
+                (input.tool === "stm_memory_update" || input.tool === RESET_TOOL_NAME)
+                  ? {
+                      hostHistory: await context.session.context({ sessionID: input.sessionID }),
+                      hostSession: await context.session.get({ sessionID: input.sessionID }),
+                    }
+                  : {}),
+              },
             });
           }),
         );

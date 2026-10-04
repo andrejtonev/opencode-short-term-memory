@@ -16,13 +16,26 @@ import {
   type IsolatedServiceOptions,
   type IsolatedServiceState,
 } from "./host-api.js";
-import { evaluateOrdinary, normalizeExternalMessages, parseProbeTelemetryJsonl } from "./evaluator.js";
+import {
+  countToolExecutionEvents,
+  evaluateOrdinary,
+  evaluatePrimaryMemoryToolInventory,
+  normalizeExternalMessages,
+  parseProbeTelemetryJsonl,
+} from "./evaluator.js";
 import { evaluateResetEvidence } from "./reset-evidence.js";
+import {
+  evaluateManualEvidence,
+  MANUAL_SEED_PROMPT,
+  MANUAL_FIRST_PROMPT,
+  MANUAL_POST_RESET_PROMPT,
+  MANUAL_SECOND_PROMPT,
+} from "./manual-evidence.js";
 
 const FIXTURE_DIRECTORY = import.meta.dir;
 const REPOSITORY_DIRECTORY = resolve(FIXTURE_DIRECTORY, "../..");
 const SANDBOX_PARENT = join(tmpdir(), "opencode");
-const OVERALL_TIMEOUT_MS = 45_000;
+const OVERALL_TIMEOUT_MS = Bun.env.PROBE_SCENARIO === "manual-update" ? 60_000 : 45_000;
 const OPERATION_TIMEOUT_MS = PROBE_HOST_TIMEOUT_MS;
 const REQUIRED_HEADINGS = [
   "## Session Memory",
@@ -37,7 +50,12 @@ const SECOND_PROMPT = "Second ordinary production update probe turn.";
 const RESET_PROMPT = "Use stm_memory_reset to reset this session. Confirm only after the first refusal.";
 const POST_RESET_PROMPT = "Continue after the confirmed reset with a fresh post-reset message.";
 const POST_RESET_FOLLOWUP_PROMPT = "Acknowledge the post-reset continuation with one final ordinary response.";
-const SCENARIO = Bun.env.PROBE_SCENARIO === "reset" ? "reset" : "ordinary";
+const SCENARIO =
+  Bun.env.PROBE_SCENARIO === "manual-update"
+    ? "manual-update"
+    : Bun.env.PROBE_SCENARIO === "reset"
+      ? "reset"
+      : "ordinary";
 
 interface Evidence {
   readonly runId: string;
@@ -63,7 +81,10 @@ interface Evidence {
   readonly ordinaryEvaluator: { readonly passed: boolean; readonly failures: readonly string[] } | null;
   readonly injectionObservable: boolean;
   readonly sandboxDisposition: "removed" | "retained";
-  readonly scenario: "ordinary" | "reset";
+  readonly scenario: "ordinary" | "reset" | "manual-update";
+  readonly automaticContextSuppressed: boolean;
+  readonly manualExecutionEvents: number;
+  readonly manualTelemetry?: Awaited<ReturnType<typeof parseProbeTelemetryJsonl>>;
   readonly resetBoundaryAnchor?: string;
   readonly resetExecutionEvents: number;
 }
@@ -135,6 +156,24 @@ export default {
   },
   async setup(...args) {
     await mark("setup-entered");
+    ${
+      SCENARIO === "manual-update"
+        ? `// Suppress only production's combined automatic context callback in this isolated scenario.
+    const original = args[0];
+    const session = new Proxy(original.session, { get(target, key) {
+      if (key === "hook") return (name, callback, ...options) => {
+        if (name === "context") return target.hook(name, async () => {}, ...options).then(async (registration) => {
+          await mark("automatic-context-suppressed");
+          return registration;
+        });
+        return target.hook(name, callback, ...options);
+      };
+      const value = Reflect.get(target, key);
+      return typeof value === "function" ? value.bind(target) : value;
+    } });
+    args[0] = new Proxy(original, { get(target, key) { return key === "session" ? session : Reflect.get(target, key); } });`
+        : ""
+    }
     const cleanup = await productionDefault.setup(...args);
     if (typeof cleanup !== "function") throw new TypeError("production setup did not return cleanup");
     await mark("setup-loaded");
@@ -178,6 +217,8 @@ async function run(): Promise<Evidence> {
   let telemetryRecords: Awaited<ReturnType<typeof parseProbeTelemetryJsonl>> = [];
   let telemetryPath = "";
   let resetBoundaryAnchor: string | undefined;
+  let sessionID = "";
+  let finalBoundary: string | undefined;
   try {
     productionPluginPath = await findProductionPlugin();
     await mkdir(SANDBOX_PARENT, { recursive: true });
@@ -233,8 +274,25 @@ async function run(): Promise<Evidence> {
     };
     service = await bounded(() => startIsolatedService(options), OPERATION_TIMEOUT_MS);
     const session = await createModeledSession(service.client, project, OPERATION_TIMEOUT_MS);
+    sessionID = session.id;
     initialObservation = await observeSession(service.client, session.id, OPERATION_TIMEOUT_MS);
-    if (SCENARIO === "reset") {
+    if (SCENARIO === "manual-update") {
+      for (const prompt of [
+        MANUAL_SEED_PROMPT,
+        MANUAL_FIRST_PROMPT,
+        RESET_PROMPT,
+        MANUAL_POST_RESET_PROMPT,
+        MANUAL_SECOND_PROMPT,
+      ]) {
+        observableOutput = await submitOrdinaryPrompt(service.client, session.id, prompt, OPERATION_TIMEOUT_MS);
+      }
+      finalBoundary = await readFile(
+        join(memoryDirectory, "reset-boundaries", `${session.id.replace(/[^A-Za-z0-9._-]/g, "_")}.json`),
+        "utf8",
+      );
+      const boundary = JSON.parse(finalBoundary) as { anchorID?: unknown };
+      if (typeof boundary.anchorID === "string") resetBoundaryAnchor = boundary.anchorID;
+    } else if (SCENARIO === "reset") {
       const boundaryPath = join(
         memoryDirectory,
         "reset-boundaries",
@@ -303,7 +361,13 @@ async function run(): Promise<Evidence> {
     }
     const secondUsers = durable.filter(
       (message) =>
-        message.role === "user" && message.text === (SCENARIO === "reset" ? POST_RESET_FOLLOWUP_PROMPT : SECOND_PROMPT),
+        message.role === "user" &&
+        message.text ===
+          (SCENARIO === "manual-update"
+            ? MANUAL_SECOND_PROMPT
+            : SCENARIO === "reset"
+              ? POST_RESET_FOLLOWUP_PROMPT
+              : SECOND_PROMPT),
     );
     expectedCheckpointSourceMessageID = secondUsers.length === 1 ? (secondUsers[0]!.id ?? "") : "";
     assert(
@@ -372,28 +436,8 @@ async function run(): Promise<Evidence> {
     );
     const primaryToolNames = [...new Set(primaryInvocations.flatMap((record) => invocationToolNames(record)))];
     primaryModelToolNames = primaryToolNames;
-    if (SCENARIO === "ordinary") {
-      assert(
-        primaryToolNames.includes("stm_memory_read") && primaryToolNames.includes("stm_memory_status"),
-        "primary model invocation did not expose both stm_memory_read and stm_memory_status",
-        failures,
-      );
-      assert(
-        !primaryToolNames.some((name) => /^stm_memory_(?:update|aggregate)$/.test(name)),
-        "primary model invocation exposed a forbidden V2 update/aggregate tool",
-        failures,
-      );
-    } else {
-      assert(
-        primaryToolNames.includes("stm_memory_reset"),
-        "reset tool was not exposed to the primary model",
-        failures,
-      );
-      assert(
-        !primaryToolNames.includes("stm_memory_update") && !primaryToolNames.includes("stm_memory_aggregate"),
-        "update/aggregate leaked into reset acceptance",
-        failures,
-      );
+    failures.push(...evaluatePrimaryMemoryToolInventory(primaryToolNames));
+    if (SCENARIO === "reset") {
       const invocations = telemetryRecords.filter((record) => record.event === "model.invocation");
       assert(
         invocations.some((record) => record.sentinel === "stm_memory_reset:false"),
@@ -457,6 +501,20 @@ async function run(): Promise<Evidence> {
     productionWrapperMarkers !== "" && (await exists(join(productionWrapperMarkers, "setup-loaded")));
   const productionWrapperCleanupObserved =
     productionWrapperMarkers !== "" && (await exists(join(productionWrapperMarkers, "cleanup-complete")));
+  const automaticContextSuppressed =
+    productionWrapperMarkers !== "" && (await exists(join(productionWrapperMarkers, "automatic-context-suppressed")));
+  if (SCENARIO === "manual-update") {
+    failures.push(
+      ...evaluateManualEvidence({
+        records: telemetryRecords,
+        sessionID,
+        runId,
+        suppressionObserved: automaticContextSuppressed,
+        finalCheckpoint: checkpointValue,
+        finalBoundary,
+      }).failures,
+    );
+  }
   if (!productionWrapperLoaded) failures.push("production wrapper setup was not observed");
   if (service !== undefined && !cleanupCompleted) failures.push("service cleanup did not complete");
   const evidencePath = join(SANDBOX_PARENT, `production-update-probe-${runId}.json`);
@@ -485,9 +543,10 @@ async function run(): Promise<Evidence> {
     injectionObservable,
     sandboxDisposition: failures.length === 0 ? "removed" : "retained",
     scenario: SCENARIO,
-    resetExecutionEvents: telemetryRecords.filter(
-      (record) => record.event === "event.observed" && /^tool.execute\.(before|after)$/.test(record.observedEvent),
-    ).length,
+    automaticContextSuppressed,
+    ...(SCENARIO === "manual-update" ? { manualTelemetry: telemetryRecords } : {}),
+    manualExecutionEvents: countToolExecutionEvents(telemetryRecords, "stm_memory_update"),
+    resetExecutionEvents: countToolExecutionEvents(telemetryRecords, "stm_memory_reset"),
     resetBoundaryAnchor,
   };
   await writeFile(evidencePath, `${JSON.stringify(evidence, null, 2)}\n`);

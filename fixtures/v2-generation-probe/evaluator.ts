@@ -724,6 +724,26 @@ function requireSingleGenerateOperation(
   );
 }
 
+export function countToolExecutionEvents(records: readonly ProbeTelemetryRecord[], tool: string): number {
+  return records.filter(
+    (record) =>
+      record.event === "event.observed" &&
+      (record.observedEvent === "tool.execute.before" || record.observedEvent === "tool.execute.after") &&
+      (record.details?.eventData as { tool?: unknown } | undefined)?.tool === tool,
+  ).length;
+}
+
+export function evaluatePrimaryMemoryToolInventory(toolNames: readonly string[]): readonly string[] {
+  const failures: string[] = [];
+  for (const name of ["stm_memory_read", "stm_memory_status", "stm_memory_reset", "stm_memory_update"]) {
+    if (!toolNames.includes(name)) failures.push(`primary model invocation did not expose ${name}`);
+  }
+  if (toolNames.includes("stm_memory_aggregate")) {
+    failures.push("primary model invocation exposed a forbidden V2 aggregate tool");
+  }
+  return failures;
+}
+
 export function evaluateOrdinary(input: OrdinaryEvaluationInput): ProbeEvaluationResult {
   const failures: string[] = [];
   const records = input.records;

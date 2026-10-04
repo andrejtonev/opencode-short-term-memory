@@ -10,8 +10,9 @@ import {
   safeSessionID,
 } from "./memory-utils";
 import { readLastProcessedMessageID } from "./message-collector";
-import { isV2MemoryUpdateInFlight } from "./v2-memory-update";
+import { createV2MemoryUpdater, isV2MemoryUpdateInFlight } from "./v2-memory-update";
 import type { V2Context } from "./v2-adapter";
+import { readV2CurrentHistory } from "./v2-current-history";
 import { parseV2ResetBoundary } from "./v2-reset-boundary";
 import { resetV2MemoryPersistence } from "./v2-reset-persistence";
 
@@ -122,8 +123,82 @@ async function resetMemory(input: unknown, context: ToolContext, directory: stri
   );
 }
 
-export function createV2MemoryTools(context: V2Context): readonly [ToolDefinition, ToolDefinition, ToolDefinition] {
-  const directory = context.location.directory;
+async function updateMemory(
+  context: ToolContext,
+  pluginContext: V2Context,
+  directory: string,
+  updater: ReturnType<typeof createV2MemoryUpdater>,
+) {
+  const sessionID = context.sessionID;
+  if (typeof sessionID !== "string" || !sessionID.trim() || safeSessionID(sessionID) !== sessionID) {
+    return textResult(
+      [
+        "generation: v2",
+        "update: error",
+        "reason: invalid_session_id",
+        "source: not-read",
+        `sessionID: ${JSON.stringify(sessionID) ?? "unavailable"}`,
+        "progress: not-started",
+        "rollback: not-applicable",
+        "detail: authoritative tool sessionID must be nonempty and path-safe",
+      ].join("\n"),
+    );
+  }
+  const labels = ["generation: v2", `sessionID: ${sessionID}`];
+  if (isV2MemoryUpdateInFlight(directory, sessionID)) {
+    return textResult(
+      [
+        ...labels,
+        "update: busy",
+        "reason: update_in_flight",
+        "source: not-read",
+        "progress: not-started",
+        "rollback: not-applicable",
+        "detail: retry after the active update finishes",
+      ].join("\n"),
+    );
+  }
+  const current = await readV2CurrentHistory(pluginContext, sessionID);
+  if (current.status !== "ready") {
+    return textResult(
+      [
+        ...labels,
+        `update: ${current.status === "error" ? "error" : "unavailable"}`,
+        `reason: ${current.status}`,
+        "source: unavailable",
+        "progress: not-started",
+        "rollback: not-applicable",
+        `detail: ${JSON.stringify(current.status === "no-model" ? "current session model unavailable" : current.reason)}`,
+      ].join("\n"),
+    );
+  }
+  // Do not queue a mutation lock around the updater: it acquires ownership itself.
+  const result = await updater(current.history);
+  return textResult(
+    [
+      ...labels,
+      `update: ${result.status}`,
+      `reason: ${result.status === "committed" ? "delta_exhausted" : result.reason}`,
+      `source: ${current.history.source}`,
+      ...(current.history.stoppedBeforeMessageID
+        ? [`stoppedBeforeMessageID: ${current.history.stoppedBeforeMessageID}`]
+        : []),
+      `progress: cumulative-invocation ${JSON.stringify({
+        checkpointedChunks: result.checkpointedChunks,
+        checkpointedMessages: result.checkpointedMessages,
+        persistedPartialFragments: result.persistedPartialFragments,
+      })}`,
+      `rollback: ${result.status === "error" ? (result.rollback ?? "none-reported") : "not-applicable"}`,
+      `detail: ${result.status === "error" ? JSON.stringify(result.detail) : "none"}`,
+    ].join("\n"),
+  );
+}
+
+export function createV2MemoryTools(
+  pluginContext: V2Context,
+): readonly [ToolDefinition, ToolDefinition, ToolDefinition, ToolDefinition] {
+  const directory = pluginContext.location.directory;
+  const updater = createV2MemoryUpdater(pluginContext, directory);
   const readTool = {
     name: "stm_memory_read",
     description: "Read the current session's persisted short-term memory.",
@@ -146,7 +221,16 @@ export function createV2MemoryTools(context: V2Context): readonly [ToolDefinitio
     options: { codemode: false },
     execute: async (input: unknown, context: ToolContext) => resetMemory(input, context, directory),
   } satisfies ToolDefinition;
-  return [readTool, statusTool, resetTool];
+  const updateTool = {
+    name: "stm_memory_update",
+    description:
+      "Update current-session short-term memory from fresh settled durable visible text, using the current session model. Preserves assistant and reset-boundary gates; reports skips, failures and cumulative progress. Retry if busy.",
+    input: EMPTY_INPUT,
+    options: { codemode: false },
+    execute: async (_input: Record<string, never>, context: ToolContext) =>
+      updateMemory(context, pluginContext, directory, updater),
+  } satisfies ToolDefinition;
+  return [readTool, statusTool, resetTool, updateTool];
 }
 
 export function createV2MemoryToolRegistrations(
@@ -155,11 +239,13 @@ export function createV2MemoryToolRegistrations(
   { readonly name: "stm_memory_read"; readonly definition: ToolDefinition },
   { readonly name: "stm_memory_status"; readonly definition: ToolDefinition },
   { readonly name: "stm_memory_reset"; readonly definition: ToolDefinition },
+  { readonly name: "stm_memory_update"; readonly definition: ToolDefinition },
 ] {
-  const [readTool, statusTool, resetTool] = createV2MemoryTools(context);
+  const [readTool, statusTool, resetTool, updateTool] = createV2MemoryTools(context);
   return [
     { name: "stm_memory_read", definition: readTool },
     { name: "stm_memory_status", definition: statusTool },
     { name: "stm_memory_reset", definition: resetTool },
+    { name: "stm_memory_update", definition: updateTool },
   ];
 }

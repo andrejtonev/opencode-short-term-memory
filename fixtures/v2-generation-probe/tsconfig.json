@@ -13,6 +13,8 @@
     "production-update-probe.ts",
     "reset-evidence.ts",
     "reset-evidence.test.ts",
+    "manual-evidence.ts",
+    "manual-evidence.test.ts",
     "index.ts",
     "index.test.ts"
   ]
