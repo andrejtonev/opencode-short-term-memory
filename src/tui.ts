@@ -1,4 +1,3 @@
-import type { Context } from "@opencode/plugin/tui/context";
 import {
   isStatusOffer,
   STATUS_MAX_CHARS,
@@ -7,10 +6,39 @@ import {
   isStatusReceiver,
   statusOutputDefinition,
   statusTargets,
+  type StatusLocation,
   type StatusOutput,
+  type StatusReceiver,
 } from "./v2-status-output";
 
-export function receiveStatus(context: Pick<Context, "client" | "location" | "ui">) {
+export type StatusTuiContext = {
+  client: {
+    rpc(definition: typeof statusOutputDefinition): {
+      [Method in "claim" | "acknowledge" | "cancel"]: (
+        input: StatusReceiver,
+        options?: { location?: StatusLocation; signal?: AbortSignal },
+      ) => Promise<unknown>;
+    } & {
+      events: {
+        on(
+          name: "offer" | "output" | "release",
+          handler: (event: { data: unknown; location?: StatusLocation }) => void | Promise<void>,
+          options?: { signal?: AbortSignal },
+        ): () => void;
+      };
+    };
+  };
+  location?: StatusLocation;
+  ui: {
+    router: { current(): { type: string; sessionID?: string } };
+    dialog: {
+      alert(options: { title: string; message: string }): Promise<void>;
+      set(options: { size: "large"; centered: boolean }): void;
+    };
+  };
+};
+
+export function receiveStatus(context: StatusTuiContext) {
   const receiverID = crypto.randomUUID();
   const rpc = context.client.rpc(statusOutputDefinition);
   const controller = new AbortController();

@@ -240,6 +240,70 @@ checks and the same isolated strict consumer to pass on a newly identified
 tarball. The recorded consumer uses `skipLibCheck: false`; suppressing declaration
 checking is not a fix or an acceptance claim.
 
+## TUI Capability Follow-Up: 2026-10-05
+
+**Recommendation remains NOT RC-ready.** This bounded follow-up preserves all
+historical evidence above. The lead reports exactly one package acceptance and
+one native execution for this unit; neither was rerun for this documentation edit.
+
+| Component/Logic Block      | Current Findings/Hypothesis                                                                                                     | Implications                                                                            | Verification Status                                                                                |
+| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| TUI public boundary        | Exported structural `StatusTuiContext` replaces the broad host Context import; runtime body unchanged, no new dependencies.     | Removes unused optional renderer peers from STM's public TUI declaration closure.       | Narrow source boundary inspected; unchanged runtime/no new dependencies lead-reported.             |
+| Host assignability         | Permanent `tui-contract.ts` checks host 2.0.12 Context/receiver assignability; virtual 2.0.8 check also passes.                 | Compile-time interoperability evidence, not installed-host runtime acceptance.          | Fixture inspected; both results lead-reported. Host checks explicitly use `skipLibCheck: true`.    |
+| Clean package declarations | Isolated strict TUI consumer passes; full consumer fails with three diagnostics, down from seven, with no optional-peer errors. | TUI closure fixed within this scope; full package acceptance still blocked.             | Retained package JSON inspected: TUI exit 0, full consumer exit 2; both use `skipLibCheck: false`. |
+| Tests/static gates         | Final solitary suite: 710 pass, 0 fail; build, root typecheck and fixture checks pass.                                          | Green checkout gates do not supersede the failed package/live gates.                    | Lead-reported; mandatory `./tools/llm/toolchain-check.sh` absent.                                  |
+| Native acceptance/cleanup  | Four headless refusals and five rendered states precede a capture-pane timeout; manual cleanup subsequently verified.           | Partial native evidence only; complete current-revision live milestone remains pending. | Retained live JSON inspected; manual cleanup lead-reported separately, original record preserved.  |
+
+**Artifact identity:** `/tmp/opencode/stm-tui-boundary-8afb716-package.tgz`,
+SHA256 `d9dad8e49a425aeffb7dfba583ab6dd093495edacf5f67abbdba7f6d4aff5d1f`.
+These are working-tree bytes based on `8afb716`, **not** an immutable preexisting
+commit artifact. Package evidence:
+`/tmp/opencode/stm-package-acceptance-PvdDPA/evidence.json`. Fresh production
+installation (282 packages) and all four runtime export imports pass. The remaining
+diagnostics are two missing `json-schema` declaration errors in `@ai-sdk/provider`
+and one undeclared `SchemaErrorTypeId` in Effect. Bun still blocks one postinstall;
+`bun pm untrusted` cannot identify it because no production lockfile exists. No
+trust changes or supported host-bootstrap acceptance are claimed.
+
+**Execution caveats:** simultaneous build/test activity produced missing `dist`
+failures, and concurrent heavy probes produced timeout failures. The final
+solitary unit suite is 710/0; those earlier failures remain historical evidence.
+Concurrent load is a possible contributor, not a verified sole cause of the native
+capture timeout. Build/typecheck/fixture results are recorded, not rerun here.
+
+Live evidence: `/tmp/opencode/stm-production-commands-hsJlLD/evidence.json`,
+host 2.0.12, `verdict: "fail"` at `connected-show-existing` with
+`tmux capture-pane exited 124`. Rendered states are default status, explicit
+status, settings, empty logs and created memory display. Failure snapshot retrieval
+also failed with a transport error; there is no full cost snapshot or adaptive
+journey. The lead reports credentials absent and no paid calls; the record has
+`paidInference: false` and `globalBudgetChanged: false`, but no completed
+`costConsumed` snapshot. Do not substitute the package run's recorded cost 0 for
+the missing live snapshot.
+
+The original live record retains `tuiStopped: false`, `serverExit: null` and the
+timed-out harness cleanup. Subsequent manual cleanup used the commands below:
+`kill-server` exited 0, and `ps` showed none of the three listed processes. This
+separate cleanup evidence does not rewrite the failed run as a PASS.
+
+```bash
+/usr/bin/timeout --kill-after=2s 5s /usr/bin/tmux -S /tmp/opencode/stm-production-commands-hsJlLD/tmux.sock kill-server
+ps -p 2778901,2778902,2778904 -o pid,ppid,stat,args
+```
+
+Investigation artifact (inspected for this edit):
+`/home/dev/workspace/opencode-work/opencode-short-term-memory-v2-forced-update/2026-10-05--tui-capability-boundary.html`.
+Permanent contract: `fixtures/v2-generation-probe/tui-output/tui-contract.ts`;
+its fixture config explicitly retains `skipLibCheck: true`, unlike strict package
+declaration acceptance. Only this readiness document was edited/formatted; no new
+acceptance execution, build or commit was performed for this documentation unit.
+
+**Next bounded unit:** STM package owner fixes JSON Schema production type closure,
+then resolves the Effect SDK upstream dependency decision. Acceptance: the same
+full strict consumer passes on a newly identified tarball without declaration
+suppression. A complete bounded native rerun on that candidate remains a future
+live milestone, including retained cost/state evidence and confirmed cleanup.
+
 ## References
 
 - Prior readiness audit:

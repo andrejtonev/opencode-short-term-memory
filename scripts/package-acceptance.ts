@@ -332,20 +332,51 @@ console.log(JSON.stringify({ gate: "public imports only, no hooks called", paths
     assert.equal(pkg.name, name);
     assert.equal(pkg.version, version);
   }
+  const tsconfig = {
+    compilerOptions: {
+      target: "ESNext",
+      module: "ESNext",
+      moduleResolution: "bundler",
+      strict: true,
+      skipLibCheck: false,
+      noEmit: true,
+      types: ["bun"],
+      typeRoots: [join(tooling, "node_modules", "@types")],
+    },
+    files: ["consumer.ts"],
+  };
+  await Bun.write(
+    join(runtime, "tui-consumer.ts"),
+    `import tui, { receiveStatus, type StatusTuiContext } from "${manifest.name}/tui";
+const tuiShape: { id: string; setup(context: StatusTuiContext): () => void } = tui;
+const receiver: typeof tuiShape.setup = receiveStatus;
+const id: string = tui.id;
+void [tuiShape, receiver, id];
+`,
+  );
+  const tuiConfig = { ...tsconfig, files: ["tui-consumer.ts"] };
+  await Bun.write(join(runtime, "tsconfig.tui.json"), JSON.stringify(tuiConfig, null, 2));
+  evidence.tuiDeclarationConfig = tuiConfig;
+  await run(
+    "strict TUI-only declaration consumer",
+    [bun, join(tooling, "node_modules", "typescript", "bin", "tsc"), "-p", join(runtime, "tsconfig.tui.json")],
+    runtime,
+    toolingEnv,
+  );
+  evidence.tuiDeclarations = { gate: "strict TUI-only declarations, no host SDK imports", verdict: "PASS" };
   await Bun.write(
     join(runtime, "consumer.ts"),
     `import root, { SessionMemoryPlugin } from "${manifest.name}";
 import server from "${manifest.name}/server";
-import tui, { receiveStatus } from "${manifest.name}/tui";
+import tui, { receiveStatus, type StatusTuiContext } from "${manifest.name}/tui";
 import rpc, { statusOutputDefinition, type StatusReceiver, type StatusOutput } from "${manifest.name}/rpc";
 import type { Plugin as V1Plugin } from "@opencode-ai/plugin";
 import type { Plugin } from "@opencode/plugin";
-import type { Context } from "@opencode/plugin/tui/context";
 import type { Rpc } from "@opencode/plugin/rpc";
 const rootShape: { id: string; server: V1Plugin; setup(context: Plugin.Context): Promise<() => Promise<void>> } = root;
 const serverShape: typeof rootShape = server;
 const legacy: V1Plugin = SessionMemoryPlugin;
-const tuiShape: { id: string; setup(context: Pick<Context, "client" | "location" | "ui">): () => void } = tui;
+const tuiShape: { id: string; setup(context: StatusTuiContext): () => void } = tui;
 const receiver: typeof tuiShape.setup = receiveStatus;
 const definition: Rpc.PortableDefinition = rpc;
 const sameDefinition: typeof rpc = statusOutputDefinition;
@@ -361,19 +392,6 @@ const statusOutput: StatusOutput = { ...statusReceiver, expiresAt: 1, message: "
 void [rootShape, serverShape, legacy, tuiShape, receiver, definition, sameDefinition, id, required, accepted, cancel, offer, outputLimit, release, statusOutput];
 `,
   );
-  const tsconfig = {
-    compilerOptions: {
-      target: "ESNext",
-      module: "ESNext",
-      moduleResolution: "bundler",
-      strict: true,
-      skipLibCheck: false,
-      noEmit: true,
-      types: ["bun"],
-      typeRoots: [join(tooling, "node_modules", "@types")],
-    },
-    files: ["consumer.ts"],
-  };
   await Bun.write(join(runtime, "tsconfig.json"), JSON.stringify(tsconfig, null, 2));
   evidence.declarationConfig = tsconfig;
   await run(
