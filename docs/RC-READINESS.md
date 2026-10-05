@@ -343,6 +343,48 @@ Investigation artifact (read for this edit):
 `/home/dev/workspace/opencode-work/opencode-short-term-memory-v2-forced-update/2026-10-05--json-schema-type-closure.html`.
 Only this document was edited/formatted; no new acceptance run, build or commit.
 
+## Effect Closure Verification Follow-Up: 2026-10-05
+
+**Recommendation remains NOT RC-ready.** The prior narrowing hypothesis above is
+preserved as history: narrowing alone still reaches the malformed declaration.
+
+| Component/Logic Block | Current Findings/Hypothesis                                                                                                      | Implications                                                                                                       | Verification Status                                                                |
+| --------------------- | -------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------- |
+| Effect subpath        | Shortest inspected chain: `Effect.d.ts:90` -> `RequestResolver.d.ts:10` -> `Schema.d.ts:102` -> `internal/schema/schema.d.ts:3`. | SDK `effect/Effect` narrowing alone does not close declarations.                                                   | Chain inspected; virtual matrix lead-reported, not rerun here.                     |
+| Virtual correction    | Diagnostic counts: baseline **1**, narrow-only **1**, constant-only **0**, both **0**.                                           | Exact module-local declaration suffices for the retained full consumer, not delivery acceptance.                   | TypeScript **5.9.3**; `strict: true`, `noEmit: true`, `skipLibCheck: false`.       |
+| Delivery/runtime      | Existing Effect source and JS define the same string; no global shim or runtime dependency change.                               | Requires corrected upstream release or explicitly maintained corrected dependency artifact with verified delivery. | Source `schema.ts:43` and JS `schema.js:37` inspected; dependency files unchanged. |
+
+Proposed declaration in Effect's `dist/internal/schema/schema.d.ts`:
+`export declare const SchemaErrorTypeId: '~effect/Schema/SchemaError';`
+Retained runtime: `/tmp/opencode/stm-package-acceptance-1yXf58/runtime`; compiler
+comes from sibling `tooling`. Reproduce the in-memory-only matrix (not run here):
+
+```bash
+/home/dev/.bun/bin/bun -e '
+const base = "/tmp/opencode/stm-package-acceptance-1yXf58", root = base + "/runtime";
+const ts = require(base + "/tooling/node_modules/typescript");
+const config = ts.readConfigFile(root + "/tsconfig.json", ts.sys.readFile);
+const parsed = ts.parseJsonConfigFileContent(config.config, ts.sys, root);
+for (const [name, narrow, constant] of [["baseline",false,false],["narrow-only",true,false],["constant-only",false,true],["both",true,true]]) {
+  const options = {...parsed.options, strict:true, noEmit:true, skipLibCheck:false}, host = ts.createCompilerHost(options), read = host.readFile.bind(host);
+  host.readFile = file => { let text = read(file); if (text === undefined) return text;
+    if (narrow && file === root + "/node_modules/@opencode-ai/plugin/dist/tool.d.ts") text = text.replace("import { Effect } from \"effect\";", "import type * as Effect from \"effect/Effect\";");
+    if (constant && file === root + "/node_modules/effect/dist/internal/schema/schema.d.ts") text = "export declare const SchemaErrorTypeId: \"~effect/Schema/SchemaError\";\n" + text;
+    return text; };
+  console.log(name, [...parsed.errors, ...ts.getPreEmitDiagnostics(ts.createProgram(parsed.fileNames, options, host))].length);
+}'
+```
+
+Virtual zero is **not real package acceptance**. Root consumer overrides/local
+patches have not demonstrated a standalone package fix. No fork/publication or
+runtime dependency changes are approved. Previously green runtime/tests were not
+rerun; no new live run, build, install or commit occurred for this investigation.
+Artifact (updated with the completed virtual matrix and reproduction payload):
+`/home/dev/workspace/opencode-work/opencode-short-term-memory-v2-forced-update/2026-10-05--effect-declaration-closure.html`.
+**Next bounded step:** SDK/package owner prepares an upstream Effect bug-report
+reproducer or obtains user approval for a corrected-artifact policy. Acceptance:
+verified delivery followed by the full isolated strict consumer on a new tarball.
+
 ## References
 
 - Prior readiness audit:
