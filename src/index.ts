@@ -1,12 +1,24 @@
 import type { Plugin } from "@opencode/plugin";
-import { SessionMemoryPlugin } from "./v1-adapter";
+import type { Plugin as V1HostPlugin } from "@opencode-ai/plugin";
+import type { OpencodeClient } from "@opencode-ai/sdk/client";
+import { SessionMemoryPlugin as InternalSessionMemoryPlugin } from "./v1-adapter";
 import { createV2Adapter, type V2SessionContext } from "./v2-adapter";
 import { createV2ContextInjection } from "./v2-context-injection";
 import { createV2MemoryUpdater, isV2MemoryUpdateInFlight } from "./v2-memory-update";
 import { createV2MemoryToolRegistrations } from "./v2-memory-tools";
 import { setupStatusCommand } from "./v2-status-command";
 
-export { SessionMemoryPlugin };
+export type V1MemoryPlugin = (input: {
+  client: OpencodeClient;
+  directory?: string;
+  worktree?: string;
+  serverUrl?: URL;
+}) => Promise<Record<string, unknown>>;
+
+export const SessionMemoryPlugin: V1MemoryPlugin = InternalSessionMemoryPlugin;
+
+type Assert<T extends true> = T;
+type V1HostPluginContract = Assert<typeof SessionMemoryPlugin extends V1HostPlugin ? true : false>;
 
 export default {
   id: "opencode-short-term-memory",

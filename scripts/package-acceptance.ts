@@ -10,7 +10,8 @@ const sandbox = await mkdtemp("/tmp/opencode/stm-package-acceptance-");
 const failures: string[] = [];
 const commands: object[] = [];
 const evidence: Record<string, unknown> = {
-  scope: "Clean tarball installation, public imports and strict declarations only; no host activation",
+  scope:
+    "Clean tarball installation, public imports and strict published STM declaration closure only; not full host SDK declaration correctness or host activation",
   sandbox,
   started: new Date(started).toISOString(),
   verdict: "FAIL",
@@ -390,16 +391,19 @@ void [tuiShape, receiver, id];
   evidence.tuiDeclarations = { gate: "strict TUI-only declarations, no host SDK imports", verdict: "PASS" };
   await Bun.write(
     join(runtime, "consumer.ts"),
-    `import root, { SessionMemoryPlugin } from "${manifest.name}";
+    `import root, { SessionMemoryPlugin, type V1MemoryPlugin } from "${manifest.name}";
 import server from "${manifest.name}/server";
 import tui, { receiveStatus, type StatusTuiContext } from "${manifest.name}/tui";
 import rpc, { statusOutputDefinition, type StatusReceiver, type StatusOutput } from "${manifest.name}/rpc";
-import type { Plugin as V1Plugin } from "@opencode-ai/plugin";
+import type { OpencodeClient } from "@opencode-ai/sdk/client";
 import type { Plugin } from "@opencode/plugin";
 import type { Rpc } from "@opencode/plugin/rpc";
-const rootShape: { id: string; server: V1Plugin; setup(context: Plugin.Context): Promise<() => Promise<void>> } = root;
+const rootShape: { id: string; server: V1MemoryPlugin; setup(context: Plugin.Context): Promise<() => Promise<void>> } = root;
 const serverShape: typeof rootShape = server;
-const legacy: V1Plugin = SessionMemoryPlugin;
+const legacy: V1MemoryPlugin = SessionMemoryPlugin;
+declare const sdkClient: OpencodeClient;
+const client: Parameters<V1MemoryPlugin>[0]["client"] = sdkClient;
+const concreteClient: OpencodeClient = client;
 const tuiShape: { id: string; setup(context: StatusTuiContext): () => void } = tui;
 const receiver: typeof tuiShape.setup = receiveStatus;
 const definition: Rpc.PortableDefinition = rpc;
@@ -413,7 +417,7 @@ const outputLimit: 16384 = rpc.events.output.schema.properties.message.maxLength
 const release: "string" = rpc.events.release.schema.properties.receiverID.type;
 const statusReceiver: StatusReceiver = { requestID: "r", sessionID: "s", receiverID: "t" };
 const statusOutput: StatusOutput = { ...statusReceiver, expiresAt: 1, message: "m", title: "t" };
-void [rootShape, serverShape, legacy, tuiShape, receiver, definition, sameDefinition, id, required, accepted, cancel, offer, outputLimit, release, statusOutput];
+void [rootShape, serverShape, legacy, client, concreteClient, tuiShape, receiver, definition, sameDefinition, id, required, accepted, cancel, offer, outputLimit, release, statusOutput];
 `,
   );
   await Bun.write(join(runtime, "tsconfig.json"), JSON.stringify(tsconfig, null, 2));

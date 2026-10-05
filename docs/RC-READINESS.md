@@ -385,6 +385,45 @@ Artifact (updated with the completed virtual matrix and reproduction payload):
 reproducer or obtains user approval for a corrected-artifact policy. Acceptance:
 verified delivery followed by the full isolated strict consumer on a new tarball.
 
+## Resolution Follow-Up: 2026-10-05
+
+**STM public declaration blocker resolved; recommendation remains NOT RC-ready.**
+The user chose **narrow our API**, not an upstream patch or SDK upgrade. Earlier
+failures above remain historical evidence; this records subsequent working-tree
+results, with no new build or acceptance execution for this documentation edit.
+
+| Component/Logic Block  | Current Findings/Hypothesis                                                                                                                                | Implications                                                                              | Verification Status                                                                         |
+| ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| Public V1 boundary     | Exported `V1MemoryPlugin` uses stable narrow input and unchanged `Promise<Record<string, unknown>>`; `SessionMemoryPlugin` is the same function reference. | Public declarations no longer expose the broad V1 host Plugin closure; runtime unchanged. | Source diff and emitted declarations inspected.                                             |
+| Producer compatibility | Private compile-only assertion checks assignability to pinned host Plugin and is erased from emitted `.d.ts`; root retains baseline `skipLibCheck: true`.  | Producer compatibility is checked, not full upstream declaration correctness.             | Source, root config and emitted declarations inspected; build/typecheck PASS lead-reported. |
+| Production SDK         | `@opencode-ai/sdk` moved from development to production at exact `1.14.25`, without upgrade.                                                               | Narrow public client types resolve in a production-only consumer.                         | Manifest diff and installed package evidence inspected.                                     |
+| Strict package scope   | `rlBBm0` PASS: fresh production install, four runtime imports, TUI and STM public declarations with `skipLibCheck: false`.                                 | Closes STM-owned public closure, not full host SDK correctness or activation.             | Retained JSON and strict consumer config inspected.                                         |
+| Native/gates           | `qoOs0Z` PASS; sequential build, 710 tests, root/fixture typechecks PASS; independent reviewer reports no issues.                                          | Bounded native wiring and checkout gates accepted, not full RC.                           | Package JSON inspected; native/gates/review results lead-reported.                          |
+
+Consumer no longer directly imports V1 host `Plugin`; it checks STM's exported
+`V1MemoryPlugin` and concrete SDK client instead. The full upstream host SDK/Effect
+declaration closure **remains broken, not suppressed or fixed**. No fork, patch,
+override or dependency runtime mutation shipped. Nested patch delivery was
+experimentally **FAIL**, retained at `/tmp/opencode/effect-nested-patch-20261005/`.
+
+**Real tarball:** `/tmp/opencode/stm-effect-boundary-resolved-package.tgz`, SHA256
+`e99c6fc6e64836f06e64155d2c0dbbd9f8477ec8fa11bad547db2a79cd5c1155`.
+Working-tree bytes based on `eddc2d2`, not an immutable committed candidate.
+Evidence: `/tmp/opencode/stm-package-acceptance-rlBBm0/evidence.json`.
+Initial `aNv4LH` failed on missing root type re-export; that was fixed before PASS.
+Native: `/tmp/opencode/stm-production-commands-qoOs0Z/evidence.json`, host 2.0.12,
+16 connected states/four refusals, cost 0, global budget unchanged, TUI stopped,
+server exit 130. Staged loading is not final installed-host qualification; updates
+remain model-free, not committed multi-chunk acceptance.
+
+**Remaining RC gates:** compatibility owner tests the final installed tarball on
+V1/minimum V2 and each claimed host, then verifies native committed multi-chunk
+update persistence/progress/UI/cleanup; release owner finalizes version/changelog,
+immutable candidate identity and repeatable gates. These remain acceptance criteria.
+Investigation artifact (read, not updated by this edit):
+`/home/dev/workspace/opencode-work/opencode-short-term-memory-v2-forced-update/2026-10-05--effect-delivery-resolution.html`.
+Only this document was edited/formatted; no build, live run or commit for this unit.
+
 ## References
 
 - Prior readiness audit:
