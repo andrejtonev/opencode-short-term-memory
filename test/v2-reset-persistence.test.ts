@@ -12,12 +12,14 @@ import {
   memoryPathFor,
   readRawFile,
   readText,
+  resetBoundaryPathFor,
   writeText,
 } from "../src/memory-utils";
 import { createV2MemoryUpdater } from "../src/v2-memory-update";
 import { resetV2MemoryPersistence } from "../src/v2-reset-persistence";
 import type { V2Context, V2SessionContext } from "../src/v2-adapter";
 import { withV2MemoryMutation } from "../src/v2-mutation-coordination";
+import { deferred, type Deferred } from "./async-helpers";
 
 const VALID_MEMORY = `${MEMORY_FORMAT_VERSION}
 ${MEMORY_HEADER}
@@ -43,18 +45,6 @@ ${MEMORY_HEADER}
 ### User Instructions
 - Different initial memory.
 `;
-
-type Deferred<T> = { promise: Promise<T>; resolve: (value: T) => void; reject: (error: unknown) => void };
-
-function deferred<T>(): Deferred<T> {
-  let resolve!: (value: T) => void;
-  let reject!: (error: unknown) => void;
-  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
-    resolve = resolvePromise;
-    reject = rejectPromise;
-  });
-  return { promise, resolve, reject };
-}
 
 function message(id: string, role: "user" | "assistant", text: string) {
   return { id, role, content: [{ type: "text", text }] };
@@ -160,6 +150,106 @@ describe("V2 reset persistence", () => {
     expect(await readRawFile(memoryPathFor("queued-config", firstMemoryDir))).toBeNull();
     expect(await readFile(memoryPathFor("queued-config", secondMemoryDir), "utf8")).toBe(STANDARD_MEMORY_TEMPLATE);
   });
+
+  test("resolves the latest anchor after an active updater releases and denies updates during resolution", async () => {
+    const sessionID = "resolved-anchor";
+    await writeText(join(directory, ".opencode", "stm.json"), JSON.stringify({ memoryDir }));
+    await writeText(memoryPathFor(sessionID, memoryDir), ORIGINAL_MEMORY);
+    await writeText(checkpointPathFor(sessionID, memoryDir), "before\n");
+    const generation = deferred<{ text: string }>();
+    const started = deferred<void>();
+    const calls = { count: 0 };
+    const updater = createV2MemoryUpdater(updaterContext(directory, generation.promise, started, calls), directory);
+    const update = updater(input(sessionID));
+    await started.promise;
+    const resolverEntered = deferred<void>();
+    const releaseResolver = deferred<void>();
+    let resolverCalls = 0;
+    let resolvedAnchor = "";
+    const reset = resetV2MemoryPersistence(
+      sessionID,
+      directory,
+      async () => {
+        resolverCalls += 1;
+        resolvedAnchor = (await readFile(checkpointPathFor(sessionID, memoryDir), "utf8")).trim();
+        resolverEntered.resolve();
+        await releaseResolver.promise;
+        return resolvedAnchor;
+      },
+      { memoryDir },
+    );
+    try {
+      await Promise.resolve();
+      expect(resolverCalls).toBe(0);
+      generation.resolve({ text: VALID_MEMORY });
+      expect((await update).status).toBe("committed");
+      await resolverEntered.promise;
+      expect(resolverCalls).toBe(1);
+      expect(resolvedAnchor).toBe("a1");
+      expect(await readFile(memoryPathFor(sessionID, memoryDir), "utf8")).toBe(VALID_MEMORY);
+      expect(await updater(input(sessionID))).toMatchObject({ status: "busy", reason: "update_in_flight" });
+      expect(calls.count).toBe(1);
+      releaseResolver.resolve();
+      expect(await reset).toBe("a1");
+      expect(await readFile(resetBoundaryPathFor(sessionID, memoryDir), "utf8")).toBe(
+        JSON.stringify({ version: 1, anchorID: "a1" }) + "\n",
+      );
+      expect(await readFile(memoryPathFor(sessionID, memoryDir), "utf8")).toBe(STANDARD_MEMORY_TEMPLATE);
+      expect(await readFile(checkpointPathFor(sessionID, memoryDir))).toEqual(Buffer.alloc(0));
+    } finally {
+      generation.resolve({ text: VALID_MEMORY });
+      releaseResolver.resolve();
+      await update;
+      await reset;
+    }
+  });
+
+  test.each(["failure", "empty", "whitespace", "invalid-type", "invalid-string-argument"])(
+    "%s anchor aborts before config access or preparation and leaves bytes unchanged",
+    async (scenario) => {
+      const sessionID = `anchor-${scenario}`;
+      const paths = [
+        memoryPathFor(sessionID, memoryDir),
+        checkpointPathFor(sessionID, memoryDir),
+        resetBoundaryPathFor(sessionID, memoryDir),
+      ];
+      const previous = [Buffer.from([0, 255, 10]), Buffer.alloc(0), Buffer.from('{"version":1,"anchorID":"old"}\n')];
+      for (const [index, path] of paths.entries()) {
+        await mkdir(dirname(path), { recursive: true });
+        await writeFile(path, previous[index]!);
+      }
+      const entries = (await readdir(memoryDir, { recursive: true })).sort();
+      let configReads = 0;
+      let prepares = 0;
+      let resolverCalls = 0;
+      const resolver = async () => {
+        resolverCalls += 1;
+        if (scenario === "failure") throw new Error("anchor resolution failed");
+        if (scenario === "invalid-type") return null as unknown as string;
+        return scenario === "whitespace" ? " \n\t" : "";
+      };
+      await expect(
+        resetV2MemoryPersistence(
+          sessionID,
+          directory,
+          scenario === "invalid-string-argument" ? (42 as unknown as string) : resolver,
+          {
+            get memoryDir() {
+              configReads += 1;
+              return memoryDir;
+            },
+          },
+          { beforePrepare: () => void (prepares += 1) },
+        ),
+      ).rejects.toThrow(scenario === "failure" ? "anchor resolution failed" : "nonempty");
+      expect(resolverCalls).toBe(scenario === "invalid-string-argument" ? 0 : 1);
+      expect(configReads).toBe(0);
+      expect(prepares).toBe(0);
+      for (const [index, path] of paths.entries()) expect(await readFile(path)).toEqual(previous[index]!);
+      expect((await readdir(memoryDir, { recursive: true })).sort()).toEqual(entries);
+      expect(await withV2MemoryMutation(directory, sessionID, () => "released")).toBe("released");
+    },
+  );
 
   test("restores absent and empty memory plus null, empty, and binary checkpoints after first failure", async () => {
     const checkpoints = [null, Buffer.alloc(0), Buffer.from([255, 0, 254])];

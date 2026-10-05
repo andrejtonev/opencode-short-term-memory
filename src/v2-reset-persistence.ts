@@ -29,14 +29,18 @@ function causeMessage(error: unknown): string {
 export async function resetV2MemoryPersistence(
   sessionID: string,
   directory: string,
-  anchorID: string,
+  anchor: string | (() => Promise<string>),
   config?: ResetConfig,
   hooks: V2MemoryResetTestHooks = {},
-): Promise<void> {
+): Promise<string> {
   if (typeof sessionID !== "string" || !sessionID.trim()) throw new Error("reset sessionID must be a nonempty string");
   if (safeSessionID(sessionID) !== sessionID) throw new Error("reset sessionID contains unsafe path characters");
-  if (!anchorID.trim()) throw new Error("reset anchor ID must be nonempty");
-  await withV2MemoryMutation(directory, sessionID, async () => {
+  if (typeof anchor !== "function" && (typeof anchor !== "string" || !anchor.trim())) {
+    throw new Error("reset anchor ID must be nonempty");
+  }
+  return await withV2MemoryMutation(directory, sessionID, async () => {
+    const anchorID = typeof anchor === "function" ? await anchor() : anchor;
+    if (typeof anchorID !== "string" || !anchorID.trim()) throw new Error("reset anchor ID must be nonempty");
     const resolvedConfig = config ?? (await readConfig(undefined, directory));
     const memoryPath = memoryPathFor(sessionID, resolvedConfig.memoryDir);
     const checkpointPath = checkpointPathFor(sessionID, resolvedConfig.memoryDir);
@@ -131,5 +135,6 @@ export async function resetV2MemoryPersistence(
       throw originalError;
     }
     for (const operation of operations) await operation.prepared.discard();
+    return anchorID;
   });
 }

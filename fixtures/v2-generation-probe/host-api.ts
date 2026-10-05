@@ -145,6 +145,20 @@ export async function submitOrdinaryPrompt(
   return prompt;
 }
 
+export const SETUP_BOOTSTRAP_PROMPT =
+  "Initialize the isolated setup fixture with one ordinary response; do not call tools.";
+
+export async function captureInitializedSetupSnapshot<T>(
+  client: OpenCodeClient,
+  sessionID: string,
+  snapshot: () => Promise<T>,
+  timeoutMs = PROBE_HOST_TIMEOUT_MS,
+): Promise<T> {
+  // Service/session creation and observation do not initialize lazy project plugins.
+  await submitOrdinaryPrompt(client, sessionID, SETUP_BOOTSTRAP_PROMPT, timeoutMs);
+  return snapshot();
+}
+
 export function invokeSessionGenerate(
   client: OpenCodeClient,
   sessionID: string,

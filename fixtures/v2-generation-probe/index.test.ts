@@ -20,6 +20,7 @@ import probe, {
   manualToolDispatch,
 } from "./index.js";
 import { MANUAL_CALL_IDS, MANUAL_FIRST_PROMPT, MANUAL_SECOND_PROMPT } from "./manual-evidence.js";
+import { DIAGNOSTICS_CALLS, DIAGNOSTICS_PROMPT } from "./diagnostics-evidence.js";
 import {
   countToolExecutionEvents,
   evaluateCompaction,
@@ -38,8 +39,16 @@ import {
   type ProbeTelemetryRecord,
 } from "./telemetry.js";
 
-test("primary memory inventory requires all four intentional tools and still forbids aggregate", () => {
-  const tools = ["stm_memory_read", "stm_memory_status", "stm_memory_reset", "stm_memory_update"];
+test("primary memory inventory requires all seven intentional tools and still forbids aggregate", () => {
+  const tools = [
+    "stm_memory_read",
+    "stm_memory_status",
+    "stm_memory_reset",
+    "stm_memory_update",
+    "stm_memory_logs",
+    "stm_memory_settings",
+    "stm_memory_setup",
+  ];
   expect(evaluatePrimaryMemoryToolInventory([...tools, "read", "shell"])).toEqual([]);
   for (const missing of tools) {
     expect(evaluatePrimaryMemoryToolInventory(tools.filter((name) => name !== missing))).toEqual([
@@ -49,7 +58,7 @@ test("primary memory inventory requires all four intentional tools and still for
   expect(evaluatePrimaryMemoryToolInventory([...tools, "stm_memory_aggregate"])).toEqual([
     "primary model invocation exposed a forbidden V2 aggregate tool",
   ]);
-  expect(evaluatePrimaryMemoryToolInventory([])).toHaveLength(4);
+  expect(evaluatePrimaryMemoryToolInventory([])).toHaveLength(7);
 });
 
 test("reset provider dispatches refusal, confirmation, then text phases causally", () => {
@@ -274,6 +283,53 @@ function callbackInput(sessionID = "session-1", messages: readonly unknown[] = [
 }
 
 const modelCall: LanguageModelV3CallOptions = { prompt: [] };
+test("manual scenario provider streams logs then settings only after paired results, never in auxiliary requests", async () => {
+  const previousScenario = Bun.env.PROBE_SCENARIO;
+  const harness = await makeHarness("ordinary");
+  try {
+    Bun.env.PROBE_SCENARIO = "manual-update";
+    const input: LanguageInput = { model: harness.addedProviders[0]!.models[0]!, sdk: {}, options: {} };
+    await harness.languageCallback()(input);
+    const options: LanguageModelV3CallOptions = {
+      prompt: [{ role: "user", content: [{ type: "text", text: DIAGNOSTICS_PROMPT }] }],
+      tools: DIAGNOSTICS_CALLS.map((call) => ({ type: "function", name: call.tool, inputSchema: {} })),
+    };
+    const stream = async (request: LanguageModelV3CallOptions) => {
+      const result = await input.language!.doStream(request);
+      const parts: LanguageModelV3StreamPart[] = [];
+      for await (const part of result.stream) parts.push(part);
+      return parts;
+    };
+    for (const call of DIAGNOSTICS_CALLS) {
+      expect((await stream(options)).filter((part) => part.type === "tool-call")).toEqual([
+        { type: "tool-call", toolCallId: call.id, toolName: call.tool, input: "{}" },
+      ]);
+      options.prompt.push(
+        { role: "assistant", content: [{ type: "tool-call", toolCallId: call.id, toolName: call.tool, input: {} }] },
+        {
+          role: "tool",
+          content: [
+            {
+              type: "tool-result",
+              toolCallId: call.id,
+              toolName: call.tool,
+              output: { type: "text", value: "real host result" },
+            },
+          ],
+        },
+      );
+    }
+    expect((await stream(options)).filter((part) => part.type === "tool-call")).toEqual([]);
+    const auxiliary = await input.language!.doGenerate(options);
+    expect(auxiliary.content.every((part) => part.type !== "tool-call")).toBe(true);
+    expect((await stream({ ...options, tools: [] })).filter((part) => part.type === "tool-call")).toEqual([]);
+  } finally {
+    await harness.cleanup();
+    harness.restoreEnvironment();
+    if (previousScenario === undefined) delete Bun.env.PROBE_SCENARIO;
+    else Bun.env.PROBE_SCENARIO = previousScenario;
+  }
+});
 test("manual scenario streams real empty-input tool call then text after paired result", async () => {
   const previousScenario = Bun.env.PROBE_SCENARIO;
   const harness = await makeHarness("ordinary");

@@ -1,7 +1,7 @@
 import { defineConfig } from "tsup";
 
 export default defineConfig({
-  entry: ["index.ts"],
+  entry: { index: "index.ts", tui: "src/tui.ts", rpc: "src/v2-status-output.ts" },
   outDir: "dist",
   format: ["esm"],
   target: "esnext",

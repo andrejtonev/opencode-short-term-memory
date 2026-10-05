@@ -3,9 +3,11 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
-import { PROBE_MEMORY_SENTINEL, PROBE_MODEL_ID, PROBE_PROVIDER_ID } from "./index.js";
+import { captureSetupSnapshot, PROBE_MEMORY_SENTINEL, PROBE_MODEL_ID, PROBE_PROVIDER_ID } from "./index.js";
+import { evaluateSetupEvidence, SETUP_CALLS } from "./setup-evidence.js";
 import {
   bounded,
+  captureInitializedSetupSnapshot,
   createModeledSession,
   observeSession,
   PROBE_HOST_TIMEOUT_MS,
@@ -25,6 +27,11 @@ import {
 } from "./evaluator.js";
 import { evaluateResetEvidence } from "./reset-evidence.js";
 import {
+  DIAGNOSTICS_PROMPT,
+  evaluateDiagnosticsEvidence,
+  expectedDiagnosticsSettings,
+} from "./diagnostics-evidence.js";
+import {
   evaluateManualEvidence,
   MANUAL_SEED_PROMPT,
   MANUAL_FIRST_PROMPT,
@@ -35,7 +42,7 @@ import {
 const FIXTURE_DIRECTORY = import.meta.dir;
 const REPOSITORY_DIRECTORY = resolve(FIXTURE_DIRECTORY, "../..");
 const SANDBOX_PARENT = join(tmpdir(), "opencode");
-const OVERALL_TIMEOUT_MS = Bun.env.PROBE_SCENARIO === "manual-update" ? 60_000 : 45_000;
+const OVERALL_TIMEOUT_MS = ["manual-update", "setup"].includes(Bun.env.PROBE_SCENARIO ?? "") ? 60_000 : 45_000;
 const OPERATION_TIMEOUT_MS = PROBE_HOST_TIMEOUT_MS;
 const REQUIRED_HEADINGS = [
   "## Session Memory",
@@ -51,11 +58,13 @@ const RESET_PROMPT = "Use stm_memory_reset to reset this session. Confirm only a
 const POST_RESET_PROMPT = "Continue after the confirmed reset with a fresh post-reset message.";
 const POST_RESET_FOLLOWUP_PROMPT = "Acknowledge the post-reset continuation with one final ordinary response.";
 const SCENARIO =
-  Bun.env.PROBE_SCENARIO === "manual-update"
-    ? "manual-update"
-    : Bun.env.PROBE_SCENARIO === "reset"
-      ? "reset"
-      : "ordinary";
+  Bun.env.PROBE_SCENARIO === "setup"
+    ? "setup"
+    : Bun.env.PROBE_SCENARIO === "manual-update"
+      ? "manual-update"
+      : Bun.env.PROBE_SCENARIO === "reset"
+        ? "reset"
+        : "ordinary";
 
 interface Evidence {
   readonly runId: string;
@@ -81,12 +90,17 @@ interface Evidence {
   readonly ordinaryEvaluator: { readonly passed: boolean; readonly failures: readonly string[] } | null;
   readonly injectionObservable: boolean;
   readonly sandboxDisposition: "removed" | "retained";
-  readonly scenario: "ordinary" | "reset" | "manual-update";
+  readonly scenario: "ordinary" | "reset" | "manual-update" | "setup";
+  readonly setupEvaluator: ReturnType<typeof evaluateSetupEvidence> | null;
+  readonly setupEvidence: Parameters<typeof evaluateSetupEvidence>[0] | null;
   readonly automaticContextSuppressed: boolean;
   readonly manualExecutionEvents: number;
   readonly manualTelemetry?: Awaited<ReturnType<typeof parseProbeTelemetryJsonl>>;
   readonly resetBoundaryAnchor?: string;
   readonly resetExecutionEvents: number;
+  readonly diagnosticsExecutionEvents: number;
+  readonly diagnosticsEvaluator: ReturnType<typeof evaluateDiagnosticsEvidence> | null;
+  readonly expectedDiagnosticsSettings: ReturnType<typeof expectedDiagnosticsSettings> | null;
 }
 
 function errorText(error: unknown): string {
@@ -157,9 +171,12 @@ export default {
   async setup(...args) {
     await mark("setup-entered");
     ${
-      SCENARIO === "manual-update"
+      SCENARIO === "manual-update" || SCENARIO === "setup"
         ? `// Suppress only production's combined automatic context callback in this isolated scenario.
     const original = args[0];
+    const access = { context: 0, get: 0, sessionGenerate: 0, standaloneGenerate: 0 };
+    const accessPath = join(markers, "production-access.json");
+    await writeFile(accessPath, JSON.stringify(access));
     const session = new Proxy(original.session, { get(target, key) {
       if (key === "hook") return (name, callback, ...options) => {
         if (name === "context") return target.hook(name, async () => {}, ...options).then(async (registration) => {
@@ -169,9 +186,23 @@ export default {
         return target.hook(name, callback, ...options);
       };
       const value = Reflect.get(target, key);
+      if (["context", "get", "generate"].includes(key) && typeof value === "function") return async (...params) => {
+        access[key === "generate" ? "sessionGenerate" : key]++;
+        await writeFile(accessPath, JSON.stringify(access));
+        return value.apply(target, params);
+      };
       return typeof value === "function" ? value.bind(target) : value;
     } });
-    args[0] = new Proxy(original, { get(target, key) { return key === "session" ? session : Reflect.get(target, key); } });`
+    const generate = new Proxy(original.generate, { get(target, key) {
+      const value = Reflect.get(target, key);
+      if (key === "text") return async (...params) => {
+        access.standaloneGenerate++;
+        await writeFile(accessPath, JSON.stringify(access));
+        return value.apply(target, params);
+      };
+      return typeof value === "function" ? value.bind(target) : value;
+    } });
+    args[0] = new Proxy(original, { get(target, key) { return key === "session" ? session : key === "generate" ? generate : Reflect.get(target, key); } });`
         : ""
     }
     const cleanup = await productionDefault.setup(...args);
@@ -219,6 +250,10 @@ async function run(): Promise<Evidence> {
   let resetBoundaryAnchor: string | undefined;
   let sessionID = "";
   let finalBoundary: string | undefined;
+  let diagnosticsEvaluator: Evidence["diagnosticsEvaluator"] = null;
+  let diagnosticsSettings: Evidence["expectedDiagnosticsSettings"] = null;
+  let setupEvidence: Evidence["setupEvidence"] = null;
+  let setupEvaluator: Evidence["setupEvaluator"] = null;
   try {
     productionPluginPath = await findProductionPlugin();
     await mkdir(SANDBOX_PARENT, { recursive: true });
@@ -233,6 +268,7 @@ async function run(): Promise<Evidence> {
     const temporary = join(sandbox, "tmp");
     telemetryPath = join(sandbox, "telemetry.jsonl");
     const memoryDirectory = join(sandbox, "absolute-memory");
+    diagnosticsSettings = expectedDiagnosticsSettings(memoryDirectory);
     await Promise.all(
       [project, home, xdgConfig, xdgData, xdgCache, xdgState, xdgRuntime, temporary, memoryDirectory].map((path) =>
         mkdir(path),
@@ -269,6 +305,8 @@ async function run(): Promise<Evidence> {
         PROBE_MODE: "ordinary",
         PROBE_SCENARIO: SCENARIO,
         PROBE_MEMORY_DIR: memoryDirectory,
+        PROBE_PROJECT_CONFIG_PATH: join(project, ".opencode", "stm.jsonc"),
+        PROBE_PRODUCTION_ACCESS_PATH: join(productionWrapperMarkers, "production-access.json"),
         PROBE_TELEMETRY_PATH: telemetryPath,
       },
     };
@@ -276,13 +314,47 @@ async function run(): Promise<Evidence> {
     const session = await createModeledSession(service.client, project, OPERATION_TIMEOUT_MS);
     sessionID = session.id;
     initialObservation = await observeSession(service.client, session.id, OPERATION_TIMEOUT_MS);
-    if (SCENARIO === "manual-update") {
+    if (SCENARIO === "setup") {
+      const configPath = join(project, ".opencode", "stm.jsonc");
+      const snapshot = () =>
+        captureSetupSnapshot(configPath, memoryDirectory, join(productionWrapperMarkers, "production-access.json"));
+      const initial = await captureInitializedSetupSnapshot(service.client, session.id, snapshot, OPERATION_TIMEOUT_MS);
+      let removal: NonNullable<Evidence["setupEvidence"]>["removal"] = null;
+      for (const [index, call] of SETUP_CALLS.entries()) {
+        if (index === 2) {
+          // Only the harness-owned initial config, after both refusal prompts completed.
+          const before = await snapshot();
+          if (before.configs.jsonc !== initial.configs.jsonc || before.configs.json !== null)
+            throw new Error("fixture config changed before removal");
+          const records = parseProbeTelemetryJsonl(await readFile(telemetryPath, "utf8"), { runId, mode: "ordinary" });
+          await rm(configPath);
+          removal = {
+            path: configPath,
+            afterSeq: records.at(-1)?.seq ?? 0,
+            completedPrompts: SETUP_CALLS.slice(0, 2).map((c) => c.prompt),
+            before,
+            after: await snapshot(),
+          };
+        }
+        observableOutput = await submitOrdinaryPrompt(service.client, session.id, call.prompt, OPERATION_TIMEOUT_MS);
+      }
+      setupEvidence = {
+        records: [],
+        sessionID,
+        configPath,
+        initial,
+        final: await snapshot(),
+        suppressionObserved: false,
+        removal,
+      };
+    } else if (SCENARIO === "manual-update") {
       for (const prompt of [
         MANUAL_SEED_PROMPT,
         MANUAL_FIRST_PROMPT,
         RESET_PROMPT,
         MANUAL_POST_RESET_PROMPT,
         MANUAL_SECOND_PROMPT,
+        DIAGNOSTICS_PROMPT,
       ]) {
         observableOutput = await submitOrdinaryPrompt(service.client, session.id, prompt, OPERATION_TIMEOUT_MS);
       }
@@ -325,75 +397,83 @@ async function run(): Promise<Evidence> {
       "checkpoints",
       `${session.id.replace(/[^A-Za-z0-9._-]/g, "_")}.last-message-id.txt`,
     );
-    const memory = await readFile(memoryPath, "utf8");
-    checkpointValue = (await readFile(checkpointPath, "utf8")).trim();
-    requiredHeadingsPresent = REQUIRED_HEADINGS.every((heading) => memory.includes(heading));
-    assert(requiredHeadingsPresent, "memory document is missing a required heading", failures);
-    memorySentinelPresent = memory.includes(`${PROBE_MEMORY_SENTINEL}:${runId}`);
-    assert(memorySentinelPresent, "generated memory sentinel missing", failures);
-    if (SCENARIO === "ordinary") assert(checkpointValue.length > 0, "checkpoint is empty", failures);
-    const contextText = JSON.stringify(finalObservation.context);
-    const durable = normalizeExternalMessages(finalObservation.messages).messages.filter(
-      (message) => message.role === "user" || message.role === "assistant",
-    );
-    durableUserAssistantCount = durable.length;
-    const userCount = durable.filter((message) => message.role === "user").length;
-    const assistantCount = durable.filter((message) => message.role === "assistant").length;
-    durableUserAssistantIDs = durable
-      .map((message) => message.id)
-      .filter((id): id is string => typeof id === "string" && id.length > 0);
-    assert(
-      userCount >= 2 && assistantCount >= 2,
-      `expected at least two user and two assistant messages, observed ${userCount} user and ${assistantCount} assistant`,
-      failures,
-    );
-    assert(
-      durableUserAssistantIDs.length === durableUserAssistantCount &&
-        new Set(durableUserAssistantIDs).size === durableUserAssistantIDs.length,
-      "durable user/assistant IDs are not stable and unique",
-      failures,
-    );
-    if (SCENARIO === "reset") {
-      for (const prompt of [FIRST_PROMPT, SECOND_PROMPT, RESET_PROMPT, POST_RESET_PROMPT, POST_RESET_FOLLOWUP_PROMPT]) {
-        const occurrences = durable.filter((message) => message.role === "user" && message.text === prompt).length;
-        assert(occurrences === 1, `expected exactly one durable reset prompt occurrence for ${prompt}`, failures);
+    if (SCENARIO !== "setup") {
+      const memory = await readFile(memoryPath, "utf8");
+      checkpointValue = (await readFile(checkpointPath, "utf8")).trim();
+      requiredHeadingsPresent = REQUIRED_HEADINGS.every((heading) => memory.includes(heading));
+      assert(requiredHeadingsPresent, "memory document is missing a required heading", failures);
+      memorySentinelPresent = memory.includes(`${PROBE_MEMORY_SENTINEL}:${runId}`);
+      assert(memorySentinelPresent, "generated memory sentinel missing", failures);
+      if (SCENARIO === "ordinary") assert(checkpointValue.length > 0, "checkpoint is empty", failures);
+      const contextText = JSON.stringify(finalObservation.context);
+      const durable = normalizeExternalMessages(finalObservation.messages).messages.filter(
+        (message) => message.role === "user" || message.role === "assistant",
+      );
+      durableUserAssistantCount = durable.length;
+      const userCount = durable.filter((message) => message.role === "user").length;
+      const assistantCount = durable.filter((message) => message.role === "assistant").length;
+      durableUserAssistantIDs = durable
+        .map((message) => message.id)
+        .filter((id): id is string => typeof id === "string" && id.length > 0);
+      assert(
+        userCount >= 2 && assistantCount >= 2,
+        `expected at least two user and two assistant messages, observed ${userCount} user and ${assistantCount} assistant`,
+        failures,
+      );
+      assert(
+        durableUserAssistantIDs.length === durableUserAssistantCount &&
+          new Set(durableUserAssistantIDs).size === durableUserAssistantIDs.length,
+        "durable user/assistant IDs are not stable and unique",
+        failures,
+      );
+      if (SCENARIO === "reset") {
+        for (const prompt of [
+          FIRST_PROMPT,
+          SECOND_PROMPT,
+          RESET_PROMPT,
+          POST_RESET_PROMPT,
+          POST_RESET_FOLLOWUP_PROMPT,
+        ]) {
+          const occurrences = durable.filter((message) => message.role === "user" && message.text === prompt).length;
+          assert(occurrences === 1, `expected exactly one durable reset prompt occurrence for ${prompt}`, failures);
+        }
       }
-    }
-    const secondUsers = durable.filter(
-      (message) =>
-        message.role === "user" &&
-        message.text ===
-          (SCENARIO === "manual-update"
-            ? MANUAL_SECOND_PROMPT
-            : SCENARIO === "reset"
-              ? POST_RESET_FOLLOWUP_PROMPT
-              : SECOND_PROMPT),
-    );
-    expectedCheckpointSourceMessageID = secondUsers.length === 1 ? (secondUsers[0]!.id ?? "") : "";
-    assert(
-      secondUsers.length === 1,
-      `expected exactly one second-turn user message, observed ${secondUsers.length}`,
-      failures,
-    );
-    assert(expectedCheckpointSourceMessageID.length > 0, "second-turn user message has no stable ID", failures);
-    if (SCENARIO === "ordinary") {
+      const secondUsers = durable.filter(
+        (message) =>
+          message.role === "user" &&
+          message.text ===
+            (SCENARIO === "manual-update"
+              ? MANUAL_SECOND_PROMPT
+              : SCENARIO === "reset"
+                ? POST_RESET_FOLLOWUP_PROMPT
+                : SECOND_PROMPT),
+      );
+      expectedCheckpointSourceMessageID = secondUsers.length === 1 ? (secondUsers[0]!.id ?? "") : "";
       assert(
-        checkpointValue === expectedCheckpointSourceMessageID,
-        "checkpoint does not match the second-turn user message ID",
+        secondUsers.length === 1,
+        `expected exactly one second-turn user message, observed ${secondUsers.length}`,
         failures,
       );
-    } else {
-      assert(
-        checkpointValue === expectedCheckpointSourceMessageID,
-        "post-reset message was not processed into the checkpoint",
-        failures,
-      );
-    }
-    injectionObservable = contextText.includes("Session Memory") || contextText.includes(PROBE_MEMORY_SENTINEL);
-    if (!injectionObservable) {
-      console.warn(
-        "Memory injection was not externally observable through session.context; other assertions are required.",
-      );
+      assert(expectedCheckpointSourceMessageID.length > 0, "second-turn user message has no stable ID", failures);
+      if (SCENARIO === "ordinary") {
+        assert(
+          checkpointValue === expectedCheckpointSourceMessageID,
+          "checkpoint does not match the second-turn user message ID",
+          failures,
+        );
+      } else {
+        assert(
+          checkpointValue === expectedCheckpointSourceMessageID,
+          "post-reset message was not processed into the checkpoint",
+          failures,
+        );
+      }
+      injectionObservable = contextText.includes("Session Memory") || contextText.includes(PROBE_MEMORY_SENTINEL);
+      if (!injectionObservable) {
+        console.warn(
+          "Memory injection was not externally observable through session.context; other assertions are required.",
+        );
+      }
     }
   } catch (error) {
     failures.push(errorText(error));
@@ -503,7 +583,22 @@ async function run(): Promise<Evidence> {
     productionWrapperMarkers !== "" && (await exists(join(productionWrapperMarkers, "cleanup-complete")));
   const automaticContextSuppressed =
     productionWrapperMarkers !== "" && (await exists(join(productionWrapperMarkers, "automatic-context-suppressed")));
+  if (SCENARIO === "setup") {
+    if (setupEvidence !== null) {
+      setupEvidence = { ...setupEvidence, records: telemetryRecords, suppressionObserved: automaticContextSuppressed };
+      setupEvaluator = evaluateSetupEvidence(setupEvidence);
+      failures.push(...setupEvaluator.failures);
+    } else failures.push("setup lifecycle evidence unavailable");
+  }
   if (SCENARIO === "manual-update") {
+    if (diagnosticsSettings !== null) {
+      diagnosticsEvaluator = evaluateDiagnosticsEvidence({
+        records: telemetryRecords,
+        sessionID,
+        expectedSettings: diagnosticsSettings,
+      });
+      failures.push(...diagnosticsEvaluator.failures);
+    } else failures.push("diagnostic settings oracle unavailable");
     failures.push(
       ...evaluateManualEvidence({
         records: telemetryRecords,
@@ -543,10 +638,17 @@ async function run(): Promise<Evidence> {
     injectionObservable,
     sandboxDisposition: failures.length === 0 ? "removed" : "retained",
     scenario: SCENARIO,
+    setupEvaluator,
+    setupEvidence,
     automaticContextSuppressed,
     ...(SCENARIO === "manual-update" ? { manualTelemetry: telemetryRecords } : {}),
     manualExecutionEvents: countToolExecutionEvents(telemetryRecords, "stm_memory_update"),
     resetExecutionEvents: countToolExecutionEvents(telemetryRecords, "stm_memory_reset"),
+    diagnosticsExecutionEvents:
+      countToolExecutionEvents(telemetryRecords, "stm_memory_logs") +
+      countToolExecutionEvents(telemetryRecords, "stm_memory_settings"),
+    diagnosticsEvaluator,
+    expectedDiagnosticsSettings: SCENARIO === "manual-update" ? diagnosticsSettings : null,
     resetBoundaryAnchor,
   };
   await writeFile(evidencePath, `${JSON.stringify(evidence, null, 2)}\n`);

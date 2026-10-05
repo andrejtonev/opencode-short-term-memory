@@ -4,14 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { MEMORY_HEADER, checkpointPathFor, memoryPathFor, readText, writeText } from "../src/memory-utils";
 import { createFakeClient, createPlugin } from "./test-helpers";
-
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>((next) => {
-    resolve = next;
-  });
-  return { promise, resolve };
-}
+import { deferred } from "./async-helpers";
 
 const messageRows = [{ id: "m1", role: "user", text: "remember lifecycle safety", time: { created: 1 } }];
 const updatedMemory = `${MEMORY_HEADER}\n\n### User Instructions\n- lifecycle update\n`;

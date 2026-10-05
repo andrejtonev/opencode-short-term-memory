@@ -735,7 +735,15 @@ export function countToolExecutionEvents(records: readonly ProbeTelemetryRecord[
 
 export function evaluatePrimaryMemoryToolInventory(toolNames: readonly string[]): readonly string[] {
   const failures: string[] = [];
-  for (const name of ["stm_memory_read", "stm_memory_status", "stm_memory_reset", "stm_memory_update"]) {
+  for (const name of [
+    "stm_memory_read",
+    "stm_memory_status",
+    "stm_memory_reset",
+    "stm_memory_update",
+    "stm_memory_logs",
+    "stm_memory_settings",
+    "stm_memory_setup",
+  ]) {
     if (!toolNames.includes(name)) failures.push(`primary model invocation did not expose ${name}`);
   }
   if (toolNames.includes("stm_memory_aggregate")) {

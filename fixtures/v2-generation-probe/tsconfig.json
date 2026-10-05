@@ -15,6 +15,10 @@
     "reset-evidence.test.ts",
     "manual-evidence.ts",
     "manual-evidence.test.ts",
+    "diagnostics-evidence.ts",
+    "diagnostics-evidence.test.ts",
+    "setup-evidence.ts",
+    "setup-evidence.test.ts",
     "index.ts",
     "index.test.ts"
   ]

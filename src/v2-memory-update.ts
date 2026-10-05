@@ -11,6 +11,7 @@ import {
   readRawFile,
   resetBoundaryPathFor,
   readText,
+  sanitizeMessage,
 } from "./memory-utils";
 import {
   isLikelyInternalAssistantMessage,
@@ -93,18 +94,17 @@ async function safeLog(config: SessionMemoryConfig, event: string, data: Record<
 
 function messageText(message: V2MemoryUpdateInput["messages"][number]): string {
   const parts = Array.isArray(message.content) ? message.content : [];
-  return parts
-    .filter((part) => {
-      const value = part as Record<string, unknown>;
-      const type = String(value.type ?? "").toLowerCase();
-      return type === "text" && !isInternalPartType(type) && value.synthetic !== true;
-    })
-    .map((part) => String((part as Record<string, unknown>).text ?? ""))
-    .filter(Boolean)
-    .join("\n")
-    .replace(/<think>[\s\S]*?<\/think>/gi, "")
-    .replace(/```thinking[\s\S]*?```/gi, "")
-    .trim();
+  return sanitizeMessage(
+    parts
+      .filter((part) => {
+        const value = part as Record<string, unknown>;
+        const type = String(value.type ?? "").toLowerCase();
+        return type === "text" && !isInternalPartType(type) && value.synthetic !== true;
+      })
+      .map((part) => String((part as Record<string, unknown>).text ?? ""))
+      .filter(Boolean)
+      .join("\n"),
+  );
 }
 
 function visibleMessages(input: V2MemoryUpdateInput): VisibleEntry[] | undefined {

@@ -1,8 +1,10 @@
 import { Model, Plugin, Provider } from "@opencode/plugin";
 import type { LanguageModelV3, LanguageModelV3CallOptions, LanguageModelV3Usage } from "@ai-sdk/provider";
-import { readFile } from "node:fs/promises";
-import { join } from "node:path";
+import { readFile, readdir } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import { MANUAL_FIRST_PROMPT, MANUAL_SECOND_PROMPT, MANUAL_CALL_IDS } from "./manual-evidence.js";
+import { DIAGNOSTICS_CALLS, DIAGNOSTICS_PROMPT } from "./diagnostics-evidence.js";
+import { SETUP_CALLS, SETUP_TOOL, expectedSetupResult, type SetupSnapshot } from "./setup-evidence.js";
 
 import {
   createProbeTelemetryWriter,
@@ -153,6 +155,15 @@ async function resetExecutionEvidence(event: Record<string, unknown>): Promise<R
   const sessionID = typeof data.sessionID === "string" ? data.sessionID : undefined;
   const memoryDir = Bun.env.PROBE_MEMORY_DIR;
   if (sessionID === undefined || memoryDir === undefined) return { eventData: data };
+  if (Bun.env.PROBE_SCENARIO === "setup")
+    return {
+      eventData: data,
+      setupSnapshot: await captureSetupSnapshot(
+        Bun.env.PROBE_PROJECT_CONFIG_PATH!,
+        memoryDir,
+        Bun.env.PROBE_PRODUCTION_ACCESS_PATH!,
+      ),
+    };
   const safe = sessionID.replace(/[^A-Za-z0-9._-]/g, "_");
   const read = async (path: string): Promise<string | null> => {
     try {
@@ -167,6 +178,74 @@ async function resetExecutionEvidence(event: Record<string, unknown>): Promise<R
     memory: await read(join(memoryDir, `session_${safe}.md`)),
     checkpoint: await read(join(memoryDir, "checkpoints", `${safe}.last-message-id.txt`)),
     boundary: await read(join(memoryDir, "reset-boundaries", `${safe}.json`)),
+    ...(DIAGNOSTICS_CALLS.some((call) => call.tool === data.tool)
+      ? {
+          diagnosticsFiles: Object.fromEntries(
+            await Promise.all(
+              [
+                ["memory", join(memoryDir, `session_${safe}.md`)],
+                ["checkpoint", join(memoryDir, "checkpoints", `${safe}.last-message-id.txt`)],
+                ["boundary", join(memoryDir, "reset-boundaries", `${safe}.json`)],
+                ["log", join(memoryDir, "session-memory.log")],
+                ["projectConfig", Bun.env.PROBE_PROJECT_CONFIG_PATH!],
+              ].map(async ([key, path]) => {
+                try {
+                  return [key, (await readFile(path!)).toString("base64")];
+                } catch (error) {
+                  if (error instanceof Error && "code" in error && error.code === "ENOENT") return [key, null];
+                  throw error;
+                }
+              }),
+            ),
+          ),
+          productionAccess: JSON.parse(await readFile(Bun.env.PROBE_PRODUCTION_ACCESS_PATH!, "utf8")),
+        }
+      : {}),
+  };
+}
+
+export async function captureSetupSnapshot(
+  configPath: string,
+  memoryDir: string,
+  accessPath: string,
+): Promise<SetupSnapshot> {
+  const read = async (path: string): Promise<string | null> => {
+    try {
+      return (await readFile(path)).toString("base64");
+    } catch (error) {
+      if (error instanceof Error && "code" in error && error.code === "ENOENT") return null;
+      throw error;
+    }
+  };
+  const project = dirname(dirname(configPath));
+  const memoryFiles: Record<string, string | null> = {};
+  const tree = async (path: string): Promise<void> => {
+    try {
+      const entries = await readdir(path, { withFileTypes: true });
+      memoryFiles[`${path}/`] = Buffer.from("directory").toString("base64");
+      for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+        const child = join(path, entry.name);
+        if (entry.isDirectory()) await tree(child);
+        else memoryFiles[child] = await read(child);
+      }
+    } catch (error) {
+      if (error instanceof Error && "code" in error && error.code === "ENOENT") memoryFiles[`${path}/`] = null;
+      else throw error;
+    }
+  };
+  await tree(memoryDir);
+  await tree(join(project, ".opencode", "memory"));
+  const refs = [
+    join(project, "opencode.json"),
+    join(project, "AGENTS.md"),
+    join(project, ".opencode", "AGENTS.md"),
+    ...["stm.jsonc", "stm.json"].map((name) => join(dirname(dirname(accessPath)), "xdg-config", "opencode", name)),
+  ];
+  return {
+    configs: { jsonc: await read(configPath), json: await read(join(dirname(configPath), "stm.json")) },
+    memoryFiles,
+    readOnlyRefs: Object.fromEntries(await Promise.all(refs.map(async (path) => [path, await read(path)]))),
+    productionAccess: JSON.parse(await readFile(accessPath, "utf8")),
   };
 }
 
@@ -299,6 +378,29 @@ export function manualToolDispatch(
   return { callID, completed: result?.split(/\r?\n/).includes("update: committed") === true };
 }
 
+export function diagnosticsToolDispatch(options: LanguageModelV3CallOptions) {
+  if (
+    primaryMarker(options) !== DIAGNOSTICS_PROMPT ||
+    !DIAGNOSTICS_CALLS.every((call) => availableFunctionToolNames(options).includes(call.tool))
+  )
+    return undefined;
+  for (const call of DIAGNOSTICS_CALLS) {
+    if (!pairedToolResults(options, call.tool).has(call.id)) return call;
+  }
+  return undefined;
+}
+
+export function setupToolDispatch(options: LanguageModelV3CallOptions) {
+  if (!availableFunctionToolNames(options).includes(SETUP_TOOL)) return undefined;
+  const index = SETUP_CALLS.findIndex((call) => call.prompt === primaryMarker(options));
+  if (index < 0) return undefined;
+  const call = SETUP_CALLS[index]!;
+  const result = pairedToolResults(options, SETUP_TOOL).get(call.id);
+  // Completion comes only from the matching SDK call/result, never user text.
+  const configPath = Bun.env.PROBE_PROJECT_CONFIG_PATH;
+  return { ...call, completed: configPath !== undefined && result === expectedSetupResult(index, configPath) };
+}
+
 async function emitSnapshots(writer: ProbeTelemetryWriter, messages: readonly unknown[]): Promise<void> {
   for (const message of normalizeV2Messages(messages)) {
     await writer.emit({ event: "message.snapshot", boundary: "during", ...message });
@@ -317,6 +419,7 @@ const probe = {
     let cleanupPromise: Promise<void> | undefined;
     let generationStarted = false;
     let modelInvocation = 0;
+    let latestRequestKind = "";
     const callbackState: Record<CallbackOperation, { count: number; depth: number; maxDepth: number }> = {
       context: { count: 0, depth: 0, maxDepth: 0 },
       generate: { count: 0, depth: 0, maxDepth: 0 },
@@ -483,7 +586,9 @@ const probe = {
                   sentinel: responseText,
                   details: {
                     toolNames: availableFunctionToolNames(options),
-                    ...(Bun.env.PROBE_SCENARIO === "reset" || Bun.env.PROBE_SCENARIO === "manual-update"
+                    ...(Bun.env.PROBE_SCENARIO === "reset" ||
+                    Bun.env.PROBE_SCENARIO === "manual-update" ||
+                    Bun.env.PROBE_SCENARIO === "setup"
                       ? { prompt: JSON.stringify(options.prompt) }
                       : {}),
                   },
@@ -504,6 +609,80 @@ const probe = {
                     : undefined;
                 const resetPhase = isResetToolRequest(options) ? resetToolCallPhase(options) : 2;
                 const manual = Bun.env.PROBE_SCENARIO === "manual-update" ? manualToolDispatch(options) : undefined;
+                const diagnostic =
+                  Bun.env.PROBE_SCENARIO === "manual-update" ? diagnosticsToolDispatch(options) : undefined;
+                const setup =
+                  Bun.env.PROBE_SCENARIO === "setup" && latestRequestKind === "primary"
+                    ? setupToolDispatch(options)
+                    : undefined;
+                if (responseText === undefined && setup !== undefined && !setup.completed) {
+                  await writer.emit({
+                    event: "model.invocation",
+                    provider: PROBE_PROVIDER_ID,
+                    model: PROBE_MODEL_ID,
+                    requestKind: "doStream",
+                    invocation,
+                    sentinel: `${SETUP_TOOL}:${JSON.stringify(setup.input)}`,
+                    details: {
+                      toolNames: availableFunctionToolNames(options),
+                      primaryPrompt: primaryMarker(options),
+                      toolCall: { toolCallId: setup.id, toolName: SETUP_TOOL, input: setup.input },
+                    },
+                  });
+                  return {
+                    stream: new ReadableStream({
+                      start(controller) {
+                        controller.enqueue({ type: "stream-start", warnings: [] });
+                        controller.enqueue({
+                          type: "tool-call",
+                          toolCallId: setup.id,
+                          toolName: SETUP_TOOL,
+                          input: JSON.stringify(setup.input),
+                        });
+                        controller.enqueue({
+                          type: "finish",
+                          usage: ZERO_USAGE,
+                          finishReason: { unified: "tool-calls", raw: "tool-calls" },
+                        });
+                        controller.close();
+                      },
+                    }),
+                  };
+                }
+                if (responseText === undefined && diagnostic !== undefined) {
+                  await writer.emit({
+                    event: "model.invocation",
+                    provider: PROBE_PROVIDER_ID,
+                    model: PROBE_MODEL_ID,
+                    requestKind: "doStream",
+                    invocation,
+                    sentinel: `${diagnostic.tool}:{}`,
+                    details: {
+                      toolNames: availableFunctionToolNames(options),
+                      primaryPrompt: primaryMarker(options),
+                      toolCall: { toolCallId: diagnostic.id, toolName: diagnostic.tool, input: {} },
+                    },
+                  });
+                  return {
+                    stream: new ReadableStream({
+                      start(controller) {
+                        controller.enqueue({ type: "stream-start", warnings: [] });
+                        controller.enqueue({
+                          type: "tool-call",
+                          toolCallId: diagnostic.id,
+                          toolName: diagnostic.tool,
+                          input: "{}",
+                        });
+                        controller.enqueue({
+                          type: "finish",
+                          usage: ZERO_USAGE,
+                          finishReason: { unified: "tool-calls", raw: "tool-calls" },
+                        });
+                        controller.close();
+                      },
+                    }),
+                  };
+                }
                 if (responseText === undefined && manual !== undefined && !manual.completed) {
                   await writer.emit({
                     event: "model.invocation",
@@ -582,7 +761,9 @@ const probe = {
                   sentinel: text,
                   details: {
                     toolNames: availableFunctionToolNames(options),
-                    ...(Bun.env.PROBE_SCENARIO === "reset" || Bun.env.PROBE_SCENARIO === "manual-update"
+                    ...(Bun.env.PROBE_SCENARIO === "reset" ||
+                    Bun.env.PROBE_SCENARIO === "manual-update" ||
+                    Bun.env.PROBE_SCENARIO === "setup"
                       ? { prompt: JSON.stringify(options.prompt) }
                       : {}),
                   },
@@ -655,16 +836,17 @@ const probe = {
       );
       await acquire(
         "session.model.request",
-        context.session.hook("model.request", (input) =>
-          writer
+        context.session.hook("model.request", (input) => {
+          latestRequestKind = input.kind;
+          return writer
             .emit({
               event: "model.request",
               provider: input.model.providerID,
               model: input.model.id,
               requestKind: input.kind,
             })
-            .then(() => undefined),
-        ),
+            .then(() => undefined);
+        }),
       );
 
       if (Bun.env.PROBE_SCENARIO === "manual-update") {
@@ -674,7 +856,18 @@ const probe = {
           details: { scope: "production.session.context", strategy: "registered-no-op" },
         });
       }
-      if (Bun.env.PROBE_SCENARIO === "reset" || Bun.env.PROBE_SCENARIO === "manual-update") {
+      if (Bun.env.PROBE_SCENARIO === "setup") {
+        await writer.emit({
+          event: "event.observed",
+          observedEvent: "setup.automatic-context-suppression",
+          details: { scope: "production.session.context", strategy: "registered-no-op" },
+        });
+      }
+      if (
+        Bun.env.PROBE_SCENARIO === "reset" ||
+        Bun.env.PROBE_SCENARIO === "manual-update" ||
+        Bun.env.PROBE_SCENARIO === "setup"
+      ) {
         await acquire(
           "tool.execute.before",
           context.tool.hook("execute.before", async (input) => {

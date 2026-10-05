@@ -9,18 +9,7 @@ import { createV2Adapter, createV2RuntimeContract } from "../src/v2-adapter";
 import { RuntimeCapabilityError, type RuntimeDisposer } from "../src/runtime-contract";
 import RootDefault, { SessionMemoryPlugin as RootNamed } from "../index";
 import SrcDefault, { SessionMemoryPlugin as SrcNamed } from "../src";
-
-type Deferred<T> = { promise: Promise<T>; resolve: (value: T) => void; reject: (error: unknown) => void };
-
-function deferred<T>(): Deferred<T> {
-  let resolve!: (value: T) => void;
-  let reject!: (error: unknown) => void;
-  const promise = new Promise<T>((res, rej) => {
-    resolve = res;
-    reject = rej;
-  });
-  return { promise, resolve, reject };
-}
+import { deferred } from "./async-helpers";
 
 function createContext() {
   const hooks: { name: string; callback: (input: unknown) => unknown }[] = [];
@@ -50,6 +39,7 @@ function createContext() {
         return { dispose: async () => undefined };
       },
     },
+    rpc: { register: async () => ({ events: { emit: async () => undefined }, dispose: async () => undefined }) },
   };
   return { context: context as unknown as V2Context, hooks, transforms };
 }
@@ -398,8 +388,17 @@ describe("V2 adapter", () => {
     });
     const cleanup = await setup;
     expect(typeof cleanup).toBe("function");
-    expect(transforms).toHaveLength(4);
-    expect(transforms.map(({ kind }) => kind)).toEqual(["tool", "tool", "tool", "tool"]);
+    expect(transforms).toHaveLength(8);
+    expect(transforms.map(({ kind }) => kind)).toEqual([
+      "tool",
+      "tool",
+      "tool",
+      "tool",
+      "tool",
+      "tool",
+      "tool",
+      "command",
+    ]);
     await expect(cleanup()).resolves.toBeUndefined();
     await expect(cleanup()).resolves.toBeUndefined();
     expect(hostDisposals).toEqual(["compaction", "context"]);

@@ -1,14 +1,24 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Info as ToolDefinition, ToolContext } from "@opencode/plugin/promise/tool";
 import Root from "../src/index";
-import { checkpointPathFor, memoryPathFor, readRawFile, resetBoundaryPathFor, writeText } from "../src/memory-utils";
+import {
+  DEFAULT_CONFIG,
+  checkpointPathFor,
+  createProjectExampleConfig,
+  logPath,
+  memoryPathFor,
+  readRawFile,
+  resetBoundaryPathFor,
+  writeText,
+} from "../src/memory-utils";
 import type { V2Context } from "../src/v2-adapter";
-import { createV2MemoryToolRegistrations, createV2MemoryTools } from "../src/v2-memory-tools";
+import { createV2MemoryActions, createV2MemoryToolRegistrations, createV2MemoryTools } from "../src/v2-memory-tools";
 import { createV2ContextInjection } from "../src/v2-context-injection";
 import { createV2MemoryUpdater } from "../src/v2-memory-update";
+import { withV2MemoryMutation } from "../src/v2-mutation-coordination";
 
 type ToolEditor = { readonly add: (definition: unknown) => void };
 
@@ -23,6 +33,8 @@ function context(directory: string): V2Context {
     options: {},
     session: { hook: async () => ({ dispose: async () => undefined }) },
     tool: { transform: async () => ({ dispose: async () => undefined }) },
+    command: { transform: async () => ({ dispose: async () => undefined }) },
+    rpc: { register: async () => ({ events: { emit: async () => undefined }, dispose: async () => undefined }) },
   } as unknown as V2Context;
 }
 
@@ -111,7 +123,7 @@ describe("V2 memory tools", () => {
     await rm(testDir, { recursive: true, force: true });
   });
 
-  test("defines exactly four tools and executes the exact transformed definitions", async () => {
+  test("defines exactly seven tools and executes the exact transformed definitions", async () => {
     const transformed: Array<(editor: ToolEditor) => void> = [];
     const setupContext = {
       ...context(testDir),
@@ -136,10 +148,16 @@ describe("V2 memory tools", () => {
       "stm_memory_status",
       "stm_memory_reset",
       "stm_memory_update",
+      "stm_memory_logs",
+      "stm_memory_settings",
+      "stm_memory_setup",
     ]);
-    expect(editors).toHaveLength(4);
+    expect(editors).toHaveLength(7);
     editors.forEach((editor, index) => expect(editor.added[0]).toBe(definitions[index]));
     expect(definitions.map(({ options }) => options)).toEqual([
+      { codemode: false },
+      { codemode: false },
+      { codemode: false },
       { codemode: false },
       { codemode: false },
       { codemode: false },
@@ -151,13 +169,16 @@ describe("V2 memory tools", () => {
       properties: {},
       additionalProperties: false,
     };
-    expect(definitions[0]!.input).toEqual(expectedInputSchema);
-    expect(definitions[1]!.input).toEqual(expectedInputSchema);
-    expect(definitions[3]!.input).toEqual(expectedInputSchema);
+    for (const index of [0, 1, 3, 4, 5]) expect(definitions[index]!.input).toEqual(expectedInputSchema);
     expect(definitions[2]!.input).toEqual({
       type: "object",
       properties: { confirm: { type: "boolean" } },
       required: ["confirm"],
+      additionalProperties: false,
+    });
+    expect(definitions[6]!.input).toEqual({
+      type: "object",
+      properties: { confirm: { type: "boolean" } },
       additionalProperties: false,
     });
     expect({}).toEqual({});
@@ -200,6 +221,11 @@ describe("V2 memory tools", () => {
       ],
     });
     expect(resultText(statusResult)).toContain("authoritative sessionID: authoritative");
+    expect(resultText(await definitions[4]!.execute({}, toolContext("authoritative")))).toBe("No logs yet.");
+    expect(JSON.parse(resultText(await definitions[5]!.execute({}, toolContext("authoritative"))))).toMatchObject({
+      generation: "v2",
+      resolvedConfig: DEFAULT_CONFIG,
+    });
     await cleanup();
   });
 
@@ -210,6 +236,451 @@ describe("V2 memory tools", () => {
     const result = await readTool.execute({}, toolContext("actual"));
     expect(result).toEqual({ content: [{ type: "text", text: memory }] });
     expect((result as { content?: unknown }).content).not.toEqual(expect.any(String));
+  });
+
+  test("all seven real shared actions match their tool outputs", async () => {
+    const sessionID = "shared-actions";
+    const h = updateHost(testDir, sessionID, [settledAssistant("msg_a")]);
+    const actions = createV2MemoryActions(h.pluginContext);
+    const [show, status, reset, update, logs, settings, setup] = createV2MemoryTools(h.pluginContext);
+    await writeText(memoryPathFor(sessionID), "exact persisted memory");
+    await writeText(logPath(), "actual shared log\n");
+    for (const [tool, action] of [
+      [show, actions.show],
+      [status, actions.status],
+      [logs, actions.logs],
+      [settings, actions.settings],
+    ] as const) {
+      expect(resultText(await tool.execute({}, toolContext(sessionID)))).toBe(await action(sessionID));
+    }
+    // Run each mutation from the same persisted state so the comparison is causal.
+    const paths = [memoryPathFor(sessionID), checkpointPathFor(sessionID), resetBoundaryPathFor(sessionID)];
+    const before = await Promise.all(paths.map(readRawFile));
+    const restore = async () => {
+      for (const [index, path] of paths.entries()) {
+        if (before[index] === null) await rm(path, { force: true });
+        else await writeFile(path, before[index]!);
+      }
+    };
+    const actionUpdate = await actions.update(sessionID);
+    const actionState = await Promise.all(paths.map(readRawFile));
+    await restore();
+    expect(resultText(await update.execute({}, toolContext(sessionID)))).toBe(actionUpdate);
+    expect(await Promise.all(paths.map(readRawFile))).toEqual(actionState);
+    const actionReset = await actions.reset(sessionID, { confirm: true, messageID: "message" });
+    const resetState = await Promise.all(paths.map(readRawFile));
+    await restore();
+    expect(resultText(await reset.execute({ confirm: true }, toolContext(sessionID)))).toBe(actionReset);
+    expect(await Promise.all(paths.map(readRawFile))).toEqual(resetState);
+    const actionSetup = await actions.setup(sessionID, { confirm: true });
+    const configPath = join(testDir, ".opencode", "stm.jsonc");
+    const configBytes = await readFile(configPath);
+    await rm(configPath);
+    expect(resultText(await setup.execute({ confirm: true }, toolContext(sessionID)))).toBe(actionSetup);
+    expect(await readFile(configPath)).toEqual(configBytes);
+    expect(await actions.setup(sessionID, { confirm: true })).toContain("already exists");
+    expect(await readFile(configPath)).toEqual(configBytes);
+    expect(await actions.reset(sessionID, { confirm: "true" })).toBe(
+      resultText(await reset.execute({ confirm: "true" }, toolContext(sessionID))),
+    );
+    expect(await actions.setup(sessionID, { confirm: false })).toBe(
+      resultText(await setup.execute({ confirm: false }, toolContext(sessionID))),
+    );
+  });
+
+  test("command reset anchors the last excluded durable record in array order", async () => {
+    const sessionID = "command-reset-order";
+    const h = updateHost(testDir, sessionID, [
+      settledAssistant("msg_z"),
+      { id: "msg_a", type: "system", text: "excluded context", time: { created: 3 } },
+    ]);
+    await writeText(memoryPathFor(sessionID), "previous memory");
+    await writeText(checkpointPathFor(sessionID), "msg_z\n");
+    const actions = createV2MemoryActions(h.pluginContext);
+    const text = await actions.reset(sessionID, { confirm: true });
+    expect(text).toContain("reset: completed");
+    expect(text).toContain("resetBoundaryAnchor: msg_a");
+    expect(text).toContain("boundaryScope: through last record of settled durable snapshot; not invocation message");
+    expect(await readFile(resetBoundaryPathFor(sessionID), "utf8")).toBe('{"version":1,"anchorID":"msg_a"}\n');
+    expect(await readFile(checkpointPathFor(sessionID), "utf8")).toBe("");
+    expect(h.generations).toHaveLength(0);
+    // The actual updater respects this excluded anchor and does not replay prior text.
+    expect(await actions.update(sessionID)).toContain("reason: no_assistant_in_delta");
+    expect(h.generations).toHaveLength(0);
+  });
+
+  test.each([
+    "empty",
+    "unfinished",
+    "no-model",
+    "empty-no-model",
+    "malformed",
+    "duplicate",
+    "empty-id",
+    "host-error",
+  ] as const)("command reset refuses %s snapshot without changing any persistence bytes", async (mode) => {
+    const sessionID = "command-reset-refusal";
+    const records =
+      mode === "empty" || mode === "empty-no-model"
+        ? []
+        : mode === "malformed"
+          ? [null]
+          : mode === "duplicate"
+            ? [settledAssistant("msg_a"), settledAssistant("msg_a")]
+            : mode === "empty-id"
+              ? [settledAssistant("")]
+              : [
+                  settledAssistant("msg_a"),
+                  settledAssistant("msg_pending", "unfinished", mode === "unfinished" ? null : 2),
+                ];
+    const h = updateHost(testDir, sessionID, records);
+    if (mode === "no-model" || mode === "empty-no-model")
+      h.pluginContext.session.get = async () => ({ id: sessionID }) as never;
+    if (mode === "host-error")
+      h.pluginContext.session.context = async () => {
+        throw new Error("host unavailable");
+      };
+    const paths = [memoryPathFor(sessionID), checkpointPathFor(sessionID), resetBoundaryPathFor(sessionID)];
+    const bytes = [
+      Buffer.from([0, 255, 10]),
+      Buffer.from("protected-checkpoint\n"),
+      Buffer.from('{"version":1,"anchorID":"old-anchor"}\n'),
+    ];
+    for (const path of paths) await writeText(path, "prepare directory");
+    for (const [index, path] of paths.entries()) await writeFile(path, bytes[index]!);
+    const files = (await readdir(join(testDir, ".opencode", "memory"), { recursive: true })).sort();
+    const text = await createV2MemoryActions(h.pluginContext).reset(sessionID, { confirm: true });
+    expect(text).toStartWith("Refused to reset V2 short-term memory:");
+    expect(text).not.toContain("reset: completed");
+    if (mode === "no-model" || mode === "empty-no-model") expect(text).toContain("no-model");
+    if (mode === "unfinished") expect(text).toContain("stoppedBeforeMessageID");
+    expect(await Promise.all(paths.map((path) => readFile(path)))).toEqual(bytes);
+    expect((await readdir(join(testDir, ".opencode", "memory"), { recursive: true })).sort()).toEqual(files);
+    expect(h.generations).toHaveLength(0);
+  });
+
+  test("command reset reads after queued ownership and blocks a real updater throughout history resolution", async () => {
+    const sessionID = "command-reset-race";
+    const h = updateHost(testDir, sessionID, []);
+    const actions = createV2MemoryActions(h.pluginContext);
+    let releaseOwner!: () => void;
+    const owner = withV2MemoryMutation(
+      testDir,
+      sessionID,
+      () =>
+        new Promise<void>((resolve) => {
+          releaseOwner = resolve;
+        }),
+    );
+    let releaseRead!: (records: unknown) => void;
+    let readStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      readStarted = resolve;
+    });
+    h.pluginContext.session.context = async () => {
+      readStarted();
+      return await new Promise<never>((resolve) => {
+        releaseRead = resolve as (records: unknown) => void;
+      });
+    };
+    await writeText(memoryPathFor(sessionID), "protected before resolver");
+    const reset = actions.reset(sessionID, { confirm: true });
+    await Promise.resolve();
+    expect(h.reads).toHaveLength(0);
+    await writeText(checkpointPathFor(sessionID), "msg_new\n");
+    releaseOwner();
+    await owner;
+    await started;
+    try {
+      expect(await readFile(memoryPathFor(sessionID), "utf8")).toBe("protected before resolver");
+      const competing = await createV2MemoryUpdater(
+        h.pluginContext,
+        testDir,
+      )({
+        sessionID,
+        model: currentModel as never,
+        messages: [{ id: "msg_competing", role: "assistant", content: [{ type: "text", text: "competing" }] }],
+      });
+      expect(competing.status).toBe("busy");
+      expect(h.generations).toHaveLength(0);
+      expect(await readFile(checkpointPathFor(sessionID), "utf8")).toBe("msg_new\n");
+    } finally {
+      releaseRead([settledAssistant("msg_new")]);
+    }
+    expect(await reset).toContain("resetBoundaryAnchor: msg_new");
+    expect(await readFile(resetBoundaryPathFor(sessionID), "utf8")).toBe('{"version":1,"anchorID":"msg_new"}\n');
+  });
+
+  test("logs return the actual shared 120-line tail from freshly configured storage without mutations", async () => {
+    const projectDir = join(testDir, "project");
+    const configPath = join(projectDir, ".opencode", "stm.json");
+    const memoryDir = join(testDir, "shared-memory");
+    await writeText(configPath, JSON.stringify({ memoryDir, logMaxLines: 20 }));
+    await writeText(logPath(), "wrong directory");
+    const lines = Array.from({ length: 140 }, (_, index) =>
+      JSON.stringify({ event: "update", sessionID: index % 2 ? "other-session" : "actual", index }),
+    );
+    await writeText(logPath(memoryDir), lines.join("\n") + "\n");
+    await writeText(memoryPathFor("actual", memoryDir), "protected memory");
+    await writeText(checkpointPathFor("actual", memoryDir), "protected checkpoint\n");
+    await writeText(resetBoundaryPathFor("actual", memoryDir), '{"version":1,"anchorID":"protected"}\n');
+    const paths = (await readdir(memoryDir, { recursive: true })).sort();
+    const snapshot = async () =>
+      await Promise.all(
+        paths.map(async (path) => {
+          const fullPath = join(memoryDir, path);
+          const info = await stat(fullPath);
+          return { path, mtimeMs: info.mtimeMs, bytes: info.isFile() ? await readFile(fullPath) : null };
+        }),
+      );
+    const before = await snapshot();
+    const h = updateHost(projectDir, "actual", []);
+    const [, , , , logsTool] = createV2MemoryTools(h.pluginContext);
+    expect(logsTool.description).toContain("shared by all sessions");
+    expect(logsTool.description).toContain("sensitive");
+    const expected = lines.slice(-120).join("\n");
+    expect(resultText(await logsTool.execute({}, toolContext("actual")))).toBe(expected);
+    expect(resultText(await logsTool.execute({ sessionID: "other-session" }, toolContext("other-session")))).toBe(
+      expected,
+    );
+    expect((await readdir(memoryDir, { recursive: true })).sort()).toEqual(paths);
+    expect(await snapshot()).toEqual(before);
+    expect(h.reads).toEqual([]);
+    expect(h.generations).toEqual([]);
+
+    const nextMemoryDir = join(testDir, "next-memory");
+    await writeText(configPath, JSON.stringify({ memoryDir: nextMemoryDir }));
+    await writeText(logPath(nextMemoryDir), "fresh config log\n");
+    expect(resultText(await logsTool.execute({}, toolContext("actual")))).toBe("fresh config log");
+    expect(await snapshot()).toEqual(before);
+  });
+
+  test("missing, empty and unreadable logs use the fallback without creating memory files or directories", async () => {
+    const memoryDir = join(testDir, "missing-memory");
+    await writeText(join(testDir, ".opencode", "stm.json"), JSON.stringify({ memoryDir }));
+    const [, , , , logsTool] = createV2MemoryTools(context(testDir));
+    expect(resultText(await logsTool.execute({}, toolContext("actual")))).toBe("No logs yet.");
+    await expect(stat(memoryDir)).rejects.toMatchObject({ code: "ENOENT" });
+    await writeText(logPath(memoryDir), "");
+    expect(resultText(await logsTool.execute({}, toolContext("actual")))).toBe("No logs yet.");
+    expect(await readdir(memoryDir)).toEqual(["session-memory.log"]);
+    expect(await readFile(logPath(memoryDir), "utf8")).toBe("");
+    await rm(logPath(memoryDir));
+    await mkdir(logPath(memoryDir));
+    expect(resultText(await logsTool.execute({}, toolContext("actual")))).toBe("No logs yet.");
+    expect(await readdir(memoryDir)).toEqual(["session-memory.log"]);
+    expect(await readdir(logPath(memoryDir))).toEqual([]);
+  });
+
+  test("settings freshly merge and normalize project overrides while separating all inactive V2 config keys", async () => {
+    const projectDir = join(testDir, "project");
+    const globalPath = join(process.env.XDG_CONFIG_HOME!, "opencode", "stm.jsonc");
+    const envPath = join(process.env.OPENCODE_CONFIG_DIR!, "stm.json");
+    const projectPath = join(projectDir, ".opencode", "stm.jsonc");
+    const memoryDir = join(testDir, "uncreated-memory");
+    await writeText(globalPath, JSON.stringify({ maxMemoryLength: 700, summarizerMode: "active", debug: true }));
+    await writeText(
+      envPath,
+      JSON.stringify({ maxMemoryLength: 800, maxDeltaMessages: "30.8", memoryModel: "env/model" }),
+    );
+    const overrides = {
+      enabled: "false",
+      memoryModel: " configured/model ",
+      summarizerMode: "CLEAN",
+      maxMemoryLength: "100",
+      maxUpdateInputLength: "999999",
+      memoryDir: ` ${memoryDir} `,
+      cleanFallbackToActiveSession: true,
+      includeAgentsMdOnFirstUpdate: true,
+      injectInSubagents: false,
+      enableLegacyPeriodicSystemTransform: true,
+      sideSessionRetries: 9,
+      remindEveryN: 42,
+      debounceMs: 9999,
+      logMaxLines: 22,
+      collapseAssistantBursts: true,
+    };
+    await writeText(projectPath, JSON.stringify(overrides));
+    const hostCalls: string[] = [];
+    const pluginContext = context(projectDir);
+    for (const key of ["session", "generate"] as const) {
+      Object.defineProperty(pluginContext, key, {
+        get: () => {
+          hostCalls.push(key);
+          throw new Error("diagnostics must not access host sessions or generation");
+        },
+      });
+    }
+    const [, , , , , settingsTool] = createV2MemoryTools(pluginContext);
+    const before = await Promise.all([globalPath, envPath, projectPath].map((path) => readFile(path)));
+    const resolvedConfig = {
+      ...DEFAULT_CONFIG,
+      ...overrides,
+      enabled: false,
+      memoryModel: "configured/model",
+      summarizerMode: "clean",
+      maxMemoryLength: 200,
+      maxUpdateInputLength: 200000,
+      maxDeltaMessages: 30,
+      memoryDir,
+      debug: true,
+    };
+    const expected = {
+      generation: "v2",
+      resolvedConfig,
+      effective: {
+        enabled: false,
+        memoryModel: "current-session",
+        summarizerMode: "clean",
+        maxMemoryLength: 200,
+        maxUpdateInputLength: 200000,
+        maxDeltaMessages: 30,
+        memoryDir,
+        updateHook: "context",
+        injectionHooks: ["context", "compaction"],
+      },
+      inactiveSettings: [
+        "memoryModel",
+        "cleanFallbackToActiveSession",
+        "includeAgentsMdOnFirstUpdate",
+        "injectInSubagents",
+        "enableLegacyPeriodicSystemTransform",
+        "sideSessionRetries",
+        "remindEveryN",
+        "debounceMs",
+        "debug",
+        "logMaxLines",
+        "collapseAssistantBursts",
+      ],
+    };
+    expect(JSON.parse(resultText(await settingsTool.execute({}, toolContext("actual"))))).toEqual(expected);
+    expect(await Promise.all([globalPath, envPath, projectPath].map((path) => readFile(path)))).toEqual(before);
+    await expect(stat(memoryDir)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await readdir(join(projectDir, ".opencode"))).toEqual(["stm.jsonc"]);
+
+    await writeText(projectPath, JSON.stringify({ enabled: true, summarizerMode: "ACTIVE", memoryDir }));
+    expect(JSON.parse(resultText(await settingsTool.execute({}, toolContext("different"))))).toEqual({
+      ...expected,
+      resolvedConfig: {
+        ...DEFAULT_CONFIG,
+        enabled: true,
+        summarizerMode: "active",
+        memoryModel: "env/model",
+        maxMemoryLength: 800,
+        maxDeltaMessages: 30,
+        memoryDir,
+        debug: true,
+      },
+      effective: {
+        ...expected.effective,
+        enabled: true,
+        summarizerMode: "active",
+        maxMemoryLength: 800,
+        maxUpdateInputLength: DEFAULT_CONFIG.maxUpdateInputLength,
+      },
+    });
+    expect(hostCalls).toEqual([]);
+    await expect(stat(memoryDir)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  test("setup confirms literally before creating only the captured project example without host access", async () => {
+    const projectDir = join(testDir, "project");
+    const ignoredDir = join(testDir, "ignored");
+    const pluginContext = context(projectDir);
+    const hostCalls: string[] = [];
+    for (const key of ["session", "generate"] as const) {
+      Object.defineProperty(pluginContext, key, {
+        get: () => {
+          hostCalls.push(key);
+          throw new Error("setup must not access host sessions or generation");
+        },
+      });
+    }
+    const [, , , , , , setupTool] = createV2MemoryTools(pluginContext);
+    Object.assign(pluginContext.location, { directory: ignoredDir });
+    const invocationContext = new Proxy({} as ToolContext, {
+      get: () => {
+        throw new Error("setup must not access tool session identity");
+      },
+    });
+    for (const input of [{ confirm: false }, {}, { confirm: "true" }, { confirm: null }, null, undefined, "true"]) {
+      expect(resultText(await setupTool.execute(input, invocationContext))).toBe(
+        "Refused to create a project example config: set confirm to literal true to confirm setup.",
+      );
+      await expect(stat(join(projectDir, ".opencode"))).rejects.toMatchObject({ code: "ENOENT" });
+      await expect(stat(join(testDir, ".opencode"))).rejects.toMatchObject({ code: "ENOENT" });
+    }
+    const configPath = join(projectDir, ".opencode", "stm.jsonc");
+    const text = resultText(
+      await setupTool.execute({ confirm: true, directory: ignoredDir, path: ignoredDir }, invocationContext),
+    );
+    expect(text).toBe(
+      [
+        `Created project example config at ${configPath}.`,
+        `configPath: ${configPath}`,
+        "Shared example: see stm_memory_settings for effective V2 settings; configured memoryModel overrides are not applied in V2.",
+      ].join("\n"),
+    );
+    const reference = await createProjectExampleConfig(join(testDir, "reference"));
+    expect(await readFile(configPath)).toEqual(await readFile(reference.configPath));
+    expect(await readdir(join(projectDir, ".opencode"))).toEqual(["stm.jsonc"]);
+    for (const directory of [
+      testDir,
+      ignoredDir,
+      process.env.HOME!,
+      process.env.XDG_CONFIG_HOME!,
+      process.env.OPENCODE_CONFIG_DIR!,
+    ]) {
+      await expect(stat(join(directory, ".opencode"))).rejects.toMatchObject({ code: "ENOENT" });
+    }
+    await expect(stat(process.env.OPENCODE_CONFIG_DIR!)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(stat(process.env.XDG_CONFIG_HOME!)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(hostCalls).toEqual([]);
+  });
+
+  test.each(["stm.jsonc", "stm.json"])(
+    "setup preserves existing %s bytes and creates no other files",
+    async (filename) => {
+      const projectDir = join(testDir, "project");
+      const configDir = join(projectDir, ".opencode");
+      const existingPath = join(configDir, filename);
+      const bytes = Buffer.from([0, 255, 10, 123, 125]);
+      await mkdir(configDir, { recursive: true });
+      await writeFile(existingPath, bytes);
+      const [, , , , , , setupTool] = createV2MemoryTools(context(projectDir));
+      const text = resultText(await setupTool.execute({ confirm: true }, {} as ToolContext));
+      expect(text).toContain(`No example config created: ${filename} already exists in ${configDir}.`);
+      expect(text).toContain(`configPath: ${join(configDir, "stm.jsonc")}`);
+      expect(await readFile(existingPath)).toEqual(bytes);
+      expect(await readdir(configDir)).toEqual([filename]);
+    },
+  );
+
+  test("concurrent setup calls create once without overwriting the shared example", async () => {
+    const projectDir = join(testDir, "project");
+    const configDir = join(projectDir, ".opencode");
+    const tools = [createV2MemoryTools(context(projectDir))[6], createV2MemoryTools(context(projectDir))[6]];
+    const texts = await Promise.all(
+      tools.map(async (tool) => resultText(await tool.execute({ confirm: true }, {} as ToolContext))),
+    );
+    expect(texts.filter((text) => text.startsWith("Created project example config"))).toHaveLength(1);
+    expect(texts.filter((text) => text.startsWith("No example config created: stm.jsonc already exists"))).toHaveLength(
+      1,
+    );
+    const configPath = join(configDir, "stm.jsonc");
+    const before = await readFile(configPath);
+    expect(resultText(await tools[0]!.execute({ confirm: true }, {} as ToolContext))).toContain("already exists");
+    expect(await readFile(configPath)).toEqual(before);
+    expect(await readdir(configDir)).toEqual(["stm.jsonc"]);
+  });
+
+  test("setup propagates IO errors rather than reporting creation", async () => {
+    const projectDir = join(testDir, "project");
+    await writeText(join(projectDir, ".opencode"), "not a directory");
+    const [, , , , , , setupTool] = createV2MemoryTools(context(projectDir));
+    await expect(setupTool.execute({ confirm: true }, {} as ToolContext)).rejects.toMatchObject({ code: "ENOTDIR" });
+    expect(await readFile(join(projectDir, ".opencode"), "utf8")).toBe("not a directory");
+    expect(await readdir(projectDir)).toEqual([".opencode"]);
   });
 
   test("updates the fresh settled prefix with exact host identity and model, ignoring malicious input", async () => {
@@ -726,9 +1197,15 @@ describe("V2 memory tools", () => {
       "stm_memory_status",
       "stm_memory_reset",
       "stm_memory_update",
+      "stm_memory_logs",
+      "stm_memory_settings",
+      "stm_memory_setup",
     ]);
     expect(registrations.map(({ definition }) => definition.name)).toEqual(registrations.map(({ name }) => name));
     expect(registrations.map(({ definition }) => definition.options)).toEqual([
+      { codemode: false },
+      { codemode: false },
+      { codemode: false },
       { codemode: false },
       { codemode: false },
       { codemode: false },
@@ -833,7 +1310,7 @@ describe("V2 memory tools", () => {
         transform: async (callback: (editor: ToolEditor) => void) => {
           callback({ add: () => undefined });
           toolNumber += 1;
-          const name = ["read", "status", "reset", "update"][toolNumber - 1]!;
+          const name = ["read", "status", "reset", "update", "logs", "settings", "setup"][toolNumber - 1]!;
           events.push(`acquire:${name}`);
           return { dispose: async () => events.push(`dispose:${name}`) };
         },
@@ -849,6 +1326,12 @@ describe("V2 memory tools", () => {
       "acquire:status",
       "acquire:reset",
       "acquire:update",
+      "acquire:logs",
+      "acquire:settings",
+      "acquire:setup",
+      "dispose:setup",
+      "dispose:settings",
+      "dispose:logs",
       "dispose:update",
       "dispose:reset",
       "dispose:status",

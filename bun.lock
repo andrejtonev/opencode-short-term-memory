@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "@andreja/opencode-short-term-memory",
+      "name": "@atonev/opencode-short-term-memory",
       "dependencies": {
         "@opencode-ai/plugin": "1.14.25",
         "@opencode/plugin": "2.0.8",

@@ -4,12 +4,7 @@ import {
   tryAcquireV2MemoryUpdate,
   withV2MemoryMutation,
 } from "../src/v2-mutation-coordination";
-
-function deferred() {
-  let resolve!: () => void;
-  const promise = new Promise<void>((done) => (resolve = done));
-  return { promise, resolve };
-}
+import { deferred } from "./async-helpers";
 
 describe("process-local V2 mutation coordination", () => {
   test("queues explicit mutations FIFO behind an updater without barging at handoff", async () => {

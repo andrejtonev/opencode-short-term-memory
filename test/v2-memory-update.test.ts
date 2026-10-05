@@ -16,11 +16,12 @@ import {
 } from "../src/memory-utils";
 import { CLEAN_SUMMARIZER_TIMEOUT } from "../src/summarizer";
 import { writeLastProcessedMessageID } from "../src/message-collector";
-import type { V2Context, V2SessionContext } from "../src/v2-adapter";
+import type { V2CommandDefinition, V2Context, V2SessionContext } from "../src/v2-adapter";
 import { createV2MemoryUpdater, isV2MemoryUpdateInFlight } from "../src/v2-memory-update";
 import { withV2MemoryMutation } from "../src/v2-mutation-coordination";
 import { readV2CurrentHistory, type V2CurrentHistoryContext } from "../src/v2-current-history";
 import { resetV2MemoryPersistence } from "../src/v2-reset-persistence";
+import { deferred } from "./async-helpers";
 
 const VALID_MEMORY = `${MEMORY_HEADER}
 
@@ -40,18 +41,6 @@ const VALID_MEMORY = `${MEMORY_HEADER}
 - Keep the reference.
 `;
 
-type Deferred<T> = { promise: Promise<T>; resolve: (value: T) => void; reject: (error: unknown) => void };
-
-function deferred<T>(): Deferred<T> {
-  let resolve!: (value: T) => void;
-  let reject!: (error: unknown) => void;
-  const promise = new Promise<T>((res, rej) => {
-    resolve = res;
-    reject = rej;
-  });
-  return { promise, resolve, reject };
-}
-
 function message(id: string | undefined, role: "user" | "assistant" | "system" | "tool", text: string) {
   return { ...(id === undefined ? {} : { id }), role, content: [{ type: "text", text }] };
 }
@@ -63,7 +52,13 @@ function makeContext(
     clean?: (input: { prompt: string; model?: unknown }, signal?: AbortSignal) => Promise<{ text: string }>;
   } = {},
 ) {
-  const calls = { active: [] as unknown[], clean: [] as unknown[] };
+  const calls = {
+    active: [] as unknown[],
+    clean: [] as unknown[],
+    rpc: [] as unknown[],
+    command: [] as V2CommandDefinition[],
+    disposed: [] as string[],
+  };
   const value = {
     location: {
       directory,
@@ -85,6 +80,35 @@ function makeContext(
     },
     tool: {
       transform: async () => ({ dispose: async () => undefined }),
+    },
+    rpc: {
+      register: async (definition: unknown, handlers: unknown) => {
+        calls.rpc.push({ definition, handlers });
+        return {
+          events: {
+            emit: async () => {
+              throw new Error("Unexpected status event in memory update test");
+            },
+          },
+          dispose: async () => {
+            calls.disposed.push("rpc");
+          },
+        };
+      },
+    },
+    command: {
+      transform: async (callback: (editor: { add: (definition: V2CommandDefinition) => void }) => void) => {
+        callback({
+          add: (definition) => {
+            calls.command.push(definition);
+          },
+        });
+        return {
+          dispose: async () => {
+            calls.disposed.push("command");
+          },
+        };
+      },
     },
   };
   return { context: value as unknown as V2Context, calls };
@@ -619,7 +643,7 @@ describe("V2 fresh memory updater", () => {
     await createV2MemoryUpdater(context)(
       input("delta", [
         message("old", "user", "Earlier"),
-        message("u1", "user", "Visible question"),
+        message("u1", "user", "  <think>hidden-think-sentinel</think>Visible question  "),
         message("tool", "tool", "tool-output-sentinel"),
         message("sys", "system", "system-sentinel"),
         message("internal", "assistant", "thinking: secret"),
@@ -632,11 +656,16 @@ describe("V2 fresh memory updater", () => {
             { type: "text", text: "Part answer" },
           ],
         },
-        message("a1", "assistant", "Visible answer"),
+        message("a1", "assistant", "  ```thinking\nhidden-fenced-sentinel\n```Visible answer  "),
       ]),
     );
     const prompt = (calls.clean[0] as { input: { prompt: string } }).input.prompt;
     const conversation = conversationBody(prompt);
+    expect(conversation.trim()).toBe(
+      "USER:\nVisible question\n\n---\n\nASSISTANT:\nPart answer\n\n---\n\nASSISTANT:\nVisible answer",
+    );
+    expect(prompt).not.toContain("hidden-think-sentinel");
+    expect(prompt).not.toContain("hidden-fenced-sentinel");
     expect(conversation).toContain("Visible question");
     expect(conversation).toContain("Visible answer");
     expect(conversation).not.toContain("Earlier");
@@ -993,6 +1022,8 @@ describe("V2 fresh memory updater", () => {
       return { dispose: async () => undefined };
     };
     const cleanup = await Root.setup(base.context);
+    expect(base.calls.rpc).toHaveLength(1);
+    expect(base.calls.command.map((definition) => definition.name)).toEqual(["stm"]);
     nestedCallback = hooks.find((hook) => hook.name === "context")?.callback;
     await nestedCallback!(input("recursive", [message("u1", "user", "Q"), message("a1", "assistant", "A")]));
     await queuedMutation;
@@ -1005,6 +1036,7 @@ describe("V2 fresh memory updater", () => {
     expect(nestedCheckpoint).toBe("");
     expect(await readText(checkpointPathFor("recursive", memoryDir))).toBe("a1\n");
     await cleanup?.();
+    expect(base.calls.disposed).toEqual(["rpc", "command"]);
   });
 
   test("combined setup updates before injection while compaction remains injection-only", async () => {
@@ -1019,6 +1051,8 @@ describe("V2 fresh memory updater", () => {
       return { dispose: async () => undefined };
     };
     const cleanup = await Root.setup(base.context);
+    expect(base.calls.rpc).toHaveLength(1);
+    expect(base.calls.command.map((definition) => definition.name)).toEqual(["stm"]);
     const contextHook = hooks.find((hook) => hook.name === "context")!;
     const compactionHook = hooks.find((hook) => hook.name === "compaction")!;
     const contextInput = input("setup", [message("u1", "user", "Q"), message("a1", "assistant", "A")]);
@@ -1030,5 +1064,6 @@ describe("V2 fresh memory updater", () => {
     expect(base.calls.clean).toHaveLength(generationCount);
     expect(compactionInput.system.some((part) => part.text.includes("[MEMORY_SYSTEM]"))).toBe(true);
     await cleanup?.();
+    expect(base.calls.disposed).toEqual(["rpc", "command"]);
   });
 });
