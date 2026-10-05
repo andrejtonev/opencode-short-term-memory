@@ -304,6 +304,45 @@ full strict consumer passes on a newly identified tarball without declaration
 suppression. A complete bounded native rerun on that candidate remains a future
 live milestone, including retained cost/state evidence and confirmed cleanup.
 
+## JSON Schema Closure Follow-Up: 2026-10-05
+
+**Recommendation remains NOT RC-ready.** Historical results above are preserved.
+Exactly one package acceptance followed by one live acceptance ran sequentially
+for this unit; neither was rerun for this documentation-only edit.
+
+| Component/Logic Block  | Current Findings/Hypothesis                                                                                                                          | Implications                                                                                              | Verification Status                                          |
+| ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------ |
+| Production types       | `@types/json-schema` pinned to `7.0.15` in production; lock adds only that dependency/entry, with no other upgrades.                                 | Closes the missing JSON Schema declaration dependency.                                                    | Manifest/lock diff inspected.                                |
+| Declaration resolution | Harness uses TypeScript's actual type-reference directive resolution to installed `@types/json-schema/index.d.ts`, excluding checkout/tooling paths. | Proves production type resolution without tooling leakage or a fictitious runtime import.                 | Harness diff inspected; package evidence retained.           |
+| Package acceptance     | 283 production packages and all four runtime imports PASS; strict TUI PASS; full strict FAIL only Effect TS2304 for `SchemaErrorTypeId`.             | JSON Schema errors eliminated; full declaration closure still blocks RC.                                  | `1yXf58` evidence inspected; `skipLibCheck: false` retained. |
+| Native acceptance      | Host 2.0.12 PASS: 16 connected states plus four headless refusals; cost 0, budget unchanged, TUI stopped, server exit 130.                           | Fresh bounded native acceptance, not installed-host compatibility or committed multi-chunk summarization. | `Nd0QwJ` evidence inspected.                                 |
+| Checkout gates         | Full suite 710 pass/0 fail; root typecheck/build and fixture checks PASS.                                                                            | Checkout gates do not override failed full package declarations.                                          | Lead-reported; not rerun here.                               |
+
+**Tarball:** `/tmp/opencode/stm-json-schema-0f9e85e-package.tgz`, SHA256
+`ad4509752d95e89b2349642d81e533857aa2da93909b9672c12aa5a1bed0d796`.
+Working-tree bytes based on `0f9e85e`, not an immutable commit artifact.
+Package evidence: `/tmp/opencode/stm-package-acceptance-1yXf58/evidence.json`.
+Live evidence: `/tmp/opencode/stm-production-commands-Nd0QwJ/evidence.json`.
+Exact recorded commands, **not rerun here**:
+
+```bash
+/usr/bin/timeout --kill-after=5s 190s /home/dev/.bun/bin/bun scripts/package-acceptance.ts /tmp/opencode/stm-json-schema-0f9e85e-package.tgz
+/usr/bin/timeout --kill-after=5s 100s /home/dev/.bun/bin/bun fixtures/v2-generation-probe/tui-output/production-acceptance.ts
+```
+
+**Effect decision:** the lead reports beta.47/.49/.50 share the defect. Root
+consumer overrides do not ship; local patches have not demonstrated a downstream
+fix. Do not infer that either closes production declarations. No broad version
+jump, global shim or declaration suppression is accepted.
+**Next bounded unit:** SDK/package owner examines narrowing the SDK type import
+to `effect/Effect`. Acceptance requires actual strict transitive-closure proof
+and the same full isolated consumer passing on a newly identified tarball, not
+merely a plausible import change. Other host/release gaps remain open.
+
+Investigation artifact (read for this edit):
+`/home/dev/workspace/opencode-work/opencode-short-term-memory-v2-forced-update/2026-10-05--json-schema-type-closure.html`.
+Only this document was edited/formatted; no new acceptance run, build or commit.
+
 ## References
 
 - Prior readiness audit:

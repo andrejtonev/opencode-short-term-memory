@@ -242,9 +242,10 @@ try {
     }
   }
   await inspect(join(runtime, "node_modules"));
-  const resolvedDependencies: { name: string; resolved: string; realpath: string }[] = [];
+  const resolvedDependencies: { name: string; resolved: string; realpath: string; kind?: "type-only" }[] = [];
   evidence.resolvedProductionDependencies = resolvedDependencies;
   for (const name of Object.keys(manifest.dependencies ?? {})) {
+    if (name.startsWith("@types/")) continue;
     const resolved = Bun.resolveSync(name, packageRoot);
     const physical = await realpath(resolved);
     assert.ok(
@@ -345,6 +346,29 @@ console.log(JSON.stringify({ gate: "public imports only, no hooks called", paths
     },
     files: ["consumer.ts"],
   };
+  const ts: typeof import("typescript") = await import(
+    join(tooling, "node_modules", "typescript", "lib", "typescript.js")
+  );
+  const compilerOptions = ts.convertCompilerOptionsFromJson(tsconfig.compilerOptions, runtime);
+  assert.equal(compilerOptions.errors.length, 0, "Invalid consumer compiler options");
+  for (const name of Object.keys(manifest.dependencies ?? {})) {
+    if (!name.startsWith("@types/")) continue;
+    const directive = name.slice("@types/".length).replace(/^(.+)__(.+)$/, "@$1/$2");
+    const resolution = ts.resolveTypeReferenceDirective(
+      directive,
+      join(packageRoot, "dist", "index.d.ts"),
+      compilerOptions.options,
+      ts.sys,
+    ).resolvedTypeReferenceDirective;
+    assert.ok(resolution?.resolvedFileName, `Production type dependency did not resolve: ${name}`);
+    const resolved = resolution.resolvedFileName;
+    const physical = await realpath(resolved);
+    assert.ok(
+      inside(runtime, physical) && !inside(checkout, physical) && !inside(tooling, physical),
+      `Resolved production type dependency escapes consumer: ${name} -> ${physical}`,
+    );
+    resolvedDependencies.push({ name, resolved, realpath: physical, kind: "type-only" });
+  }
   await Bun.write(
     join(runtime, "tui-consumer.ts"),
     `import tui, { receiveStatus, type StatusTuiContext } from "${manifest.name}/tui";
