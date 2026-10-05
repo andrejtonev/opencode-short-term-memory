@@ -193,6 +193,53 @@ and `no_assistant_in_delta` with zero checkpointed chunks, not a successful
 committed multi-chunk update. Final installed V1/minimum-V2 compatibility and
 candidate version/changelog/commit/tarball identity still require qualification.
 
+## Clean Tarball Follow-Up
+
+**2026-10-05: NOT RC-ready; packaging does not fully pass.** This follow-up
+preserves the historical sections above. The tested tarball was built from
+`297317f`: `/tmp/opencode/stm-297317f-package.tgz`, SHA256
+`6fc5267f7ef77efa10dbdf3d660c25146e5ac1cb367da7985f0cb4d08f45b8f0`.
+The lead records normal pack lifecycle execution, including `prepare`, rather
+than `--ignore-scripts`; that is not proof of supported host bootstrap.
+
+| Component/Logic Block      | Current Findings/Hypothesis                                                                                                                     | Implications                                                                                  | Verification Status                                                         |
+| -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------- |
+| Production install/imports | Fresh isolated production install: 282 packages; all direct dependencies resolve inside the consumer; root, server, TUI and RPC exports import. | Closes the bounded install/runtime-import gap, not host activation.                           | PASS; final retained JSON inspected.                                        |
+| Strict declarations        | Consumer exits 2 with seven diagnostics in upstream declarations.                                                                               | Public declaration closure still blocks package acceptance; ownership is split below.         | FAIL; final retained JSON inspected, matching the recorded earlier failure. |
+| Lifecycle/trust            | Bun blocks one postinstall; `bun pm untrusted` exits 1 because no production lockfile exists.                                                   | Diagnostic unavailable; blocked package identity is not established. No trust changes.        | Install output and diagnostic stderr inspected.                             |
+| Host/release acceptance    | No live host or supported install/bootstrap exercised by these package runs.                                                                    | Final host compatibility, committed multi-chunk update and release qualification remain open. | UNVERIFIED; inference cost 0, global budget unchanged.                      |
+
+Final evidence: `/tmp/opencode/stm-package-acceptance-5CYWkU/evidence.json`.
+Investigation artifact:
+`/home/dev/workspace/opencode-work/opencode-short-term-memory-v2-forced-update/2026-10-05--clean-package-acceptance.html`.
+The exact bounded package command was:
+
+```bash
+/usr/bin/timeout --kill-after=5s 190s /home/dev/.bun/bin/bun scripts/package-acceptance.ts /tmp/opencode/stm-297317f-package.tgz
+```
+
+Three bounded package executions occurred, not one: initial failure retained at
+`/tmp/opencode/stm-package-acceptance-Bx4u7t`, intermediate diagnostic failure at
+`/tmp/opencode/stm-package-acceptance-PGXov8`, and final hardened execution at
+`/tmp/opencode/stm-package-acceptance-5CYWkU`. The final verdict is **FAIL** on
+strict declarations, despite passing install/import gates. No acceptance run was
+performed for this documentation edit.
+
+**Declaration ownership:** two diagnostics originate in `@ai-sdk/provider` from
+missing `@types/json-schema`; four originate in `@opencode/plugin` TUI declarations
+from absent optional peers `@opencode/theme/tui`, `@opentui/core`,
+`@opentui/solid` and `solid-js/store`; one originates in Effect
+`4.0.0-beta.48` from undeclared `SchemaErrorTypeId`. These are upstream dependency
+closure failures, but STM owns the public boundary exposing that closure and the
+choice of dependency corrections needed for a strict production consumer.
+
+**Next bounded unit:** the STM TUI owner should narrow only `src/tui.ts` to a
+structural public boundary while preserving host assignability, then address
+remaining upstream dependency corrections. Acceptance requires host assignability
+checks and the same isolated strict consumer to pass on a newly identified
+tarball. The recorded consumer uses `skipLibCheck: false`; suppressing declaration
+checking is not a fix or an acceptance claim.
+
 ## References
 
 - Prior readiness audit:
