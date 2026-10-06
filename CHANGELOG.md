@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0-rc.1] - 2026-10-06
+
+Prerelease candidate for additive V2 support alongside V1. The intended npm dist-tag is `rc`, not `latest`; this entry does not establish publication or final release qualification.
+
+### Added
+
+- V2 context-hook updates from new visible conversation text, requiring an assistant message in the delta and respecting checkpoints/reset boundaries, followed by stored-memory injection into system context. V2 compaction injects existing memory for preservation without triggering an update; V1 idle/pre-compaction updates and periodic injection remain distinct.
+- Seven native V2 `/stm` controls (`status`, `show`, `logs`, `settings`, `update`, `setup`, `reset`), with `/stm` defaulting to status, plus seven `stm_memory_*` tools. Commands require matching connected TUI receiver admission; tools remain available headlessly. The legacy `short_term_memory` tool remains V1-only.
+- Confirmed V2 reset forward boundaries: `/stm reset confirm true` anchors at the latest settled durable snapshot under the shared mutation lock; `stm_memory_reset` with `confirm: true` anchors at its invoking message. Later updates process only post-anchor history and pause if the anchor is absent. Reset does not erase conversation history or replay it in full.
+- Separate server, `/tui` and `/rpc` package exports for V2 integration.
+
+### Changed
+
+- Narrowed public V1/TUI declarations to STM-owned boundaries and pinned `@opencode-ai/sdk` to `1.14.25` as a production dependency. Strict STM public-declaration acceptance does not imply that the full upstream host SDK/Effect declaration closure is fixed.
+
+### Known Limits
+
+- Use a trusted single-user server; RPC routing correlation is not user authorization or a multi-user isolation guarantee. Action completion timeouts, cancellation and delivery failures do not abort or roll back mutations; busy ownership remains until the action settles.
+- Installed-tarball native multi-chunk acceptance is adapter-mediated on V2 `2.0.12`; lifecycle acceptance uses wrappers on V1 `1.14.25` and V2 `2.0.8`/`2.0.12`. This does not establish direct loader/registry bootstrap, `plugin add` installation, unwrapped root compatibility or universal OpenCode 2.x support. See [RC Readiness](docs/RC-READINESS.md) for retained evidence and remaining release qualification.
+
 ## [1.3.0] - 2026-06-24
 
 ### Added

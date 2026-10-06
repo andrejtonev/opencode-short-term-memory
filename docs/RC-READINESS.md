@@ -1,5 +1,12 @@
 # RC Readiness
 
+**Current status: 2026-10-06.** Local RC qualification is complete within the
+disclosed bounded scope for **1.4.0-rc.1**, dist-tag **rc**. Publication has not
+occurred; final `dev` commit/push identity is recorded externally by the
+finalization procedure. See
+[RC finalization](#rc-finalization-2026-10-06) for evidence and limits. Earlier
+sections and pending checklists preserve historical findings, not current gaps.
+
 Recorded: **2026-10-05**. Recommendation: **not RC-ready**. Native integration
 passes, but reproducible tests, installation, compatibility and release identity
 remain unresolved. This records the prior audit, not a new build or live run;
@@ -423,6 +430,118 @@ immutable candidate identity and repeatable gates. These remain acceptance crite
 Investigation artifact (read, not updated by this edit):
 `/home/dev/workspace/opencode-work/opencode-short-term-memory-v2-forced-update/2026-10-05--effect-delivery-resolution.html`.
 Only this document was edited/formatted; no build, live run or commit for this unit.
+
+## Native Gate Closure Follow-Up: 2026-10-06
+
+**Native gate closed at bounded adapter-mediated installed-tarball scope on host
+2.0.12; not yet fully RC-ready or published.** This supersedes earlier open native
+multi-chunk and wrapper-lifecycle gaps without rewriting historical failures. No
+build or live acceptance was rerun for this documentation-only update.
+
+| Component/Logic Block | Current Findings/Hypothesis                                                                                    | Implications                                                                                                     | Verification Status                                                                           |
+| --------------------- | -------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
+| Native update         | Run `09083b04-e9c3-4ff9-bff1-50a43fc0e8ee` PASS in 6,775 ms: three chunks, 60 records, zero partial fragments. | Closes installed native persistence/progress/UI gate on 2.0.12, not direct loader or registry bootstrap.         | Retained JSON and harness assertions inspected; acceptance complete, no failures.             |
+| Host lifecycle        | Same tarball passes wrapper lifecycle on V1 1.14.25 and V2 2.0.8/2.0.12.                                       | Closes wrapper lifecycle only, not unwrapped root compatibility, bootstrap or memory-hook behavior across hosts. | Verified `stm-production-host-load-ebAGJM/evidence.json`: all three PASS, no failures.        |
+| Release identity      | Tested package remains 1.3.0; no final prerelease commit/tarball identity assigned.                            | Remaining work is release qualification, not additional native scenarios.                                        | Native/matrix artifact hashes and installed versions inspected; final identity/gates pending. |
+
+**Native evidence:**
+`/home/dev/workspace/opencode-work/opencode-short-term-memory-v2-forced-update/native-multichunk-sOxoMH/evidence.json`.
+Exactly one native `session.command({sessionID, name: 'stm', text: 'update'})`
+triggered three deterministic fixture-backed memory generations. All assertions
+passed: checkpoints at records 19/39/59, valid persisted memory and final checkpoint
+bytes, rendered cumulative 3-chunk/60-record progress, unchanged durable history
+and installed product bytes. `costConsumed: 0`, `globalBudgetChanged: false`,
+`tuiStopped: true`, `serverExit: 130` and `socketRemoved: true` record cost and cleanup.
+The exact recorded command, **not rerun here**, was:
+
+```bash
+/usr/bin/timeout --kill-after=5s 125s /home/dev/.bun/bin/bun fixtures/v2-generation-probe/tui-output/native-multichunk-acceptance.ts /tmp/opencode/stm-7835360-host-matrix.tgz
+```
+
+**Shared artifact:** `/tmp/opencode/stm-7835360-host-matrix.tgz`, version **1.3.0**,
+SHA256 `e99c6fc6e64836f06e64155d2c0dbbd9f8477ec8fa11bad547db2a79cd5c1155`.
+Verified matrix evidence:
+`/home/dev/workspace/opencode-work/opencode-short-term-memory-v2-forced-update/stm-production-host-load-ebAGJM/evidence.json`.
+Native loading uses harness-owned default-only role re-exports of unmodified
+production-installed modules, without checkout symlinks or host cache seeding.
+The matrix uses transparent lifecycle wrappers; V1 may bypass its Node launcher.
+Neither proves `plugin add`, direct loader/registry bootstrap or unwrapped root
+compatibility. Keep these limitations, upstream SDK declaration limits and the
+historical operational/trust limits disclosed; do not add bootstrap scenarios as
+new RC gates.
+
+**Earlier remaining finite release checklist (before RC finalization below):**
+
+1. **Release owner:** choose a prerelease version and non-`latest` dist-tag.
+   Acceptance: explicit candidate version/tag and deliberate manifest/lock scope.
+2. **Docs owner; depends on 1:** finalize changelog and known limitations, including
+   the bounded adapter/wrapper scope and unverified bootstrap paths.
+   Acceptance: release claims match retained evidence, without expanded gates.
+3. **Release owner; depends on 1-2:** finalize the committed candidate and tarball
+   identity; run the existing package/static gates against that final candidate.
+   Acceptance: exact commit, tarball digest and retained package/static results,
+   linked to the existing bounded acceptance evidence. Publication requires
+   separate authorization; this update performs no commit, push or release.
+
+Investigation artifact (inspected, not modified):
+`/home/dev/workspace/opencode-work/opencode-short-term-memory-v2-forced-update/2026-10-06--focused-rc-bring-up.html`.
+
+## RC Finalization: 2026-10-06
+
+**Local RC qualification complete within disclosed scope; not published.** The
+approved version is **1.4.0-rc.1**, with non-`latest` npm dist-tag **rc**. Dependency
+pins, root `bun.lock` and fixture locks are unchanged. This documentation unit
+records existing results; it performs no build, package/live run, commit or push.
+
+| Component/Logic Block | Current Findings/Hypothesis                                                                                                                 | Implications                                                                                   | Verification Status                                                                                    |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| Metadata/locks        | Approved version/tag finalized; dependency and fixture locks unchanged.                                                                     | No dependency upgrades or lock churn.                                                          | Manifest inspected; lock diffs empty; finalization artifact inspected.                                 |
+| Checkout gates        | `check:package` PASS: build, root typecheck, 715 pass/0 fail, 3,177 assertions; both fixture checks, six-file Prettier and diff check PASS. | Existing checkout qualification complete.                                                      | Lead-recorded results, not rerun here.                                                                 |
+| Clean package         | `cgrv6F` PASS: 283 production packages, four public runtime imports, strict TUI and STM public declarations.                                | Clean package acceptance, not host activation or full upstream SDK declaration correctness.    | Retained JSON inspected; Bun 1.3.14 and TypeScript 5.9.3 verified there.                               |
+| Native/matrix linkage | Lead verified 61 published `dist`/config files byte-identical to the live-qualified baseline.                                               | Existing bounded native/wrapper evidence applies to unchanged product bytes; no new live runs. | Lead's per-file extraction equality assertion retained in external HTML, not independently rerun here. |
+| Git/publication       | Final `dev` commit/push identity is recorded externally by the finalization procedure.                                                      | Explicit user authorization covers normal push; publication is separate.                       | This record is prepared before commit; it does not assert that push has occurred.                      |
+
+**Candidate:** `/tmp/opencode/stm-1.4.0-rc.1.tgz`, SHA256
+`d6c5efeaf7d5bc15053c8ccf98215e043f598138a0b05924cb4cfe06e2edce93`.
+Clean package evidence: `/tmp/opencode/stm-package-acceptance-cgrv6F/evidence.json`;
+retained copy: `/tmp/opencode/stm-package-acceptance-cgrv6F/artifact.tgz`. The JSON
+confirms candidate version/tag, digest and empty initial caches. Normal Bun trust
+policy blocked one postinstall; installation nevertheless exited 0. Diagnostic
+`bun pm untrusted` exited 1 because no production lockfile existed and was explicitly
+allowed nonzero: the blocked package identity remains unknown. This is an unavailable
+diagnostic, not a suppressed install failure; no trust policy changes were made.
+
+Recorded gate and packaging commands, **not rerun for this documentation edit**:
+
+```bash
+PATH=/home/dev/.bun/bin:$PATH /home/dev/.bun/bin/bun run check:package
+/home/dev/.bun/bin/bun node_modules/typescript/bin/tsc -p fixtures/v2-generation-probe/tsconfig.json --noEmit
+/home/dev/.bun/bin/bun node_modules/typescript/bin/tsc -p fixtures/v2-generation-probe/tui-output/tsconfig.json --noEmit
+/home/dev/.bun/bin/bun node_modules/prettier/bin/prettier.cjs --check package.json CHANGELOG.md README.md docs/RC-READINESS.md test/production-host-load-matrix.ts fixtures/v2-generation-probe/tui-output/native-multichunk-acceptance.ts
+git diff --check
+/home/dev/.bun/bin/bun pm pack --ignore-scripts --filename /tmp/opencode/stm-1.4.0-rc.1.tgz
+/usr/bin/timeout --kill-after=5s 195s /home/dev/.bun/bin/bun scripts/package-acceptance.ts /tmp/opencode/stm-1.4.0-rc.1.tgz
+sha256sum /tmp/opencode/stm-1.4.0-rc.1.tgz
+```
+
+Pack lifecycle scripts were deliberately omitted after separately passing the
+existing build/package gates; this does not prove `prepare` or host bootstrap.
+The lead records the required toolchain-check attempt as absent in this TypeScript
+repository. Native evidence remains `native-multichunk-sOxoMH/evidence.json` and
+matrix evidence `stm-production-host-load-ebAGJM/evidence.json` under the external
+investigation directory above, linked through the 61 unchanged published files to
+baseline `/tmp/opencode/stm-7835360-host-matrix.tgz`. This is bounded existing
+adapter-mediated native acceptance on 2.0.12 and wrapper lifecycle on V1 1.14.25
+and V2 2.0.8/2.0.12, **not** direct loader/`plugin add`/registry bootstrap or universal
+2.x support. Historical upstream declaration, timeout and single-user trust limits
+remain disclosed; no additional bootstrap or live scenarios were introduced.
+
+The final Git commit/push identity and archive-digest mapping cannot be
+self-embedded in that commit. They will be retained in the external HTML artifact
+`/home/dev/workspace/opencode-work/opencode-short-term-memory-v2-forced-update/2026-10-06--focused-rc-bring-up.html`
+and the completion report after the release owner commits and normally pushes
+`dev` under the explicit user authorization recorded there. This unit does not
+exercise that authorization; **no npm publish** is performed or authorized.
 
 ## References
 
