@@ -47,6 +47,20 @@ export function bounded<T>(
   return operation(AbortSignal.timeout(timeoutMs));
 }
 
+export function isolatedServiceCommand(
+  env: IsolatedServiceOptions["env"],
+  command: readonly string[] = [PROBE_SERVICE_BINARY, "serve", "--service"],
+): string[] {
+  const assignments = Object.entries(env).map(([key, value]) => {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
+      throw new Error(`Invalid environment variable name: ${key}`);
+    }
+    return `${key}=${value}`;
+  });
+  // Service.ensure merges parent variables; clear them at the actual server exec boundary.
+  return ["/usr/bin/env", "-i", ...assignments, "PATH=/usr/bin:/bin", ...command];
+}
+
 export async function startIsolatedService(options: IsolatedServiceOptions): Promise<IsolatedServiceState> {
   const previousCwd = process.cwd();
   let endpoint: Endpoint;
@@ -55,7 +69,7 @@ export async function startIsolatedService(options: IsolatedServiceOptions): Pro
     endpoint = await Service.ensure({
       file: options.serviceFile,
       version: PROBE_SERVICE_VERSION,
-      command: [PROBE_SERVICE_BINARY, "serve", "--service"],
+      command: isolatedServiceCommand(options.env),
       env: options.env,
     });
   } finally {

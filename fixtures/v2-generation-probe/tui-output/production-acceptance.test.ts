@@ -8,9 +8,9 @@ import { LayerNode } from "@opencode/util/effect/layer-node";
 import { Effect } from "effect";
 import { Schema } from "effect";
 import { SessionTransfer } from "@opencode/schema/session-transfer";
+import { redactDiagnostic, serializeEvidence, serializeFailure } from "../diagnostic-redaction.js";
 import {
   observeFailure,
-  serializeFailure,
   stageInstalledPackage,
   tuiReadiness,
   warmCommandInventory,
@@ -610,6 +610,97 @@ test("redaction covers credentials in fields, free text, Error causes and termin
     expect(json + screen).not.toContain(secret);
   expect((observation.error as any).diagnostic.Authorization).toBe("[redacted]");
   expect(screen).toBe("[redacted] Basic [redacted] Bearer [redacted]");
+});
+
+test("evidence redacts nested telemetry credentials without truncating records or acceptance counts", async () => {
+  const credentials = {
+    Authorization: "arbitrary-auth-value",
+    cookie: "arbitrary-cookie-value",
+    password: "arbitrary-password-value",
+    secret: "arbitrary-secret-value",
+    token: "arbitrary-token-value",
+    api_key: "arbitrary-api-value",
+    credentials: { nested: "arbitrary-credential-value" },
+  };
+  const evidence = {
+    verdict: "pass",
+    telemetryRecordCount: 80,
+    manualExecutionEvents: 160,
+    manualTelemetry: Array.from({ length: 80 }, (_, seq) => ({
+      seq,
+      details: {
+        nested: { ...credentials },
+        text: "Basic arbitrary-basic Bearer arbitrary-bearer https://user:arbitrary-url@localhost/path",
+        known: "explicit-private-value",
+        long: "x".repeat(5_000),
+      },
+    })),
+  };
+  // Evidence accepts plain parsed JSON telemetry; raw Errors use serializeFailure instead.
+  const json = serializeEvidence(JSON.parse(JSON.stringify(evidence)), ["explicit-private-value"]);
+  const result = JSON.parse(json);
+  expect(result.verdict).toBe("pass");
+  expect(result.telemetryRecordCount).toBe(80);
+  expect(result.manualExecutionEvents).toBe(160);
+  expect(result.manualTelemetry).toHaveLength(80);
+  expect(result.manualTelemetry.map((row: any) => row.seq)).toEqual(evidence.manualTelemetry.map((row) => row.seq));
+  expect(result.manualTelemetry[79].details.long).toHaveLength(5_000);
+  expect(result.manualTelemetry[79].details.nested).toEqual(
+    Object.fromEntries(Object.keys(credentials).map((key) => [key, "[redacted]"])),
+  );
+  for (const secret of ["arbitrary-", "user:", "explicit-private-value"]) expect(json).not.toContain(secret);
+  expect(result.manualTelemetry[79].details.text).toBe(
+    "Basic [redacted] Bearer [redacted] https://[redacted]@localhost/path",
+  );
+  expect(evidence.manualTelemetry[0]!.details.known).toBe("explicit-private-value");
+  expect(JSON.parse(serializeEvidence(credentials))).toEqual(
+    Object.fromEntries(Object.keys(credentials).map((key) => [key, "[redacted]"])),
+  );
+  const source = await readFile(new URL("../production-update-probe.ts", import.meta.url), "utf8");
+  expect(source).toContain("JSON.stringify(serializeFailure(error, secrets))");
+  expect(source).toContain("${serializeEvidence(evidence, secrets())}");
+  expect(source).toContain("new Error(redactDiagnostic(JSON.stringify(failures), secrets()))");
+  expect(source).toContain("const auth = service?.endpoint.auth");
+  expect(source).toContain('Buffer.from(`${auth.username}:${auth.password}`).toString("base64")');
+  expect(source).not.toContain("OPENCODE_PASSWORD");
+  expect(source).not.toMatch(/errorText\(error\)(?!:)/);
+});
+
+test("explicit endpoint credentials redact raw nested errors and plain JSON evidence", () => {
+  const endpoint = { auth: { username: "opencode", password: "generated-endpoint-private" } };
+  const secrets = [
+    endpoint.auth.password,
+    Buffer.from(`${endpoint.auth.username}:${endpoint.auth.password}`).toString("base64"),
+  ];
+  const error = new Error("safe outer diagnostic", {
+    cause: Object.assign(new Error(`failed with ${secrets[0]}`), { diagnostic: { nested: { text: secrets[1] } } }),
+  });
+  const json = JSON.stringify(serializeFailure(error, secrets));
+  const evidence = serializeEvidence(
+    { failure: JSON.parse(json), telemetry: [{ details: { text: secrets[0] } }] },
+    secrets,
+  );
+  for (const secret of secrets) expect(json + evidence).not.toContain(secret);
+  expect(JSON.parse(json).cause.message).toBe("failed with [redacted]");
+  expect(JSON.parse(evidence).telemetry[0].details.text).toBe("[redacted]");
+  expect(JSON.parse(json).message).toBe("safe outer diagnostic");
+});
+
+test("text redaction covers dotted Bearer tokens, query credentials and quoted assignments without changing safe text", () => {
+  expect(redactDiagnostic("Bearer header.payload.signature", [])).toBe("Bearer [redacted]");
+  const keys = ["api_key", "api-key", "apikey", "token", "access_token", "password", "secret", "sig"];
+  for (const key of keys) {
+    const url = `https://localhost/path?${key}=private-query&safe=visible#anchor`;
+    expect(redactDiagnostic(url, [])).toBe(`https://localhost/path?${key}=[redacted]&safe=visible#anchor`);
+    for (const assignment of [`${key}=private-value`, `"${key}": "private value"`, `'${key}' = 'private value'`]) {
+      expect(redactDiagnostic(assignment, [])).not.toContain("private");
+      const evidence = serializeEvidence({ text: assignment });
+      expect(JSON.parse(evidence).text).toBe(redactDiagnostic(assignment, []));
+    }
+  }
+  const safe = "receiver failed: status=500 command=stm https://localhost/path?safe=visible";
+  expect(redactDiagnostic(safe, [])).toBe(safe);
+  expect(JSON.parse(serializeEvidence({ text: safe })).text).toBe(safe);
 });
 
 test("diagnostics are JSON-safe and bounded without invoking getters or toJSON", () => {

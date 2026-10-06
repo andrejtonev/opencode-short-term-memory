@@ -2,6 +2,7 @@ import { mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import { redactDiagnostic, serializeEvidence, serializeFailure } from "./diagnostic-redaction.js";
 
 import { captureSetupSnapshot, PROBE_MEMORY_SENTINEL, PROBE_MODEL_ID, PROBE_PROVIDER_ID } from "./index.js";
 import { evaluateSetupEvidence, SETUP_CALLS } from "./setup-evidence.js";
@@ -103,8 +104,8 @@ interface Evidence {
   readonly expectedDiagnosticsSettings: ReturnType<typeof expectedDiagnosticsSettings> | null;
 }
 
-function errorText(error: unknown): string {
-  return error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+function errorText(error: unknown, secrets: readonly string[]): string {
+  return JSON.stringify(serializeFailure(error, secrets));
 }
 
 async function exists(path: string): Promise<boolean> {
@@ -224,6 +225,12 @@ async function run(): Promise<Evidence> {
   const failures: string[] = [];
   let sandbox = "";
   let service: IsolatedServiceState | undefined;
+  const secrets = (): readonly string[] => {
+    const auth = service?.endpoint.auth;
+    return auth === undefined
+      ? []
+      : [auth.password, Buffer.from(`${auth.username}:${auth.password}`).toString("base64")];
+  };
   let productionPluginPath = "";
   let productionWrapperDirectory = "";
   let productionWrapperMarkers = "";
@@ -326,7 +333,10 @@ async function run(): Promise<Evidence> {
           const before = await snapshot();
           if (before.configs.jsonc !== initial.configs.jsonc || before.configs.json !== null)
             throw new Error("fixture config changed before removal");
-          const records = parseProbeTelemetryJsonl(await readFile(telemetryPath, "utf8"), { runId, mode: "ordinary" });
+          const records = parseProbeTelemetryJsonl(await readFile(telemetryPath, "utf8"), {
+            runId,
+            mode: "ordinary",
+          });
           await rm(configPath);
           removal = {
             path: configPath,
@@ -377,7 +387,7 @@ async function run(): Promise<Evidence> {
         const boundary = JSON.parse(await readFile(boundaryPath, "utf8")) as { anchorID?: unknown };
         if (typeof boundary.anchorID === "string") resetBoundaryAnchor = boundary.anchorID;
       } catch (error) {
-        failures.push(`reset boundary unavailable: ${errorText(error)}`);
+        failures.push(`reset boundary unavailable: ${errorText(error, secrets())}`);
       }
       await submitOrdinaryPrompt(service.client, session.id, POST_RESET_PROMPT, OPERATION_TIMEOUT_MS);
       observableOutput = await submitOrdinaryPrompt(
@@ -476,14 +486,14 @@ async function run(): Promise<Evidence> {
       }
     }
   } catch (error) {
-    failures.push(errorText(error));
+    failures.push(errorText(error, secrets()));
   } finally {
     if (service !== undefined) {
       try {
         await bounded(() => stopIsolatedService(service!), OPERATION_TIMEOUT_MS);
         cleanupCompleted = true;
       } catch (error) {
-        failures.push(`service cleanup failed: ${errorText(error)}`);
+        failures.push(`service cleanup failed: ${errorText(error, secrets())}`);
       }
     }
     if (cleanupCompleted) {
@@ -491,7 +501,7 @@ async function run(): Promise<Evidence> {
         const telemetryText = await readFile(join(sandbox, "telemetry.jsonl"), "utf8");
         assert(telemetryText.includes('"phase":"complete"'), "fixture cleanup completion was not observed", failures);
       } catch (error) {
-        failures.push(`cleanup evidence unavailable: ${errorText(error)}`);
+        failures.push(`cleanup evidence unavailable: ${errorText(error, secrets())}`);
       }
     }
   }
@@ -573,7 +583,7 @@ async function run(): Promise<Evidence> {
       failures.push(...ordinaryEvaluator.failures);
     }
   } catch (error) {
-    failures.push(`telemetry/evaluator: ${errorText(error)}`);
+    failures.push(`telemetry/evaluator: ${errorText(error, secrets())}`);
   }
   const productionWrapperSetupEntered =
     productionWrapperMarkers !== "" && (await exists(join(productionWrapperMarkers, "setup-entered")));
@@ -585,7 +595,11 @@ async function run(): Promise<Evidence> {
     productionWrapperMarkers !== "" && (await exists(join(productionWrapperMarkers, "automatic-context-suppressed")));
   if (SCENARIO === "setup") {
     if (setupEvidence !== null) {
-      setupEvidence = { ...setupEvidence, records: telemetryRecords, suppressionObserved: automaticContextSuppressed };
+      setupEvidence = {
+        ...setupEvidence,
+        records: telemetryRecords,
+        suppressionObserved: automaticContextSuppressed,
+      };
       setupEvaluator = evaluateSetupEvidence(setupEvidence);
       failures.push(...setupEvaluator.failures);
     } else failures.push("setup lifecycle evidence unavailable");
@@ -651,13 +665,13 @@ async function run(): Promise<Evidence> {
     expectedDiagnosticsSettings: SCENARIO === "manual-update" ? diagnosticsSettings : null,
     resetBoundaryAnchor,
   };
-  await writeFile(evidencePath, `${JSON.stringify(evidence, null, 2)}\n`);
+  await writeFile(evidencePath, `${serializeEvidence(evidence, secrets())}\n`);
   if (failures.length === 0 && sandbox) await rm(sandbox, { recursive: true, force: true });
   console.log(`run ID: ${runId}`);
   console.log(`verdict: ${evidence.verdict}`);
   console.log(`evidence: ${evidencePath}`);
   console.log(`sandbox: ${evidence.sandboxDisposition}${sandbox ? ` (${sandbox})` : ""}`);
-  if (failures.length > 0) throw new Error(failures.join("; "));
+  if (failures.length > 0) throw new Error(redactDiagnostic(JSON.stringify(failures), secrets()));
   return evidence;
 }
 
