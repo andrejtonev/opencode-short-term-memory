@@ -10,15 +10,15 @@ Automatically summarizes conversation context into structured session memory and
 - **V2:** Automatically updates from new visible conversation text through the context hook, then injects stored memory into system context. Updates require an assistant message in the delta and respect checkpoints and reset boundaries. The compaction hook injects existing stored memory for preservation; it does **not** itself trigger an update. There is no V1-style idle timer, every-N-turn schedule, DCP-compress trigger or parent-memory snapshot inheritance.
 - **V2 controls:** Implements native `/stm` (default status), `/stm status`, `show`, `logs`, `settings`, `update`, `setup` and `reset`, plus the seven `stm_memory_*` tools listed below. Every command requires the configured TUI companion to be connected, viewing the invoking session in the matching project/workspace, and admitted before any action runs. Without an available receiver, admission fails within three seconds and no action runs. Headless users can still use the tools. The legacy `short_term_memory` tool is not registered.
 - **V2 model:** Uses the current session model, not `memoryModel` overrides. `summarizerMode: "clean"` uses direct text generation without a side session; `"active"` uses session generation.
-- **Version scope:** `1.4.0-rc.1` is the approved candidate for the intended `rc` npm tag; it is not published. The package pins remain unchanged: V1 plugin/SDK `1.14.25`, V2 plugin API `2.0.8` and V2 generation-probe CLI/plugin host `2.0.12`. Staged built-package full-command live acceptance passes on `2.0.12` (all seven commands, 16 connected states and four headless refusals). The installed `1.3.0` test tarball passed wrapper lifecycle acceptance on all three hosts and native committed multi-chunk acceptance on `2.0.12` (3 chunks, 60 records). These passes do not establish direct loader/registry bootstrap, universal OpenCode 2.x support or final candidate release qualification. See [RC Readiness](docs/RC-READINESS.md) for evidence and limits.
+- **Version scope:** `1.4.0-rc.2` is the current unpublished candidate for the intended `rc` npm tag. Published `1.4.0-rc.1` passed the isolated V2 registry installation/setup/conversation/memory/injection workflow on `2.0.12`, but failed V1 native command integration. The corrected unpublished V1 candidate passed that workflow on `1.14.25` using a locally installed tarball; that tarball still carried rc.1 metadata, with all 61 packaged runtime/config files byte-identical to rc.2. The exact unpublished rc.2 tarball passed the V2 workflow on `2.0.12` through native named-file package bootstrap, with all 64 packaged files matching; this was not registry installation or `plugin add` acceptance. These bounded candidate passes used deterministic models, not paid semantic-model quality checks, and do not establish rc.2 publication. The package pins remain unchanged: V1 plugin/SDK `1.14.25`, V2 plugin API `2.0.8` and V2 generation-probe CLI/plugin host `2.0.12`. Staged built-package full-command live acceptance passes on `2.0.12` (all seven commands, 16 connected states and four headless refusals). The installed `1.3.0` test tarball passed wrapper lifecycle acceptance on all three hosts and native committed multi-chunk acceptance on `2.0.12` (3 chunks, 60 records). These passes do not establish universal OpenCode 2.x support or final candidate release qualification. See [RC Readiness](docs/RC-READINESS.md) for evidence and limits.
 
 **V2 configuration:** The shared config files and defaults below are read by both generations, but the table's behavioral descriptions are V1-specific. V2 uses `enabled`, `summarizerMode`, `maxMemoryLength`, `maxUpdateInputLength`, `maxDeltaMessages` (per-chunk message bound) and `memoryDir`. `memoryModel`, `cleanFallbackToActiveSession`, `includeAgentsMdOnFirstUpdate`, `injectInSubagents`, `enableLegacyPeriodicSystemTransform`, `sideSessionRetries`, `remindEveryN`, `debounceMs`, `debug`, `logMaxLines` and `collapseAssistantBursts` are inactive in the V2 runtime. Use `stm_memory_settings` to distinguish resolved config from effective V2 behavior and inactive settings.
 
-**V2 TUI loading:** On the pinned host, add the same package entry to both the server's `opencode.json` and the CLI/TUI's global `cli.json` `plugins` lists, preserving existing entries. For a minimal global configuration, put the following in each of `~/.config/opencode/opencode.json` and `~/.config/opencode/cli.json` (or the corresponding `$XDG_CONFIG_HOME/opencode/` paths). This candidate configuration is a syntax example until `1.4.0-rc.1` is published:
+**V2 TUI loading:** On the pinned host, add the same package entry to both the server's `opencode.json` and the CLI/TUI's global `cli.json` `plugins` lists, preserving existing entries. For a minimal global configuration, put the following in each of `~/.config/opencode/opencode.json` and `~/.config/opencode/cli.json` (or the corresponding `$XDG_CONFIG_HOME/opencode/` paths). This candidate configuration is a syntax example until `1.4.0-rc.2` is published:
 
 ```json
 {
-  "plugins": ["@atonev/opencode-short-term-memory@1.4.0-rc.1"]
+  "plugins": ["@atonev/opencode-short-term-memory@1.4.0-rc.2"]
 }
 ```
 
@@ -32,21 +32,21 @@ The packaged plugin supplies separate server, `/tui` and `/rpc` exports resolved
 
 ### V2
 
-The [pinned authoritative CLI specification](https://github.com/anomalyco/opencode/blob/2670273ff17da96f85c5826ced57aa1b368754fa/packages/cli/src/commands/commands.ts) defines `plugin add <package>` as installing a plugin and adding it to global configuration, with no `--global` flag. The following uses the approved candidate version and remains a syntax example until `1.4.0-rc.1` is published.
+The [pinned authoritative CLI specification](https://github.com/anomalyco/opencode/blob/2670273ff17da96f85c5826ced57aa1b368754fa/packages/cli/src/commands/commands.ts) defines `plugin add <package>` as installing a plugin and adding it to global configuration, with no `--global` flag. The following uses the current candidate version and remains a syntax example until `1.4.0-rc.2` is published.
 
 ```bash
-opencode plugin add '@atonev/opencode-short-term-memory@1.4.0-rc.1'
+opencode plugin add '@atonev/opencode-short-term-memory@1.4.0-rc.2'
 ```
 
-Verify both server and TUI configuration against [V2 TUI loading](#v1--v2-support) above, preserving existing entries. The CLI specification and installed wrapper lifecycle passes do not prove that this command configures both loaders correctly for this package; direct loader/registry bootstrap remains unverified.
+Verify both server and TUI configuration against [V2 TUI loading](#v1--v2-support) above, preserving existing entries. The published rc.1 workflow verified native registry installation and loading on `2.0.12` with the same package entry in both configurations; it does not establish that `plugin add` alone configures both loaders. The exact unpublished rc.2 tarball separately passed native named-file bootstrap and the V2 workflow on `2.0.12`, not registry installation or `plugin add` acceptance.
 
 ### V1
 
-Use config-based installation; V1 CLI installation syntax is not verified here. Add the package to the singular `plugin` list in project `opencode.json` or global `~/.config/opencode/opencode.json` (or `$XDG_CONFIG_HOME/opencode/opencode.json`), preserving existing entries. This candidate configuration is a syntax example until `1.4.0-rc.1` is published:
+Use config-based installation; V1 CLI installation syntax is not verified here. Add the package to the singular `plugin` list in project `opencode.json` or global `~/.config/opencode/opencode.json` (or `$XDG_CONFIG_HOME/opencode/opencode.json`), preserving existing entries. This candidate configuration is a syntax example until `1.4.0-rc.2` is published:
 
 ```json
 {
-  "plugin": ["@atonev/opencode-short-term-memory@1.4.0-rc.1"]
+  "plugin": ["@atonev/opencode-short-term-memory@1.4.0-rc.2"]
 }
 ```
 
@@ -55,6 +55,8 @@ V1 installs configured npm plugins automatically using Bun at startup. Packages 
 ### Post-install
 
 Run `/stm setup` for confirmation guidance, then `/stm setup confirm true` to create a project-local `.opencode/stm.jsonc` example. In V2, first configure and connect the TUI companion above; unconfirmed setup only displays refusal/guidance and runs no setup action. Headless users can ask the agent to call `stm_memory_setup` with `confirm: true`. Both generations create the shared example only in the project, never write global config and refuse to overwrite an existing `stm.jsonc` or `stm.json`. In V2, check `/stm settings` or `stm_memory_settings` for effective settings rather than assuming all example keys apply. You can also copy `stm.example.jsonc` manually, then restart OpenCode.
+
+Restart OpenCode after setup or configuration edits before checking settings or testing behavior. V1 caches resolved configuration for up to 60 seconds, so an immediate check without restarting can still show the previous settings.
 
 ## Configuration (V1 behavior)
 
@@ -97,7 +99,9 @@ In V1, memory summarization and injection is fully automated — the plugin watc
 | `/stm setup`              | Show safe project-local confirmation guidance; no config is created.                                                                                                                        |
 | `/stm setup confirm true` | Create `.opencode/stm.jsonc`; never overwrite existing config.                                                                                                                              |
 
-All V2 commands, including reads and unconfirmed guidance, require TUI receiver admission before execution. `/stm setup confirm true` and `/stm reset confirm true` require the exact literal `confirm true`; unconfirmed V2 setup/reset never invoke their actions. Read-only commands do not generate model output; `/stm update` can invoke the summarizer.
+In the corrected V1 candidate, `/stm` executes the action before the model runs, then supplies the completed result to the model for display. The visible response is model-mediated, is not guaranteed verbatim and may consume inference even for read-only commands. The `stm_memory_*` tools are the headless alternative for structured action results; an agent's subsequent reply can still be model-mediated.
+
+All V2 commands, including reads and unconfirmed guidance, require TUI receiver admission before execution. `/stm setup confirm true` and `/stm reset confirm true` require the exact literal `confirm true`; unconfirmed V2 setup/reset never invoke their actions. V2 read-only commands do not generate model output; `/stm update` can invoke the summarizer.
 
 **Agent tools**
 

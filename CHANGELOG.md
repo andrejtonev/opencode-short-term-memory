@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0-rc.2] - 2026-10-06
+
+### Fixed
+
+- V1 native `/stm` commands now read `arguments` and deliver completed action results through in-place mutation of `output.parts`. Native command output remains model-mediated, not model-free.
+- V1 memory injection now recognizes the user role from `chat.message` output when native input metadata omits it.
+
+The corrected V1 runtime-equivalent candidate and exact rc.2 V2 named-file candidate passed bounded deterministic workflows. rc.2 remains unpublished; registry installation verification is separate.
+
 ## [1.4.0-rc.1] - 2026-10-06
 
 Prerelease candidate for additive V2 support alongside V1. The intended npm dist-tag is `rc`, not `latest`; this entry does not establish publication or final release qualification.

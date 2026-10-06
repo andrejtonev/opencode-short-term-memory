@@ -31,17 +31,22 @@ function dcpCompressEvent(sessionID: string) {
 }
 
 async function sendUserTurn(plugin: any, sessionID: string, messageID: string, text = "continue") {
-  const output = { message: { role: "assistant", content: "ok" }, system: ["UNCHANGED_SYSTEM"] };
-  await plugin["chat.message"](
-    { sessionID, messageID, message: { id: messageID, role: "user", content: text } },
-    output,
-  );
+  const output = {
+    message: { role: "user", id: messageID },
+    parts: [{ type: "text", text }],
+    system: ["UNCHANGED_SYSTEM"],
+  };
+  await plugin["chat.message"]({ sessionID, messageID }, output);
   return output;
 }
 
 async function sendAnonymousUserTurn(plugin: any, sessionID: string, text = "continue") {
-  const output = { message: { role: "assistant", content: "ok" }, system: ["UNCHANGED_SYSTEM"] };
-  await plugin["chat.message"]({ sessionID, message: { role: "user", content: text } }, output);
+  const output = {
+    message: { role: "user" },
+    parts: [{ type: "text", text }],
+    system: ["UNCHANGED_SYSTEM"],
+  };
+  await plugin["chat.message"]({ sessionID }, output);
   return output;
 }
 
@@ -105,6 +110,31 @@ describe("delivery conversion", () => {
     for (const delivery of client.calls.noReplyDeliveries) {
       expectTaggedNoReplyDelivery(delivery, sessionID);
     }
+  });
+
+  test("native metadata-only user turn delivers persisted memory and deduplicates the output message ID", async () => {
+    const sessionID = "main-native-user";
+    const { plugin, client } = await createPlugin({ remindEveryN: 1, debug: false }, createFakeClient());
+    await writeText(memoryPathFor(sessionID), MEMORY);
+    await plugin["session.created"]({ sessionID });
+
+    const input = { sessionID };
+    const output = {
+      message: { role: "user", id: "native-user-1" },
+      parts: [{ type: "text", text: "continue" }],
+    };
+    await plugin["chat.message"](input, output);
+
+    expect(client.calls.noReplyDeliveries).toHaveLength(1);
+    expectTaggedNoReplyDelivery(client.calls.noReplyDeliveries[0], sessionID);
+    expect(client.calls.summarizerPrompts).toHaveLength(0);
+    expect(output).toEqual({
+      message: { role: "user", id: "native-user-1" },
+      parts: [{ type: "text", text: "continue" }],
+    });
+
+    await plugin["chat.message"](input, output);
+    expect(client.calls.noReplyDeliveries).toHaveLength(1);
   });
 
   test("duplicate user identity neither advances cadence nor redelivers", async () => {

@@ -1,5 +1,14 @@
 # RC Readiness
 
+**Latest status: 2026-10-06, rc.2 follow-up.** Published **1.4.0-rc.1** fails
+native V1 setup but passes the recorded V2 workflow. An unpublished corrected V1
+candidate passes all stages; the exact **1.4.0-rc.2** tarball now passes V2 native
+named-file bootstrap and all workflow stages, with passing package gates and 61
+runtime/config files identical to the V1-passed candidate. The candidate is ready
+for a focused commit within this disclosed scope, **not published**; this is not
+rc.2 registry or `plugin add` acceptance. See
+[RC.2 follow-up](#rc2-follow-up-2026-10-06); earlier status notes remain historical.
+
 **Current status: 2026-10-06.** Local RC qualification is complete within the
 disclosed bounded scope for **1.4.0-rc.1**, dist-tag **rc**. Publication has not
 occurred; final `dev` commit/push identity is recorded externally by the
@@ -542,6 +551,97 @@ self-embedded in that commit. They will be retained in the external HTML artifac
 and the completion report after the release owner commits and normally pushes
 `dev` under the explicit user authorization recorded there. This unit does not
 exercise that authorization; **no npm publish** is performed or authorized.
+
+## RC.2 Follow-Up: 2026-10-06
+
+**Corrected V1 candidate and exact rc.2 V2 PASS; ready for focused commit,
+unpublished.**
+Actual published rc.1 acceptance supersedes the earlier bounded wrapper claims:
+V1 `v1-Dr3c8X` installed/loaded but failed setup; V2 `v2-2qho8K` passed on host
+2.0.12. That historical V2 result is for **published rc.1 only**. The subsequent
+`v2-g9dFUw` run passes on the exact unpublished rc.2 tarball via native named-file
+package bootstrap, not registry installation or `plugin add`.
+
+The V1 correction aligns `command.execute.before` with native string `command`,
+plural `arguments` and mutable `output.parts`, replacing unsupported `stop`/`message`
+delivery. The action completes first; its JSON-encoded result replaces the parts
+in place as synthetic model input. Delivery is **model-mediated, not model-free**;
+the mock's ACK is not proof of result rendering. The `chat.message` guard now reads
+the role from `output.message` before falling back to input metadata, which lacks
+the native user role; transport is unchanged. The lead reports no findings from
+the narrow logic review.
+
+| Component/Logic Block | Current Findings/Hypothesis                                                                                                      | Implications                                                                                                                                                              | Verification Status                                                                                                 |
+| --------------------- | -------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| V1 candidate          | `v1-JaNUJe`: install, load, setup, run and memory all PASS in 66.666 s on V1 1.14.25.                                            | Native setup, clean side-session summarization, memory/checkpoint persistence and follow-up provider injection witnessed; not registry acceptance.                        | Retained JSON inspected; deterministic loopback model, cost 0, global budget unchanged; both host processes exited. |
+| rc.2 gates/package    | Lead reports `check:package` PASS: 716 tests, 0 failures, 3,271 assertions, plus typechecks/format; clean package `tFjAGJ` PASS. | Production-only install, four runtime imports and strict STM/TUI declarations accepted, not full upstream SDK correctness or activation.                                  | Package JSON inspected; checkout gates lead-reported, not rerun here.                                               |
+| Artifact linkage      | Lead verified all 61 rc.2 published `dist`/config files byte-identical to the V1-passed candidate.                               | Links rc.2 product bytes to corrected V1 evidence, not a new live run of rc.2.                                                                                            | Lead-reported comparison, not independently rerun here.                                                             |
+| V2 candidate          | `v2-g9dFUw`: exact rc.2 install, load, setup, run and memory all PASS in 49.453 s on V2 2.0.12; all 64 packaged files match.     | Native named-file bootstrap, rendered setup/update/show/status, memory/checkpoint persistence and follow-up injection witnessed; not registry or `plugin add` acceptance. | Retained JSON inspected; deterministic fixture, cost 0, global budget unchanged; host exited and tmux stopped.      |
+| Release identity      | Candidate ready for focused commit within the disclosed V1-linked/V2-tested scope; rc.2 unpublished.                             | Commit identity is recorded externally after finalization, not self-embedded here; publication remains separate.                                                          | No commit, push or publication performed for this documentation unit.                                               |
+
+**rc.2 tarball:**
+`/home/dev/workspace/opencode-work/stm-published-rc-e2e/stm-1.4.0-rc.2.tgz`, SHA256
+`303a2b052befb4125459125e2a0010eeda601f23b8fd68d2c52eeafae925c33c`.
+Clean package evidence: `/tmp/opencode/stm-package-acceptance-tFjAGJ/evidence.json`.
+Normal Bun policy blocked one postinstall; installation passed, while
+`bun pm untrusted` could not identify it because no lockfile existed. No trust
+changes or host-bootstrap claim follow from that package PASS.
+
+**Final distribution archive:**
+`/home/dev/workspace/opencode-work/stm-published-rc-e2e/stm-1.4.0-rc.2-final.tgz`,
+SHA256 `1103c6bbf46437fdfe5a323a09614b886fd450fafd2a4df5012a7d0e1cfd4b88`.
+Archive comparison confirms all 63 non-README files byte-identical to the original
+V2-passed rc.2 tarball above; only `package/README.md` differs, reflecting the final
+qualification documentation. Code and metadata are unchanged. Live V2 and clean
+install `tFjAGJ` evidence remain tied to the **original test archive**, not reruns
+on this final distribution archive. Preserve both archive identities; the focused
+commit/push identity and final archive mapping are retained by the external
+finalization procedure, not self-embedded here.
+
+V1 evidence:
+`/home/dev/workspace/opencode-work/stm-published-rc-e2e/v1-JaNUJe/evidence.json`.
+That run installed `stm-v1-contracts-fixed-candidate.tgz`, an unpublished corrected
+candidate still carrying rc.1 metadata, **not** the later rc.2 tarball. It used
+the directly installed V1 native binary because Node was absent, without STM
+adapters. V2 evidence:
+`/home/dev/workspace/opencode-work/stm-published-rc-e2e/v2-2qho8K/evidence.json`.
+Deterministic model evidence proves functional plumbing, not summarization quality.
+
+**Exact rc.2 V2 evidence:**
+`/home/dev/workspace/opencode-work/stm-published-rc-e2e/v2-g9dFUw/evidence.json`,
+run `a0ad45e0-eaa3-46ad-83db-9b33b3c69f26`, **PASS in 49.453 s**. Normal host
+bootstrap installs the named-file package into fresh caches with all 64 packaged
+files matching the tarball; no STM adapters or cache seeding are used. Native
+setup refusal and confirmed creation, conversation, committed update, rendered
+show/status, production memory schema/sentinel/checkpoint/commit log and follow-up
+provider injection all pass. The record's top-level `spec` remains the registry
+mode default rc.1; its candidate manifest, digest and installation mode identify
+the actual tested **rc.2** artifact. `plugin add` is explicitly **NOTRUN** because
+the pinned CLI rejects file targets; no rc.2 registry-bootstrap claim follows.
+
+`costConsumed: 0`, `paidInference: false` and `globalBudgetChanged: false` are
+recorded. Host PID `2881654` exited with code `130`; tmux `kill-server` succeeded
+and `list-sessions` confirmed shutdown. The socket file remained after cleanup;
+it is a stale file, not evidence of a running server. The tarball SHA256 above is
+unchanged. Final commit identity and its artifact mapping are recorded externally
+in the investigation artifact after the release owner's focused commit, rather
+than assigning a self-referential hash here.
+
+Recorded V1, V2 and package commands, **not rerun for this documentation edit**:
+
+```bash
+timeout --signal=TERM --kill-after=5s 350s /home/dev/.bun/bin/bun scripts/published-v1-e2e.ts /home/dev/workspace/opencode-work/stm-published-rc-e2e/stm-v1-contracts-fixed-candidate.tgz
+timeout --kill-after=5s 350s /home/dev/.bun/bin/bun scripts/published-v2-e2e.ts /home/dev/workspace/opencode-work/stm-published-rc-e2e/stm-1.4.0-rc.2.tgz
+PATH=/home/dev/.bun/bin:$PATH /home/dev/.bun/bin/bun run check:package
+/usr/bin/timeout --kill-after=5s 195s /home/dev/.bun/bin/bun scripts/package-acceptance.ts /home/dev/workspace/opencode-work/stm-published-rc-e2e/stm-1.4.0-rc.2.tgz
+```
+
+Investigation artifact (inspected, not modified):
+`/home/dev/workspace/opencode-work/stm-published-rc-e2e/2026-10-06--investigation.html`.
+Only this document was edited/formatted; no build, live/package execution, commit,
+push or publication was performed for this unit. The next milestone is the release
+owner's focused commit with externally retained identity and artifact mapping;
+publication remains a separate authorized action.
 
 ## References
 

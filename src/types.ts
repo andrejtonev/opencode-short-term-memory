@@ -59,6 +59,7 @@ export interface ChatMessageOutput {
   id?: string;
   message?: {
     id?: string;
+    role?: string;
     content?: string;
     parts?: unknown[];
   };
@@ -88,28 +89,12 @@ export interface CompactionOutput {
   prompt?: string;
 }
 
-// SDK base: { command: string; sessionID: string; arguments: string }
-// Runtime may pass richer shapes, so we type permissively.
 export interface CommandExecuteBeforeInput {
-  command?: {
-    name?: string;
-    argument?: string;
-  };
-  name?: string;
-  args?: {
-    name?: string;
-    argument?: string;
-    value?: string;
-  };
-  argument?: string;
-  sessionID?: string;
-  ctx?: unknown;
+  command: string;
+  sessionID: string;
+  arguments: string;
 }
 
-// SDK base: { parts: Part[] }
-// Runtime also accepts stop / message for command interception.
 export interface CommandExecuteBeforeOutput {
-  parts?: Part[];
-  stop?: boolean;
-  message?: string;
+  parts: Part[];
 }
