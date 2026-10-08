@@ -6,7 +6,7 @@
 // Skipped unless OPENCODE_E2E=1 is set and the opencode binary is on $PATH.
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { existsSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import SessionMemoryPlugin from "../../src/v1-adapter";
@@ -158,19 +158,50 @@ describe("plugin event surface", () => {
 describe("concurrent updates for the same session are serialized", () => {
   test("two simultaneous memory_update_start events for the same session only run once at a time", async () => {
     if (!ENABLED) return;
-    // Use a plugin with messages so the update path runs.
+    let releaseFirst!: () => void;
+    let firstEntered!: () => void;
+    const firstBlocked = new Promise<void>((resolve) => (releaseFirst = resolve));
+    const entered = new Promise<void>((resolve) => (firstEntered = resolve));
+    let active = 0;
+    let maxActive = 0;
+    let generations = 0;
+    const messagesRows = [
+      { id: "m1", role: "user", content: "first turn" },
+      { id: "m2", role: "assistant", content: "first reply" },
+    ];
     const fake = createFakeClient({
-      messagesRows: [
-        { id: "m1", role: "user", content: "first turn" },
-        { id: "m2", role: "assistant", content: "first reply" },
-      ],
-      // Slow the prompt so two updates can be in flight at the same time.
+      messagesRows,
       promptResponder: async () => {
-        await new Promise((r) => setTimeout(r, 300));
-        return "## Session Memory\n\n### Active References\n- serialized\n";
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        const generation = ++generations;
+        try {
+          if (generation === 1) {
+            firstEntered();
+            await firstBlocked;
+          }
+          return `## Session Memory\n\n### Active References\n- serialized generation ${generation}\n`;
+        } finally {
+          active -= 1;
+        }
       },
     });
 
+    async function bounded<T>(promise: Promise<T>): Promise<T> {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        return await Promise.race([
+          promise,
+          new Promise<never>((_, reject) => {
+            timer = setTimeout(() => reject(new Error("Timed out waiting for serialized update")), 2_000);
+          }),
+        ]);
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+
+    let u1: Promise<unknown> | undefined;
     const originalCwd = process.cwd();
     try {
       process.chdir(ws.projectDir);
@@ -179,28 +210,85 @@ describe("concurrent updates for the same session are serialized", () => {
         directory: ws.projectDir,
       });
 
-      const sessionID = `concurrent-same-${Date.now()}`;
+      const sessionID = `concurrent-same-${crypto.randomUUID()}`;
       await plugin["session.created"]({ sessionID });
+      const logOffset = readLog(ws).length;
+      const sessionEvents = () =>
+        readLog(ws)
+          .slice(logOffset)
+          .split("\n")
+          .filter(Boolean)
+          .map((line) => JSON.parse(line))
+          .filter((entry) => entry.sessionID === sessionID);
 
-      // Fire two updates in parallel. The second should be coalesced
-      // (updateInFlight) and the log should show only one
-      // memory_update_done.
-      const u1 = plugin.tool.short_term_memory.execute({ action: "update" }, { sessionID });
-      const u2 = plugin.tool.short_term_memory.execute({ action: "update" }, { sessionID });
-      await Promise.all([u1, u2]);
+      u1 = plugin.tool.short_term_memory.execute({ action: "update" }, { sessionID });
+      await bounded(entered);
+      // Collection has finished: these new rows must be consumed by the queued replay.
+      messagesRows.push(
+        { id: "m3", role: "user", content: "queued turn" },
+        { id: "m4", role: "assistant", content: "queued reply" },
+      );
+      await bounded(plugin.tool.short_term_memory.execute({ action: "update" }, { sessionID }));
+      expect(sessionEvents()).toContainEqual(
+        expect.objectContaining({
+          event: "memory_update_skipped",
+          reason: "manual_tool",
+          detail: "update_in_flight",
+        }),
+      );
+      expect(active).toBe(1);
+      expect(generations).toBe(1);
+      expect(sessionEvents().filter((entry) => entry.event === "memory_update_done")).toHaveLength(0);
 
-      const log = readLog(ws);
-      const doneLines = (log.match(/"event":"memory_update_done"/g) ?? []).length;
-      // Hard assert: exactly one update completed. If the
-      // `updateInFlight` coalescing is broken, both updates run
-      // and `doneLines` would be 2.
-      expect(doneLines).toBe(1);
+      releaseFirst();
+      await bounded(u1);
+      await bounded(
+        (async () => {
+          const deadline = Date.now() + 2_000;
+          while (
+            !sessionEvents().some(
+              (entry) => entry.event === "memory_update_done" && entry.reason === "post_in_flight_replay",
+            )
+          ) {
+            if (Date.now() >= deadline) throw new Error("Timed out waiting for queued replay completion");
+            await new Promise((resolve) => setTimeout(resolve, 10));
+          }
+        })(),
+      );
+      const lifecycle = sessionEvents()
+        .filter((entry) => entry.event === "memory_update_start" || entry.event === "memory_update_done")
+        .map((entry) => [entry.event, entry.reason]);
+      expect(lifecycle).toEqual([
+        ["memory_update_start", "manual_tool"],
+        ["memory_update_done", "manual_tool"],
+        ["memory_update_start", "post_in_flight_replay"],
+        ["memory_update_done", "post_in_flight_replay"],
+      ]);
+      expect(generations).toBe(2);
+      expect(fake.calls.summarizerPrompts).toHaveLength(2);
+      expect(maxActive).toBe(1);
+      expect(active).toBe(0);
+      expect(sessionEvents()).toContainEqual(
+        expect.objectContaining({
+          event: "memory_update_chunk_done",
+          reason: "post_in_flight_replay",
+          checkpointID: "m4",
+        }),
+      );
+      expect(readFileSync(join(ws.memoryDir, "checkpoints", `${sessionID}.last-message-id.txt`), "utf-8").trim()).toBe(
+        "m4",
+      );
       const memFile = readMemoryFile(ws, `session_${sessionID}.md`);
-      expect(memFile).toContain("serialized");
+      expect(memFile).toContain("serialized generation 2");
     } finally {
-      process.chdir(originalCwd);
+      releaseFirst();
+      try {
+        if (u1) await bounded(u1);
+      } finally {
+        process.chdir(originalCwd);
+      }
     }
-  });
+  }, 10_000);
 });
 
 // ── 4. Memory file bootstrap ─────────────────────────────────────────

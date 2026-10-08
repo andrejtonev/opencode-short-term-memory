@@ -16,6 +16,7 @@ import {
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { createHash, randomBytes } from "node:crypto";
 import assert from "node:assert/strict";
+import { stripVTControlCharacters } from "node:util";
 
 // Published Standard-rate envelope, NOT deployment pricing or an invoice guarantee.
 // Maximum published EU long-context USD/M: input 0.24, output 0.90, with no cache writes.
@@ -757,6 +758,23 @@ function killGroup(group: number | undefined): void {
   }
 }
 
+export function countTestResults(log: string) {
+  const counts = { pass: 0, fail: 0, skip: 0, source: "completed test lines; partial if interrupted" };
+  let failureSummary = false;
+  for (const line of stripVTControlCharacters(log).split(/\r?\n/)) {
+    if (/^\d+ tests failed:$/.test(line)) {
+      failureSummary = true;
+      continue;
+    }
+    // Bun repeats even the duration in its final, consecutive failure list.
+    if (failureSummary && line.startsWith("(fail) ")) continue;
+    failureSummary = false;
+    const result = line.match(/^\((pass|fail|skip)\) /)?.[1] as "pass" | "fail" | "skip" | undefined;
+    if (result) counts[result]++;
+  }
+  return counts;
+}
+
 async function run(prior: Prior, selectedCli?: ReturnType<typeof validateCliPath>): Promise<void> {
   const ledger = createLedger(prior);
   const root = setupSandbox();
@@ -956,12 +974,7 @@ async function run(prior: Prior, selectedCli?: ReturnType<typeof validateCliPath
     }
     const logPath = join(root, "evidence/tests.log");
     const log = existsSync(logPath) ? readFileSync(logPath, "utf8") : "";
-    const parsedCounts = {
-      pass: (log.match(/^\(pass\) /gm) ?? []).length,
-      fail: (log.match(/^\(fail\) /gm) ?? []).length,
-      skip: (log.match(/^\(skip\) /gm) ?? []).length,
-      source: "completed test lines; partial if interrupted",
-    };
+    const parsedCounts = countTestResults(log);
     for (const entry of ledger.entries.values()) if (entry.state === "pending") entry.state = "uncertain";
     const currentUncertain = [...ledger.entries.values()]
       .filter((entry) => entry.state === "uncertain")
@@ -1017,6 +1030,43 @@ async function run(prior: Prior, selectedCli?: ReturnType<typeof validateCliPath
 }
 
 async function selfTest(): Promise<void> {
+  const failedLine =
+    "(fail) concurrent updates for the same session are serialized > two simultaneous memory_update_start events for the same session only run once at a time [4113.83ms]";
+  const passedLine = "(pass) plugin tool surface > the tool returns the /stm status text [252.57ms]";
+  const execution = `bun test v1.3.14 (0d9b296a)\n\ntest/e2e/wireup.test.ts:\n${passedLine}\nerror: expect(received).toBe(expected)\n${failedLine}\n`;
+  const summary = `\n1 tests failed:\n${failedLine}\n\n 1 pass\n 1 fail\nRan 2 tests across 1 file. [4.37s]\n`;
+  const expectedCounts = (pass: number, fail: number, skip = 0) => ({
+    pass,
+    fail,
+    skip,
+    source: "completed test lines; partial if interrupted",
+  });
+  assert.deepEqual(countTestResults(execution + summary), expectedCounts(1, 1));
+  assert.deepEqual(
+    countTestResults(`${execution}${failedLine}\n\n2 tests failed:\n${failedLine}\n${failedLine}\n\n 2 fail\n`),
+    expectedCounts(1, 2),
+  );
+  assert.deepEqual(
+    countTestResults(`${execution}(skip) unavailable test\nerror: interrupted`),
+    expectedCounts(1, 1, 1),
+  );
+  assert.deepEqual(countTestResults(`${execution}\n1 tests failed:\n${failedLine}`), expectedCounts(1, 1));
+  assert.deepEqual(
+    countTestResults(`bun test v1.3.14\n${passedLine}\n(skip) unavailable test\n\n 1 pass\n 1 skip\n`),
+    expectedCounts(1, 0, 1),
+  );
+  assert.deepEqual(countTestResults(`${passedLine}\n${passedLine}\n`), expectedCounts(2, 0));
+  assert.deepEqual(countTestResults("bun test v1.3.14\nerror: interrupted"), expectedCounts(0, 0));
+  assert.deepEqual(
+    countTestResults(
+      (execution + summary)
+        .replaceAll("\n", "\r\n")
+        .replaceAll(failedLine, `\u001b[31m${failedLine}\u001b[0m`)
+        .replace("1 tests failed:", "\u001b[31m1 tests failed:\u001b[0m"),
+    ),
+    expectedCounts(1, 1),
+  );
+  assert.deepEqual(countTestResults(execution + summary + execution + summary), expectedCounts(2, 2));
   const priorPaths = [
     "/tmp/opencode/stm-paid-e2e-os0JV2/evidence/report.json",
     "/tmp/opencode/stm-paid-e2e-f5faOd/evidence/report.json",
