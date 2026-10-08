@@ -17,6 +17,7 @@
 // Skipped unless OPENCODE_E2E=1 is set and the opencode binary is on $PATH.
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { randomUUID } from "node:crypto";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -237,46 +238,65 @@ describe("command.execute.before hook (direct)", () => {
 
 // ── 2. chat.message hook ──────────────────────────────────────────────
 
-async function warmUpPlugin(plugin: Awaited<ReturnType<typeof buildLivePlugin>>): Promise<void> {
-  // The plugin's runBackgroundInit is deferred to a microtask and writes
-  // a `plugin_loaded` log line. Any test that diffs the log file size
-  // around a hook invocation must wait for that initial write to settle
-  // first, or it will see the `plugin_loaded` line as noise.
-  await plugin.event({} as never);
-  await waitForLogEntry("plugin_loaded", 5_000);
+function sessionChatMessages(sessionID: string): Record<string, unknown>[] {
+  // Ignore a concurrent writer's unfinished trailing JSONL record.
+  return readLog(ws)
+    .split("\n")
+    .slice(0, -1)
+    .filter(Boolean)
+    .map((line) => JSON.parse(line) as Record<string, unknown>)
+    .filter((entry) => entry.event === "chat_message" && entry.sessionID === sessionID);
 }
 
 describe("chat.message hook (direct)", () => {
   test("logs a user message and skips assistant messages", async () => {
     if (!ENABLED) return;
     const plugin = await buildLivePlugin();
-    await warmUpPlugin(plugin);
-    const sessionID = `chat-${Date.now()}`;
+    const sessionID = `chat-${randomUUID()}`;
+    expect(sessionChatMessages(sessionID)).toEqual([]);
 
     // User message: should produce a chat_message log entry.
     await plugin["chat.message"]({ sessionID, message: { role: "user", content: "hello world from e2e" } }, {
       message: { role: "user", content: "hello world from e2e" },
     } as never);
-    const saw = await waitForLogEntry("chat_message", 3_000);
-    expect(saw).toBe(true);
+    const userEvents = sessionChatMessages(sessionID);
+    expect(userEvents).toEqual([
+      expect.objectContaining({
+        event: "chat_message",
+        sessionID,
+        role: "user",
+        textBytes: "hello world from e2e".length,
+        hasParts: false,
+      }),
+    ]);
 
     // Assistant message: should NOT produce another chat_message log entry.
-    const logSizeBefore = readLog(ws).length;
     await plugin["chat.message"]({ sessionID, message: { role: "assistant", content: "ack" } }, {
       message: { role: "assistant", content: "ack" },
     } as never);
     // Give the handler a moment.
     await new Promise((r) => setTimeout(r, 100));
-    const logSizeAfter = readLog(ws).length;
-    expect(logSizeAfter).toBe(logSizeBefore);
+    expect(sessionChatMessages(sessionID)).toEqual(userEvents);
   });
 
   test("skips a self-injection message that contains [MEMORY_SYSTEM]", async () => {
     if (!ENABLED) return;
     const plugin = await buildLivePlugin();
-    await warmUpPlugin(plugin);
-    const sessionID = `chat-self-${Date.now()}`;
-    const logSizeBefore = readLog(ws).length;
+    const sessionID = `chat-self-${randomUUID()}`;
+    expect(sessionChatMessages(sessionID)).toEqual([]);
+    await plugin["chat.message"]({ sessionID, message: { role: "user", content: "before injection" } }, {
+      message: { role: "user", content: "before injection" },
+    } as never);
+    const userEvents = sessionChatMessages(sessionID);
+    expect(userEvents).toEqual([
+      expect.objectContaining({
+        event: "chat_message",
+        sessionID,
+        role: "user",
+        textBytes: "before injection".length,
+        hasParts: false,
+      }),
+    ]);
     await plugin["chat.message"](
       {
         sessionID,
@@ -285,9 +305,8 @@ describe("chat.message hook (direct)", () => {
       { message: { role: "user", content: "[MEMORY_SYSTEM] injected memory" } } as never,
     );
     await new Promise((r) => setTimeout(r, 100));
-    const logSizeAfter = readLog(ws).length;
-    // No log line should have been written (self-injection is filtered).
-    expect(logSizeAfter).toBe(logSizeBefore);
+    // Self-injection must not add a chat_message event for this session.
+    expect(sessionChatMessages(sessionID)).toEqual(userEvents);
   });
 });
 

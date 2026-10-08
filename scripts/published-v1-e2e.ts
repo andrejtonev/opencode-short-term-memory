@@ -4,6 +4,13 @@ import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { mkdir, mkdtemp, readdir, realpath, stat } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative } from "node:path";
+import {
+  runSharedCoreScenario,
+  sharedCoreScenario,
+  type DurableMessage,
+  type ProviderRequest,
+  type SharedCoreAdapter,
+} from "../test/e2e/shared-core-scenario";
 
 // Explicit invocation only. STM is installed exclusively by the native host loader.
 const started = Date.now();
@@ -13,7 +20,8 @@ const root = await mkdtemp(join(parent, "v1-"));
 const project = join(root, "project");
 const host = join(root, "host");
 const bun = await realpath(process.execPath);
-const candidateArg = Bun.argv[2];
+let candidateArg: string | undefined;
+let setupOnly = false;
 let pluginVersion = "1.4.0-rc.1";
 let spec = `@atonev/opencode-short-term-memory@${pluginVersion}`;
 type Stage = "install" | "load" | "setup" | "run" | "memory";
@@ -54,6 +62,8 @@ const evidence: Record<string, unknown> = {
   root,
   started: new Date(started).toISOString(),
   spec,
+  version: pluginVersion,
+  setupOnly,
   scope: candidateArg
     ? "Unpublished candidate tarball installed by native host; not published acceptance"
     : "Published registry RC acceptance",
@@ -79,8 +89,6 @@ let current: Stage = "install";
 let server: ReturnType<typeof Bun.serve> | undefined;
 let serveLog = "";
 let base = "";
-const sentinel = "Project cobalt uses port 7319; preserve this decision.";
-const memoryResponse = `## Session Memory\n\n### User Instructions\n- Preserve the cobalt port decision.\n\n### Long Horizon Context\n- Project cobalt uses port 7319.\n\n### Decisions\n- Use port 7319.\n\n### Conclusions\n- The port decision is retained.\n\n### Active References\n- Project cobalt.\n`;
 function redact(text: string) {
   return text.replace(/(authorization|api[_-]?key|access[_-]?token)(["\s:=]+)[^\s",}]+/gi, "$1$2[REDACTED]");
 }
@@ -207,8 +215,37 @@ async function commandDelivery(sessionID: string, response: { info: { parentID: 
   );
   return { messageID: input.info.id, text, encoded, result: result as string };
 }
-try {
-  assert.ok(Bun.argv.length <= 3, "Usage: bun scripts/published-v1-e2e.ts [/absolute/path/candidate.tgz]");
+workflow: try {
+  let explicitVersion = false;
+  const args = Bun.argv.slice(2);
+  const usage =
+    "Usage: bun scripts/published-v1-e2e.ts [/absolute/path/candidate.tgz | --version VERSION] [--setup-only]";
+  for (let index = 0; index < args.length; index++) {
+    const arg = args[index]!;
+    if (arg === "--setup-only") {
+      assert.ok(!setupOnly, usage);
+      setupOnly = true;
+    } else if (arg === "--version") {
+      assert.ok(!explicitVersion && candidateArg === undefined, usage);
+      const version = args[++index];
+      assert.ok(
+        version && /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[\da-zA-Z-]+(?:\.[\da-zA-Z-]+)*)?$/.test(version),
+        usage,
+      );
+      pluginVersion = version;
+      explicitVersion = true;
+    } else {
+      assert.ok(!arg.startsWith("-") && candidateArg === undefined && !explicitVersion && isAbsolute(arg), usage);
+      candidateArg = arg;
+    }
+  }
+  spec = `@atonev/opencode-short-term-memory@${pluginVersion}`;
+  evidence.spec = spec;
+  evidence.version = pluginVersion;
+  evidence.setupOnly = setupOnly;
+  evidence.scope = candidateArg
+    ? `Unpublished candidate tarball installed by native host; ${setupOnly ? "setup-only verification" : "full workflow"}; not published acceptance`
+    : `Published registry RC ${pluginVersion} ${setupOnly ? "setup-only verification (install/load/setup only; no conversation or memory acceptance)" : "acceptance"}`;
   for (const path of [
     project,
     host,
@@ -238,6 +275,7 @@ try {
     pluginVersion = manifest.version;
     spec = `@atonev/opencode-short-term-memory@file:${copy}`;
     evidence.spec = spec;
+    evidence.version = pluginVersion;
     evidence.candidate = {
       source,
       copy,
@@ -287,10 +325,10 @@ try {
         return new Response("Not found", { status: 404 });
       const body = await request.json();
       const serialized = JSON.stringify(body.messages);
-      const summary = serialized.includes("<conversation_update>");
-      const containsConversation = serialized.includes(sentinel);
+      const summary = /<conversation_update>|<existing_memory>/.test(serialized);
+      const containsConversation = serialized.includes(sharedCoreScenario.initialPrompt);
       mockRequests.push({ path, body, summary, containsConversation });
-      const content = summary && containsConversation ? memoryResponse : "MOCK_ACK";
+      const content = summary ? sharedCoreScenario.memoryResponse : sharedCoreScenario.assistantText;
       const common = {
         id: `chatcmpl-${mockRequests.length}`,
         created: Math.floor(Date.now() / 1000),
@@ -461,11 +499,37 @@ try {
   assert.equal(confirmationDelivery.result, `Created project example config at ${setupPath}.`);
   evidence.setupConfirmationDelivery = confirmationDelivery;
   evidence.createdConfig = readFileSync(setupPath, "utf8");
+  if (setupOnly) {
+    const before = readFileSync(setupPath);
+    const repeatedStart = mockRequests.length;
+    const repeated = await api(`/session/${session.id}/command`, {
+      command: "stm",
+      arguments: "setup confirm true",
+      model: "isolated/deterministic",
+    });
+    evidence.setupRepeatedConfirmation = repeated;
+    const repeatedDelivery = await commandDelivery(session.id, repeated, repeatedStart);
+    assert.equal(
+      repeatedDelivery.result,
+      `No example config created: stm.jsonc already exists in ${dirname(setupPath)}.`,
+      "Production no-overwrite result differs from setup contract",
+    );
+    evidence.setupNoOverwriteDelivery = repeatedDelivery;
+    const after = readFileSync(setupPath);
+    assert.deepEqual(after, before, "Repeated confirmed setup changed config bytes");
+    evidence.setupNoOverwrite = {
+      unchangedBytes: true,
+      beforeSha256: createHash("sha256").update(before).digest("hex"),
+      afterSha256: createHash("sha256").update(after).digest("hex"),
+    };
+  }
   stages.setup = {
     verdict: "PASS",
     evidence:
-      "Exact production JSON refusal/setup results persisted as synthetic input and delivered to model; refusal did not write; confirmation created config. Model ACK is not proof.",
+      "Exact production JSON refusal/setup results persisted as synthetic input and delivered to model; refusal did not write; confirmation created config. Model ACK is not proof." +
+      (setupOnly ? " Repeated confirmed setup returned exact no-overwrite refusal and preserved config bytes." : ""),
   };
+  if (setupOnly) break workflow;
   current = "run";
   // Only after native setup succeeds, adjust the test-owned config for this bounded mock run.
   await Bun.write(
@@ -533,67 +597,197 @@ try {
   }
   evidence.activeConfig = activeConfig;
   evidence.settingsDelivery = settingsDelivery;
+  // Settings returns before its session.idle update; drain setup before opening the core request range.
+  const setupHistory = (await api(`/session/${session.id}/message`)) as {
+    info: {
+      id: string;
+      role: string;
+      summary?: boolean;
+      synthetic?: boolean;
+      internal?: boolean;
+      time?: { completed?: number };
+    };
+    parts: { type: string; text?: string; synthetic?: boolean; ignored?: boolean }[];
+  }[];
+  const setupAssistant = setupHistory
+    .filter(
+      (row) =>
+        row.info.role === "assistant" &&
+        row.info.summary !== true &&
+        row.info.synthetic !== true &&
+        row.info.internal !== true &&
+        row.parts.some(
+          (part) =>
+            part.type === "text" &&
+            part.synthetic !== true &&
+            part.ignored !== true &&
+            Boolean(part.text?.trim()) &&
+            !part.text?.startsWith("[MEMORY_SYSTEM]") &&
+            !part.text?.startsWith("<!-- stm:v1 -->\n"),
+        ),
+    )
+    .at(-1);
+  assert.ok(setupAssistant?.info.id, "Setup quiescence: latest visible assistant missing");
+  assert.equal(
+    setupAssistant.info.id,
+    settingsResponse.info.id,
+    "Setup quiescence: settings is not the latest assistant",
+  );
+  assert.ok(setupAssistant.info.time?.completed, "Setup quiescence: latest visible assistant is incomplete");
+  const setupCheckpoint = join(memoryDir, "checkpoints", `${session.id}.last-message-id.txt`);
+  const sideSessionsPath = join(memoryDir, "side-sessions.json");
+  const setupQuiescence = {
+    verdict: "PENDING",
+    assistantID: setupAssistant.info.id,
+    checkpoint: setupCheckpoint,
+    checkpointID: "",
+    sideSessionsPath,
+    activeSideSessions: null as string[] | null,
+    requestEnd: mockRequests.length,
+  };
+  evidence.setupQuiescence = setupQuiescence;
+  const setupDeadline = Date.now() + remaining(30_000);
+  do {
+    setupQuiescence.checkpointID = existsSync(setupCheckpoint) ? readFileSync(setupCheckpoint, "utf8").trim() : "";
+    setupQuiescence.activeSideSessions = null;
+    if (existsSync(sideSessionsPath)) {
+      const tracked: unknown = JSON.parse(readFileSync(sideSessionsPath, "utf8"));
+      assert.ok(
+        Array.isArray(tracked) && tracked.every((id) => typeof id === "string" && id.length > 0),
+        "Setup quiescence: invalid side-session tracker",
+      );
+      setupQuiescence.activeSideSessions = tracked;
+    }
+    if (setupQuiescence.checkpointID === setupAssistant.info.id && setupQuiescence.activeSideSessions?.length === 0) {
+      setupQuiescence.verdict = "PASS";
+      setupQuiescence.requestEnd = mockRequests.length;
+      break;
+    }
+    await Bun.sleep(Math.min(250, Math.max(0, setupDeadline - Date.now())));
+  } while (Date.now() < setupDeadline);
+  if (setupQuiescence.verdict !== "PASS") setupQuiescence.verdict = "FAIL";
+  assert.equal(
+    setupQuiescence.verdict,
+    "PASS",
+    `Setup quiescence: latest assistant checkpoint missing/mismatched or side sessions not drained within 30s: ${JSON.stringify(setupQuiescence)}`,
+  );
   const conversation = await api("/session", { title: "Published V1 isolated conversation" });
   evidence.conversationSessionID = conversation.id;
-  const answer = await api(`/session/${conversation.id}/message`, {
-    model: { providerID: "isolated", modelID: "deterministic" },
-    parts: [{ type: "text", text: sentinel }],
-  });
-  assert.equal(answer.info.role, "assistant");
-  assert.ok(
-    answer.parts.some((part: { type: string; text?: string }) => part.type === "text" && part.text === "MOCK_ACK"),
-  );
-  stages.run = { verdict: "PASS", evidence: "Real host prompt and assistant response through loopback model" };
-  current = "memory";
   const memoryPath = join(memoryDir, `session_${conversation.id}.md`);
   const checkpoint = join(memoryDir, "checkpoints", `${conversation.id}.last-message-id.txt`);
-  const memoryDeadline = Date.now() + remaining(100_000);
-  while (
-    Date.now() < memoryDeadline &&
-    !(existsSync(checkpoint) && existsSync(memoryPath) && readFileSync(memoryPath, "utf8").includes("port 7319"))
-  )
-    await Bun.sleep(250);
-  assert.ok(
-    mockRequests.some((request) => request.summary && request.containsConversation),
-    "Actual summarizer request did not include conversation",
-  );
-  assert.ok(
-    existsSync(memoryPath) && readFileSync(memoryPath, "utf8").includes("port 7319"),
-    "Production memory not persisted",
-  );
-  assert.ok(existsSync(checkpoint), "Production checkpoint not persisted");
+  function normalizeRequest(request: (typeof mockRequests)[number]): ProviderRequest {
+    const body = request.body as {
+      messages: { role: string; content: string | { type: string; text?: string }[] | null }[];
+      tools?: { function?: { name?: string }; name?: string }[];
+    };
+    return {
+      messages: body.messages.map((message) => {
+        const role = message.role === "developer" ? "system" : message.role;
+        assert.ok(
+          role === "system" || role === "user" || role === "assistant" || role === "tool",
+          `Unsupported provider message role: ${message.role}`,
+        );
+        return {
+          role,
+          text:
+            typeof message.content === "string"
+              ? message.content
+              : (message.content ?? [])
+                  .filter((part) => part.type === "text")
+                  .map((part) => part.text ?? "")
+                  .join("\n"),
+        };
+      }),
+      tools: (body.tools ?? []).map((tool) => {
+        const name = tool.function?.name ?? tool.name;
+        assert.equal(typeof name, "string", "Provider tool has no name");
+        return name!;
+      }),
+    };
+  }
+  let requestStart = mockRequests.length;
+  const adapter: SharedCoreAdapter = {
+    async prompt(text) {
+      current = "run";
+      requestStart = mockRequests.length;
+      await api(`/session/${conversation.id}/message`, {
+        model: { providerID: "isolated", modelID: "deterministic" },
+        parts: [{ type: "text", text }],
+      });
+      const history = (await api(`/session/${conversation.id}/message`)) as {
+        info: { id: string; role: string; summary?: boolean; synthetic?: boolean; internal?: boolean };
+        parts: { type: string; text?: string; synthetic?: boolean; ignored?: boolean }[];
+      }[];
+      const messages: DurableMessage[] = [];
+      for (const row of history) {
+        if (row.info.summary === true || row.info.synthetic === true || row.info.internal === true) continue;
+        // Remove control parts individually so adjacent unexpected visible text is retained.
+        const visible = row.parts.filter(
+          (part) =>
+            part.type === "text" &&
+            part.synthetic !== true &&
+            part.ignored !== true &&
+            !part.text?.startsWith("[MEMORY_SYSTEM]") &&
+            !part.text?.startsWith("<!-- stm:v1 -->\n") &&
+            !part.text?.startsWith(
+              "The STM action has already completed. Output only the result decoded from the JSON below.",
+            ),
+        );
+        const visibleText = visible.map((part) => part.text ?? "").join("\n");
+        if (visible.length === 0 && row.parts.length > 0) continue;
+        assert.ok(
+          row.info.role === "user" || row.info.role === "assistant",
+          `Unsupported durable message role: ${row.info.role}`,
+        );
+        messages.push({ id: row.info.id, role: row.info.role, text: visibleText });
+      }
+      return {
+        messages,
+        primaryRequests: mockRequests
+          .slice(requestStart)
+          .filter((request) => !request.summary)
+          .map(normalizeRequest),
+      };
+    },
+    async waitForAutomaticMemory(assistantID) {
+      current = "memory";
+      const memoryDeadline = Date.now() + remaining(30_000);
+      let memory = "";
+      let checkpointID = "";
+      do {
+        memory = existsSync(memoryPath) ? readFileSync(memoryPath, "utf8") : "";
+        checkpointID = existsSync(checkpoint) ? readFileSync(checkpoint, "utf8").trim() : "";
+        if (memory && checkpointID === assistantID) break;
+        await Bun.sleep(Math.min(250, Math.max(0, memoryDeadline - Date.now())));
+      } while (Date.now() < memoryDeadline);
+      return {
+        memory,
+        checkpoint: checkpointID,
+        summaryRequests: mockRequests
+          .slice(requestStart)
+          .filter((request) => request.summary)
+          .map(normalizeRequest),
+      };
+    },
+  };
+  try {
+    evidence.sharedCore = await runSharedCoreScenario(adapter);
+  } catch (error) {
+    evidence.sharedCore = { scenarioID: sharedCoreScenario.scenarioID, verdict: "FAIL", reason: redact(String(error)) };
+    throw error;
+  }
+  stages.run = { verdict: "PASS", evidence: "Shared core exact initial/followup durable turns and provider requests" };
   const log = readFileSync(logPath, "utf8");
   assert.ok(
     log.includes('"event":"side_session_created"') && log.includes('"event":"side_session_summarize_done"'),
     "Clean side-session lifecycle missing",
   );
-  const history = await api(`/session/${conversation.id}/message`);
   const checkpointID = readFileSync(checkpoint, "utf8").trim();
-  assert.ok(
-    history.some((row: { info: { id: string } }) => row.info.id === checkpointID),
-    "Checkpoint is not an actual host history message",
-  );
-  const before = mockRequests.length;
-  await api(`/session/${conversation.id}/message`, {
-    model: { providerID: "isolated", modelID: "deterministic" },
-    parts: [{ type: "text", text: "What port was decided?" }],
-  });
-  assert.ok(
-    mockRequests
-      .slice(before)
-      .some(
-        (request) =>
-          !request.summary &&
-          JSON.stringify(request.body).includes("[MEMORY_SYSTEM]") &&
-          JSON.stringify(request.body).includes("7319"),
-      ),
-    "Followup request did not visibly include production memory injection",
-  );
   evidence.memory = { memoryPath, checkpoint, checkpointID, text: readFileSync(memoryPath, "utf8") };
   stages.memory = {
     verdict: "PASS",
     evidence:
-      "Actual side-session conversation prompt, persisted memory and host checkpoint, followup provider injection",
+      "Shared core exact automatic summaries, persisted memory/checkpoints and system injection; supplemental clean side-session lifecycle",
   };
 } catch (error) {
   stages[current] = { verdict: "FAIL", evidence: redact(String(error)) };
@@ -616,17 +810,30 @@ try {
         }),
     ),
   );
-  evidence.cleanup = [...children].map((child) => ({
+  const cleanup = [...children].map((child) => ({
     pid: child.pid,
     exitCode: child.exitCode,
     signal: child.signalCode,
     exited: child.exitCode !== null || child.signalCode !== null,
   }));
+  evidence.cleanup = cleanup;
+  const cleanupSucceeded = cleanup.every((child) => child.exited);
+  evidence.cleanupSucceeded = cleanupSucceeded;
+  if (!cleanupSucceeded) {
+    evidence.cleanupError = "Native host child did not exit during cleanup";
+    process.exitCode = 1;
+  }
   await Bun.write(join(root, "serve.log"), serveLog);
   const productLog = join(project, ".opencode", "memory", "session-memory.log");
   if (existsSync(productLog)) await Bun.write(join(root, "stm.log"), redact(readFileSync(productLog, "utf8")));
   evidence.elapsedMs = Date.now() - started;
-  evidence.verdict = Object.values(stages).every((stage) => stage.verdict === "PASS") ? "PASS" : "FAIL";
+  evidence.verdict =
+    cleanupSucceeded &&
+    (setupOnly ? [stages.install, stages.load, stages.setup] : Object.values(stages)).every(
+      (stage) => stage.verdict === "PASS",
+    )
+      ? "PASS"
+      : "FAIL";
   await Bun.write(join(root, "evidence.json"), JSON.stringify(evidence, null, 2));
   console.log(
     JSON.stringify(

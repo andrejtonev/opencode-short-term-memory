@@ -2,6 +2,7 @@ import { Model, Plugin, Provider } from "@opencode/plugin";
 import type { LanguageModelV3, LanguageModelV3CallOptions, LanguageModelV3Usage } from "@ai-sdk/provider";
 import { readFile, readdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { sharedCoreScenario } from "../../test/e2e/shared-core-scenario.js";
 import { MANUAL_FIRST_PROMPT, MANUAL_SECOND_PROMPT, MANUAL_CALL_IDS } from "./manual-evidence.js";
 import { DIAGNOSTICS_CALLS, DIAGNOSTICS_PROMPT } from "./diagnostics-evidence.js";
 import { SETUP_CALLS, SETUP_TOOL, expectedSetupResult, type SetupSnapshot } from "./setup-evidence.js";
@@ -17,6 +18,7 @@ import {
 export const PROBE_PLUGIN_ID = "stm-v2-generation-probe";
 export const PROBE_PROVIDER_ID = "stm-probe";
 export const PROBE_MODEL_ID = "deterministic";
+export const PROBE_MEMORY_MODEL_ID = "deterministic-memory";
 export const PROBE_GENERATE_SENTINEL = "STM_PROBE_GENERATE_SENTINEL";
 export const PROBE_STREAM_SENTINEL = "STM_PROBE_STREAM_SENTINEL";
 export const PROBE_MEMORY_SENTINEL = "STM_PROBE_MEMORY_SENTINEL";
@@ -55,6 +57,21 @@ const RESET_TOOL_NAME = "stm_memory_reset";
 const RESET_PROMPT_MARKER = "Use stm_memory_reset to reset this session. Confirm only after the first refusal.";
 const RESET_REFUSAL_CALL_ID = "stm-probe-reset-refusal";
 const RESET_CONFIRMED_CALL_ID = "stm-probe-reset-confirmed";
+export const PROBE_TASK_CHILD_AGENT = "stm-probe-child";
+export const PROBE_TASK_TOOL = "subagent";
+const PROBE_REQUEST_HEADER = "x-stm-probe-request-id";
+
+export function taskChildContract(runId: string) {
+  return {
+    prompt: `STM_PROBE_TASK_PRIMARY:${runId}`,
+    callID: `stm-probe-task-child:${runId}`,
+    input: {
+      agent: PROBE_TASK_CHILD_AGENT,
+      description: "Probe child first request",
+      prompt: `STM_PROBE_TASK_CHILD:${runId}`,
+    },
+  };
+}
 
 const COMPACTION_TEMPLATE_HEADINGS = [
   "## Objective",
@@ -98,6 +115,7 @@ export function isMemoryUpdatePrompt(options: LanguageModelV3CallOptions): boole
 }
 
 export function memoryUpdateResponse(runId: string): string {
+  if (Bun.env.PROBE_SHARED_CORE === "1") return sharedCoreScenario.memoryResponse;
   return `## Session Memory
 
 ### User Instructions
@@ -273,6 +291,7 @@ function pairedToolResults(options: LanguageModelV3CallOptions, toolName: string
     if (!isNonArrayObject(output) || typeof output.type !== "string") return undefined;
     if ((output.type === "text" || output.type === "error-text") && typeof output.value === "string")
       return output.value;
+    if (output.type === "json") return JSON.stringify(output.value);
     if (output.type === "content" && Array.isArray(output.value)) {
       const text = output.value
         .filter((part): part is Record<string, unknown> => isNonArrayObject(part) && part.type === "text")
@@ -401,6 +420,28 @@ export function setupToolDispatch(options: LanguageModelV3CallOptions) {
   return { ...call, completed: configPath !== undefined && result === expectedSetupResult(index, configPath) };
 }
 
+export function taskChildDispatch(options: LanguageModelV3CallOptions, runId: string) {
+  const contract = taskChildContract(runId);
+  if (
+    Bun.env.PROBE_TASK_CHILD !== "1" ||
+    primaryMarker(options) !== contract.prompt ||
+    !availableFunctionToolNames(options).includes(PROBE_TASK_TOOL)
+  )
+    return undefined;
+  const result = pairedToolResults(options, PROBE_TASK_TOOL).get(contract.callID);
+  if (result !== undefined) {
+    if (/^<subagent sessionID="[^"]+" state="completed">\n/.test(result)) return undefined;
+    try {
+      const output: unknown = JSON.parse(result);
+      if (isNonArrayObject(output) && output.status === "completed" && typeof output.sessionID === "string")
+        return undefined;
+    } catch {
+      // Only a native completed result suppresses dispatch, not arbitrary user text.
+    }
+  }
+  return contract;
+}
+
 async function emitSnapshots(writer: ProbeTelemetryWriter, messages: readonly unknown[]): Promise<void> {
   for (const message of normalizeV2Messages(messages)) {
     await writer.emit({ event: "message.snapshot", boundary: "during", ...message });
@@ -419,7 +460,90 @@ const probe = {
     let cleanupPromise: Promise<void> | undefined;
     let generationStarted = false;
     let modelInvocation = 0;
+    const memoryAttempts = new Map<string, number>();
+    // Each knob accepts a global value or a JSON object keyed by probe model ID.
+    const memorySchedule = (name: string, maximum: number, allowAlways = false) => {
+      const raw = Bun.env[name];
+      if (raw === undefined) return new Map<string, number>();
+      const value: unknown = raw === "always" ? raw : JSON.parse(raw);
+      const entries =
+        typeof value === "object" && value !== null && !Array.isArray(value)
+          ? Object.entries(value)
+          : [PROBE_MODEL_ID, PROBE_MEMORY_MODEL_ID].map((model) => [model, value] as const);
+      return new Map(
+        entries.map(([model, count]) => {
+          if (allowAlways && count === "always") return [model, Infinity];
+          if (typeof count !== "number" || !Number.isSafeInteger(count) || count < 0 || count > maximum)
+            throw new Error(`Invalid ${name} for ${model}`);
+          return [model, count];
+        }),
+      );
+    };
+    const memoryFailures = memorySchedule("PROBE_MEMORY_FAILURES", Number.MAX_SAFE_INTEGER, true);
+    const memoryPendingMs = memorySchedule("PROBE_MEMORY_PENDING_MS", 30_000);
+    const scheduledMemoryResponse = async (options: LanguageModelV3CallOptions, model: string) => {
+      const attempt = (memoryAttempts.get(model) ?? 0) + 1;
+      memoryAttempts.set(model, attempt);
+      const failure = attempt <= (memoryFailures.get(model) ?? 0);
+      const pendingMs = memoryPendingMs.get(model) ?? 0;
+      const details = { memoryAttempt: attempt, memoryFailure: failure, memoryPendingMs: pendingMs };
+      await writer.emit({
+        event: "event.observed",
+        observedEvent: "memory.schedule",
+        details: { model, ...details, phase: "start" },
+      });
+      if (pendingMs > 0) {
+        const signal = options.abortSignal
+          ? AbortSignal.any([options.abortSignal, eventController.signal])
+          : eventController.signal;
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        let onAbort: (() => void) | undefined;
+        try {
+          await new Promise<void>((resolve, reject) => {
+            onAbort = () => reject(signal.reason ?? new DOMException("Probe summary aborted", "AbortError"));
+            if (signal.aborted) return onAbort();
+            signal.addEventListener("abort", onAbort, { once: true });
+            timer = setTimeout(resolve, pendingMs);
+          });
+        } catch (error) {
+          await writer.emit({
+            event: "event.observed",
+            observedEvent: "memory.schedule",
+            details: { model, ...details, phase: "aborted", error: describeError(error) },
+          });
+          throw error;
+        } finally {
+          if (timer !== undefined) clearTimeout(timer);
+          if (onAbort !== undefined) signal.removeEventListener("abort", onAbort);
+        }
+      }
+      return {
+        text: failure ? "STM_PROBE_MALFORMED_MEMORY" : memoryUpdateResponse(writer.runId),
+        details,
+      };
+    };
     let latestRequestKind = "";
+    const taskChildEnabled = Bun.env.PROBE_TASK_CHILD === "1";
+    const requests = new Map<
+      string,
+      {
+        requestID: string;
+        sessionID: Parameters<typeof context.session.get>[0]["sessionID"];
+        agent: string;
+        kind: string;
+      }
+    >();
+    let requestNumber = 0;
+    const invocationDetails = (options: LanguageModelV3CallOptions) => {
+      if (!taskChildEnabled) return {};
+      const requestID = Object.entries(options.headers ?? {}).find(
+        ([name]) => name.toLowerCase() === PROBE_REQUEST_HEADER,
+      )?.[1];
+      return {
+        prompt: JSON.stringify(options.prompt),
+        correlation: requestID === undefined ? null : (requests.get(requestID) ?? null),
+      };
+    };
     const callbackState: Record<CallbackOperation, { count: number; depth: number; maxDepth: number }> = {
       context: { count: 0, depth: 0, maxDepth: 0 },
       generate: { count: 0, depth: 0, maxDepth: 0 },
@@ -549,9 +673,12 @@ const probe = {
         package: "aisdk:@ai-sdk/cohere",
       };
       const modelInfo = Model.Info.default(providerInfo.id, Model.ID.make(PROBE_MODEL_ID));
+      const memoryModelInfo = Model.Info.default(providerInfo.id, Model.ID.make(PROBE_MEMORY_MODEL_ID));
       await acquire(
         "provider.transform",
-        context.provider.transform((editor) => editor.add({ info: providerInfo, models: [modelInfo] })),
+        context.provider.transform((editor) =>
+          editor.add({ info: providerInfo, models: [modelInfo, memoryModelInfo] }),
+        ),
       );
       await writer.emit({
         event: "provider",
@@ -564,27 +691,40 @@ const probe = {
         context.aisdk.hook(
           "language",
           (input) => {
-            if (input.model.providerID !== providerInfo.id || input.model.id !== modelInfo.id) return;
+            if (
+              input.model.providerID !== providerInfo.id ||
+              (input.model.id !== modelInfo.id && input.model.id !== memoryModelInfo.id)
+            )
+              return;
+            const modelID = input.model.id;
             const language: LanguageModelV3 = {
               specificationVersion: "v3",
               provider: PROBE_PROVIDER_ID,
-              modelId: PROBE_MODEL_ID,
+              modelId: modelID,
               supportedUrls: {},
               async doGenerate(options) {
                 const invocation = ++modelInvocation;
+                const memory =
+                  !isCompactionPrompt(options) && isMemoryUpdatePrompt(options)
+                    ? await scheduledMemoryResponse(options, modelID)
+                    : undefined;
                 const responseText = isCompactionPrompt(options)
                   ? PROBE_COMPACTION_SUMMARY
-                  : isMemoryUpdatePrompt(options)
-                    ? memoryUpdateResponse(writer.runId)
-                    : PROBE_GENERATE_SENTINEL;
+                  : memory !== undefined
+                    ? memory.text
+                    : Bun.env.PROBE_SHARED_CORE === "1"
+                      ? sharedCoreScenario.assistantText
+                      : PROBE_GENERATE_SENTINEL;
                 await writer.emit({
                   event: "model.invocation",
                   provider: PROBE_PROVIDER_ID,
-                  model: PROBE_MODEL_ID,
+                  model: modelID,
                   requestKind: "doGenerate",
                   invocation,
                   sentinel: responseText,
                   details: {
+                    ...invocationDetails(options),
+                    ...memory?.details,
                     toolNames: availableFunctionToolNames(options),
                     ...(Bun.env.PROBE_SCENARIO === "reset" ||
                     Bun.env.PROBE_SCENARIO === "manual-update" ||
@@ -602,10 +742,14 @@ const probe = {
               },
               async doStream(options) {
                 const invocation = ++modelInvocation;
+                const memory =
+                  !isCompactionPrompt(options) && isMemoryUpdatePrompt(options)
+                    ? await scheduledMemoryResponse(options, modelID)
+                    : undefined;
                 const responseText = isCompactionPrompt(options)
                   ? PROBE_COMPACTION_SUMMARY
-                  : isMemoryUpdatePrompt(options)
-                    ? memoryUpdateResponse(writer.runId)
+                  : memory !== undefined
+                    ? memory.text
                     : undefined;
                 const resetPhase = isResetToolRequest(options) ? resetToolCallPhase(options) : 2;
                 const manual = Bun.env.PROBE_SCENARIO === "manual-update" ? manualToolDispatch(options) : undefined;
@@ -615,15 +759,63 @@ const probe = {
                   Bun.env.PROBE_SCENARIO === "setup" && latestRequestKind === "primary"
                     ? setupToolDispatch(options)
                     : undefined;
+                const details = invocationDetails(options);
+                const identity = details.correlation;
+                const task =
+                  responseText === undefined &&
+                  identity?.kind === "primary" &&
+                  identity.agent !== PROBE_TASK_CHILD_AGENT
+                    ? taskChildDispatch(options, writer.runId)
+                    : undefined;
+                if (
+                  task !== undefined &&
+                  identity != null &&
+                  !(await context.session.get({ sessionID: identity.sessionID })).parentID
+                ) {
+                  await writer.emit({
+                    event: "model.invocation",
+                    provider: PROBE_PROVIDER_ID,
+                    model: modelID,
+                    requestKind: "doStream",
+                    invocation,
+                    sentinel: `${PROBE_TASK_TOOL}:${JSON.stringify(task.input)}`,
+                    details: {
+                      ...details,
+                      toolNames: availableFunctionToolNames(options),
+                      primaryPrompt: primaryMarker(options),
+                      toolCall: { toolCallId: task.callID, toolName: PROBE_TASK_TOOL, input: task.input },
+                    },
+                  });
+                  return {
+                    stream: new ReadableStream({
+                      start(controller) {
+                        controller.enqueue({ type: "stream-start", warnings: [] });
+                        controller.enqueue({
+                          type: "tool-call",
+                          toolCallId: task.callID,
+                          toolName: PROBE_TASK_TOOL,
+                          input: JSON.stringify(task.input),
+                        });
+                        controller.enqueue({
+                          type: "finish",
+                          usage: ZERO_USAGE,
+                          finishReason: { unified: "tool-calls", raw: "tool-calls" },
+                        });
+                        controller.close();
+                      },
+                    }),
+                  };
+                }
                 if (responseText === undefined && setup !== undefined && !setup.completed) {
                   await writer.emit({
                     event: "model.invocation",
                     provider: PROBE_PROVIDER_ID,
-                    model: PROBE_MODEL_ID,
+                    model: modelID,
                     requestKind: "doStream",
                     invocation,
                     sentinel: `${SETUP_TOOL}:${JSON.stringify(setup.input)}`,
                     details: {
+                      ...details,
                       toolNames: availableFunctionToolNames(options),
                       primaryPrompt: primaryMarker(options),
                       toolCall: { toolCallId: setup.id, toolName: SETUP_TOOL, input: setup.input },
@@ -653,11 +845,12 @@ const probe = {
                   await writer.emit({
                     event: "model.invocation",
                     provider: PROBE_PROVIDER_ID,
-                    model: PROBE_MODEL_ID,
+                    model: modelID,
                     requestKind: "doStream",
                     invocation,
                     sentinel: `${diagnostic.tool}:{}`,
                     details: {
+                      ...details,
                       toolNames: availableFunctionToolNames(options),
                       primaryPrompt: primaryMarker(options),
                       toolCall: { toolCallId: diagnostic.id, toolName: diagnostic.tool, input: {} },
@@ -687,11 +880,12 @@ const probe = {
                   await writer.emit({
                     event: "model.invocation",
                     provider: PROBE_PROVIDER_ID,
-                    model: PROBE_MODEL_ID,
+                    model: modelID,
                     requestKind: "doStream",
                     invocation,
                     sentinel: "stm_memory_update:{}",
                     details: {
+                      ...details,
                       toolNames: availableFunctionToolNames(options),
                       toolCall: { toolCallId: manual.callID, toolName: "stm_memory_update", input: {} },
                     },
@@ -722,11 +916,12 @@ const probe = {
                   await writer.emit({
                     event: "model.invocation",
                     provider: PROBE_PROVIDER_ID,
-                    model: PROBE_MODEL_ID,
+                    model: modelID,
                     requestKind: "doStream",
                     invocation,
                     sentinel: `${RESET_TOOL_NAME}:${String(confirm)}`,
                     details: {
+                      ...details,
                       toolNames: availableFunctionToolNames(options),
                       toolCall: { toolCallId, toolName: RESET_TOOL_NAME, input: { confirm } },
                     },
@@ -751,15 +946,19 @@ const probe = {
                     }),
                   };
                 }
-                const text = responseText ?? PROBE_STREAM_SENTINEL;
+                const text =
+                  responseText ??
+                  (Bun.env.PROBE_SHARED_CORE === "1" ? sharedCoreScenario.assistantText : PROBE_STREAM_SENTINEL);
                 await writer.emit({
                   event: "model.invocation",
                   provider: PROBE_PROVIDER_ID,
-                  model: PROBE_MODEL_ID,
+                  model: modelID,
                   requestKind: "doStream",
                   invocation,
                   sentinel: text,
                   details: {
+                    ...details,
+                    ...memory?.details,
                     toolNames: availableFunctionToolNames(options),
                     ...(Bun.env.PROBE_SCENARIO === "reset" ||
                     Bun.env.PROBE_SCENARIO === "manual-update" ||
@@ -838,12 +1037,25 @@ const probe = {
         "session.model.request",
         context.session.hook("model.request", (input) => {
           latestRequestKind = input.kind;
+          let correlation;
+          if (
+            taskChildEnabled &&
+            input.model.providerID === PROBE_PROVIDER_ID &&
+            (input.model.id === PROBE_MODEL_ID || input.model.id === PROBE_MEMORY_MODEL_ID)
+          ) {
+            const requestID = `${writer.runId}:request:${++requestNumber}`;
+            correlation = { requestID, sessionID: input.sessionID, agent: input.agent, kind: input.kind };
+            requests.set(requestID, correlation);
+            // AISDK.callOptions forwards these per-request headers even when the language model is cached.
+            input.headers[PROBE_REQUEST_HEADER] = requestID;
+          }
           return writer
             .emit({
               event: "model.request",
               provider: input.model.providerID,
               model: input.model.id,
               requestKind: input.kind,
+              ...(correlation === undefined ? {} : { details: { correlation } }),
             })
             .then(() => undefined);
         }),
@@ -866,7 +1078,8 @@ const probe = {
       if (
         Bun.env.PROBE_SCENARIO === "reset" ||
         Bun.env.PROBE_SCENARIO === "manual-update" ||
-        Bun.env.PROBE_SCENARIO === "setup"
+        Bun.env.PROBE_SCENARIO === "setup" ||
+        taskChildEnabled
       ) {
         await acquire(
           "tool.execute.before",

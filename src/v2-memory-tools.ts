@@ -4,17 +4,20 @@ import {
   createProjectExampleConfig,
   ensureMemoryFile,
   memoryPathFor,
+  parseModel,
   readConfig,
   readRawFile,
   readText,
   resetBoundaryPathFor,
   safeSessionID,
   tailLog,
+  type SessionMemoryConfig,
 } from "./memory-utils";
 import { readLastProcessedMessageID } from "./message-collector";
 import { createV2MemoryUpdater, isV2MemoryUpdateInFlight } from "./v2-memory-update";
 import type { V2Context } from "./v2-adapter";
 import { readV2CurrentHistory } from "./v2-current-history";
+import { withV2MemoryMutation } from "./v2-mutation-coordination";
 import { parseV2ResetBoundary } from "./v2-reset-boundary";
 import { resetV2MemoryPersistence } from "./v2-reset-persistence";
 
@@ -37,14 +40,47 @@ const SETUP_INPUT = {
   additionalProperties: false,
 } satisfies ToolDefinition["input"];
 
+const COMPATIBILITY_INPUT = {
+  type: "object",
+  properties: {
+    action: {
+      type: "string",
+      enum: ["show", "status", "update", "reset", "logs", "settings", "setup"],
+    },
+    confirm: { type: "boolean" },
+  },
+  required: ["action"],
+  additionalProperties: false,
+} satisfies ToolDefinition["input"];
+
 function textResult(text: string) {
   return { content: [{ type: "text" as const, text }] as const };
 }
 
+function memoryModelSelection(config: SessionMemoryConfig) {
+  const configuredModel = config.memoryModel.trim();
+  if (!configuredModel) {
+    return { memoryModel: null, memoryModelSelection: "inherited-current-session" };
+  }
+  const parsedModel = parseModel(configuredModel);
+  if (!parsedModel || !parsedModel.providerID.trim() || !parsedModel.modelID.trim()) {
+    return { memoryModel: null, memoryModelSelection: "invalid-override" };
+  }
+  if (config.summarizerMode === "active") {
+    return { memoryModel: null, memoryModelSelection: "active-override-unsupported" };
+  }
+  return { memoryModel: configuredModel, memoryModelSelection: "explicit-override" };
+}
+
 async function readMemory(sessionID: string, directory: string) {
-  const config = await readConfig(undefined, directory);
-  const memoryPath = await ensureMemoryFile(sessionID, config);
-  return await readText(memoryPath, "");
+  if (typeof sessionID !== "string" || !sessionID.trim() || safeSessionID(sessionID) !== sessionID) {
+    throw new Error("STM read sessionID must be nonempty and path-safe.");
+  }
+  return await withV2MemoryMutation(directory, sessionID, async () => {
+    const config = await readConfig(undefined, directory);
+    const memoryPath = await ensureMemoryFile(sessionID, config);
+    return await readText(memoryPath, "");
+  });
 }
 
 export async function readV2MemoryStatus(sessionID: string, directory: string): Promise<string> {
@@ -72,12 +108,14 @@ export async function readV2MemoryStatus(sessionID: string, directory: string): 
   } catch {
     boundaryState = "unreadable";
   }
+  const selection = memoryModelSelection(config);
   const markdown = [
     "generation: v2",
     `enabled: ${config.enabled}`,
     `authoritative sessionID: ${sessionID}`,
     `configuredMemoryModel: ${config.memoryModel || "none"}`,
-    "effectiveMemoryModel: current-session",
+    `effectiveMemoryModel: ${selection.memoryModel ?? (selection.memoryModelSelection === "inherited-current-session" ? "unresolved" : "unavailable")}`,
+    `memoryModelSelection: ${selection.memoryModelSelection}`,
     `summarizerMode: ${config.summarizerMode}`,
     `memoryDir: ${config.memoryDir}`,
     `memoryPath: ${memoryPath}`,
@@ -230,9 +268,9 @@ async function updateMemory(
   ].join("\n");
 }
 
-export function createV2MemoryActions(pluginContext: V2Context) {
+export function createV2MemoryActions(pluginContext: V2Context, lifetimeSignal?: AbortSignal) {
   const directory = pluginContext.location.directory;
-  const updater = createV2MemoryUpdater(pluginContext, directory);
+  const updater = createV2MemoryUpdater(pluginContext, directory, { lifetimeSignal });
   return {
     show: (sessionID: string) => readMemory(sessionID, directory),
     status: (sessionID: string) => readV2MemoryStatus(sessionID, directory),
@@ -251,28 +289,27 @@ export function createV2MemoryActions(pluginContext: V2Context) {
           resolvedConfig: config,
           effective: {
             enabled: config.enabled,
-            memoryModel: "current-session",
+            ...memoryModelSelection(config),
             summarizerMode: config.summarizerMode,
+            activeWithExplicitMemoryModel: "unsupported",
             maxMemoryLength: config.maxMemoryLength,
             maxUpdateInputLength: config.maxUpdateInputLength,
             maxDeltaMessages: config.maxDeltaMessages,
             memoryDir: config.memoryDir,
+            cleanFallbackToActiveSession: config.cleanFallbackToActiveSession,
+            includeAgentsMdOnFirstUpdate: config.includeAgentsMdOnFirstUpdate,
+            injectInSubagents: config.injectInSubagents,
+            enableLegacyPeriodicSystemTransform: config.enableLegacyPeriodicSystemTransform,
+            sideSessionRetries: config.sideSessionRetries,
+            remindEveryN: config.remindEveryN,
+            debounceMs: config.debounceMs,
+            collapseAssistantBursts: config.collapseAssistantBursts,
+            debug: config.debug,
+            logMaxLines: config.logMaxLines,
             updateHook: "context",
             injectionHooks: ["context", "compaction"],
           },
-          inactiveSettings: [
-            "memoryModel",
-            "cleanFallbackToActiveSession",
-            "includeAgentsMdOnFirstUpdate",
-            "injectInSubagents",
-            "enableLegacyPeriodicSystemTransform",
-            "sideSessionRetries",
-            "remindEveryN",
-            "debounceMs",
-            "debug",
-            "logMaxLines",
-            "collapseAssistantBursts",
-          ],
+          inactiveSettings: [],
         },
         null,
         2,
@@ -286,7 +323,7 @@ export function createV2MemoryActions(pluginContext: V2Context) {
       return [
         result.message,
         `configPath: ${result.configPath}`,
-        "Shared example: see stm_memory_settings for effective V2 settings; configured memoryModel overrides are not applied in V2.",
+        "Shared example: see stm_memory_settings for effective V2 settings; explicit memoryModel overrides apply to clean mode.",
       ].join("\n");
     },
   };
@@ -294,6 +331,7 @@ export function createV2MemoryActions(pluginContext: V2Context) {
 
 export function createV2MemoryTools(
   pluginContext: V2Context,
+  lifetimeSignal?: AbortSignal,
 ): readonly [
   ToolDefinition,
   ToolDefinition,
@@ -302,8 +340,9 @@ export function createV2MemoryTools(
   ToolDefinition,
   ToolDefinition,
   ToolDefinition,
+  ToolDefinition,
 ] {
-  const actions = createV2MemoryActions(pluginContext);
+  const actions = createV2MemoryActions(pluginContext, lifetimeSignal);
   const readTool = {
     name: "stm_memory_read",
     description: "Read the current session's persisted short-term memory.",
@@ -369,7 +408,7 @@ export function createV2MemoryTools(
   const setupTool = {
     name: "stm_memory_setup",
     description:
-      "Create a project-local .opencode/stm.jsonc shared example without overwriting existing STM config. Requires confirm set to true. See stm_memory_settings for effective V2 settings; memoryModel overrides are not applied in V2.",
+      "Create a project-local .opencode/stm.jsonc shared example without overwriting existing STM config. Requires confirm set to true. See stm_memory_settings for effective V2 settings; explicit memoryModel overrides apply to clean mode.",
     input: SETUP_INPUT,
     options: { codemode: false },
     execute: async (input: unknown) => {
@@ -378,9 +417,46 @@ export function createV2MemoryTools(
       return textResult(await actions.setup("", { confirm }));
     },
   } satisfies ToolDefinition;
-  return [readTool, statusTool, resetTool, updateTool, logsTool, settingsTool, setupTool];
+  const compatibilityTool = {
+    name: "short_term_memory",
+    description:
+      "Inspect or control V2 short-term memory for the invoking session. Actions: show, status, logs, update, reset, settings, setup.",
+    input: COMPATIBILITY_INPUT,
+    options: { codemode: false },
+    execute: async (input: unknown, context: ToolContext) => {
+      const value =
+        input !== null && typeof input === "object"
+          ? (input as { readonly action?: unknown; readonly confirm?: unknown })
+          : {};
+      const action = typeof value.action === "string" ? value.action : "";
+      if (!["show", "status", "update", "reset", "logs", "settings", "setup"].includes(action)) {
+        return textResult(
+          `Refused to run short_term_memory: unknown action ${JSON.stringify(action)}. Use show, status, update, reset, logs, settings, or setup.`,
+        );
+      }
+      if (action === "reset") {
+        if (value.confirm !== true) {
+          return textResult(
+            "Refused to reset V2 short-term memory: set confirm to literal true to confirm this destructive action.",
+          );
+        }
+        if (typeof context.messageID !== "string" || !context.messageID.trim()) {
+          authoritativeIdentity(context.sessionID);
+          throw new Error("reset messageID must be a nonempty string");
+        }
+        return textResult(await actions.reset(context.sessionID, { confirm: true, messageID: context.messageID }));
+      }
+      if (action === "show") return textResult(await actions.show(context.sessionID));
+      if (action === "status") return textResult(await actions.status(context.sessionID));
+      if (action === "update") return textResult(await actions.update(context.sessionID));
+      if (action === "logs") return textResult(await actions.logs(context.sessionID));
+      if (action === "settings") return textResult(await actions.settings(context.sessionID));
+      return textResult(await actions.setup(context.sessionID, { confirm: value.confirm }));
+    },
+  } satisfies ToolDefinition;
+  return [readTool, statusTool, resetTool, updateTool, logsTool, settingsTool, setupTool, compatibilityTool];
 }
 
-export function createV2MemoryToolRegistrations(context: V2Context) {
-  return createV2MemoryTools(context).map((definition) => ({ name: definition.name, definition }));
+export function createV2MemoryToolRegistrations(context: V2Context, lifetimeSignal?: AbortSignal) {
+  return createV2MemoryTools(context, lifetimeSignal).map((definition) => ({ name: definition.name, definition }));
 }

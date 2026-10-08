@@ -72,6 +72,7 @@ function updaterContext(
     location: { directory, project: { id: "project", directory, canonical: directory } },
     options: {},
     session: {
+      get: async ({ sessionID }: { sessionID: string }) => ({ id: sessionID, parentID: null }),
       generate: async () => await result,
       hook: async () => ({ dispose: async () => undefined }),
     },

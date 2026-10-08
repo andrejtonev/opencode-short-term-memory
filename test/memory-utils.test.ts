@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
 import {
@@ -15,6 +15,7 @@ import {
   getMessageTextFromParts,
   getSessionID,
   isSelfInjection,
+  logEvent,
   memoryPathFor,
   parseModel,
   readConfig,
@@ -223,6 +224,29 @@ describe("memory-utils general behavior", () => {
     await trimLog(config);
     const trimmed = await readText(join(config.memoryDir, "session-memory.log"), "");
     expect(trimmed).toBe("3\n4\n5\n");
+  });
+
+  test("logEvent serializes concurrent appends and retains newest entries", async () => {
+    const config = { ...DEFAULT_CONFIG, logMaxLines: 3 };
+    await Promise.all(
+      ["one", "two", "three", "four", "five"].map((value) => logEvent(config, "concurrent", { value })),
+    );
+
+    const contents = await readText(join(config.memoryDir, "session-memory.log"), "");
+    const entries = contents
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as { value: string });
+    expect(entries).toHaveLength(3);
+    expect(new Set(entries.map((entry) => entry.value))).toEqual(new Set(["three", "four", "five"]));
+    expect(await tailLog(3, config.memoryDir)).toBe(contents.trim());
+  });
+
+  test("logEvent treats an unusable memory directory as nonfatal", async () => {
+    const memoryDir = join(testDir, "not-a-directory");
+    await writeFile(memoryDir, "file");
+
+    await expect(logEvent({ ...DEFAULT_CONFIG, memoryDir }, "io_failure")).resolves.toBeUndefined();
   });
 
   test("writeTextAtomic avoids torn writes under concurrent updates", async () => {

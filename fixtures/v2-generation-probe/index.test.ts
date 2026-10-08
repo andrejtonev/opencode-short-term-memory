@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -9,6 +9,7 @@ import probe, {
   PROBE_COMPACTION_SUMMARY,
   PROBE_GENERATE_SENTINEL,
   PROBE_MEMORY_SENTINEL,
+  PROBE_MEMORY_MODEL_ID,
   PROBE_MODEL_ID,
   PROBE_PROVIDER_ID,
   PROBE_SESSION_PROMPT_SENTINEL,
@@ -1856,56 +1857,361 @@ describe("generation evaluator adversarial coverage", () => {
   });
 });
 
-describe("V2 deterministic provider and model", () => {
-  test("records sorted function tool names without changing ordinary, memory, or compaction responses", async () => {
-    const harness = await makeHarness("ordinary");
-    const memoryCall: LanguageModelV3CallOptions = {
-      ...toolCall,
-      prompt: [
-        {
-          role: "user",
-          content: [
-            {
-              type: "text",
-              text:
-                "You are a short‑term session memory processor for an OpenCode plugin. <conversation_update> " +
-                "### User Instructions ### Long Horizon Context ### Decisions ### Conclusions ### Active References",
-            },
-          ],
-        },
-      ],
+describe("deterministic memory schedules", () => {
+  const environmentNames = [
+    "PROBE_MEMORY_FAILURES",
+    "PROBE_MEMORY_PENDING_MS",
+    "PROBE_SHARED_CORE",
+    "PROBE_SCENARIO",
+    "PROBE_TASK_CHILD",
+  ] as const;
+  let previousEnvironment: Array<readonly [string, string | undefined]>;
+  beforeEach(() => {
+    previousEnvironment = environmentNames.map((name) => [name, Bun.env[name]] as const);
+    for (const name of environmentNames) delete Bun.env[name];
+  });
+  afterEach(() => {
+    for (const [name, value] of previousEnvironment) {
+      if (value === undefined) delete Bun.env[name];
+      else Bun.env[name] = value;
+    }
+  });
+
+  const memoryCall: LanguageModelV3CallOptions = {
+    prompt: [
+      {
+        role: "user",
+        content: [
+          {
+            type: "text",
+            text:
+              "You are a short‑term session memory processor for an OpenCode plugin. <conversation_update> " +
+              "### User Instructions ### Long Horizon Context ### Decisions ### Conclusions ### Active References",
+          },
+        ],
+      },
+    ],
+  };
+  const methods: Array<"doGenerate" | "doStream"> = ["doGenerate", "doStream"];
+  async function languageFor(harness: Awaited<ReturnType<typeof makeHarness>>, modelID = PROBE_MODEL_ID) {
+    const input: LanguageInput = {
+      model: harness.addedProviders[0]!.models.find((model) => String(model.id) === modelID)!,
+      sdk: {},
+      options: {},
     };
+    await harness.languageCallback()(input);
+    return input.language!;
+  }
+  async function responseText(
+    language: LanguageModelV3,
+    method: (typeof methods)[number],
+    options = memoryCall,
+  ): Promise<string> {
+    if (method === "doGenerate") {
+      const result = await language.doGenerate(options);
+      return result.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("");
+    }
+    const result = await language.doStream(options);
+    let text = "";
+    for await (const part of result.stream) {
+      if (part.type === "text-delta") text += part.delta;
+    }
+    return text;
+  }
+
+  test("unset knobs preserve ordinary, compaction, and memory responses for both models and methods", async () => {
+    const harness = await makeHarness("ordinary");
     try {
-      const input: LanguageInput = {
-        model: harness.addedProviders[0]!.models[0]!,
-        sdk: {},
-        options: {},
-      };
-      await harness.languageCallback()(input);
-      const language = input.language!;
-      expect((await language.doGenerate(toolCall)).content).toEqual([{ type: "text", text: PROBE_GENERATE_SENTINEL }]);
-      expect((await language.doGenerate(memoryCall)).content).toEqual([
-        { type: "text", text: memoryUpdateResponse(harness.runId) },
-      ]);
-      const compaction = await language.doStream({ ...toolCall, ...compactionCall });
-      const parts: LanguageModelV3StreamPart[] = [];
-      for await (const part of compaction.stream) parts.push(part);
-      expect(parts.find((part) => part.type === "text-delta")).toMatchObject({
-        delta: PROBE_COMPACTION_SUMMARY,
-      });
+      for (const modelID of [PROBE_MODEL_ID, PROBE_MEMORY_MODEL_ID]) {
+        const language = await languageFor(harness, modelID);
+        for (const method of methods) {
+          expect(await responseText(language, method, modelCall)).toBe(
+            method === "doGenerate" ? PROBE_GENERATE_SENTINEL : PROBE_STREAM_SENTINEL,
+          );
+          expect(await responseText(language, method, compactionCall)).toBe(PROBE_COMPACTION_SUMMARY);
+          expect(await responseText(language, method)).toBe(memoryUpdateResponse(harness.runId));
+        }
+      }
     } finally {
       await harness.cleanup();
       harness.restoreEnvironment();
     }
-    const invocations = (await telemetry(harness.path)).filter(hasEvent("model.invocation"));
-    expect(invocations.map((record) => record.details?.toolNames)).toEqual([
-      ["stm_memory_read", "stm_memory_status"],
-      ["stm_memory_read", "stm_memory_status"],
-      ["stm_memory_read", "stm_memory_status"],
+    const records = await telemetry(harness.path);
+    assertTelemetry(records, harness.runId, "ordinary");
+    for (const modelID of [PROBE_MODEL_ID, PROBE_MEMORY_MODEL_ID]) {
+      expect(
+        records
+          .filter(hasEvent("model.invocation"))
+          .filter((record) => record.model === modelID)
+          .filter((record) => record.details?.memoryAttempt !== undefined)
+          .map((record) => record.details),
+      ).toEqual(
+        [1, 2].map((memoryAttempt) => ({ memoryAttempt, memoryFailure: false, memoryPendingMs: 0, toolNames: [] })),
+      );
+    }
+  });
+
+  test.each(methods)("first two failures recover across methods starting with %s", async (firstMethod) => {
+    Bun.env.PROBE_MEMORY_FAILURES = "2";
+    const harness = await makeHarness("ordinary");
+    try {
+      const language = await languageFor(harness);
+      const secondMethod = firstMethod === "doGenerate" ? "doStream" : "doGenerate";
+      expect(await responseText(language, firstMethod)).toBe("STM_PROBE_MALFORMED_MEMORY");
+      expect(await responseText(language, secondMethod, modelCall)).toBe(
+        secondMethod === "doGenerate" ? PROBE_GENERATE_SENTINEL : PROBE_STREAM_SENTINEL,
+      );
+      expect(await responseText(language, secondMethod, compactionCall)).toBe(PROBE_COMPACTION_SUMMARY);
+      // A fresh language wrapper must still share the setup's model attempt counter.
+      expect(await responseText(await languageFor(harness), secondMethod)).toBe("STM_PROBE_MALFORMED_MEMORY");
+      expect(await responseText(language, firstMethod)).toBe(memoryUpdateResponse(harness.runId));
+      expect(await responseText(language, secondMethod)).toBe(memoryUpdateResponse(harness.runId));
+    } finally {
+      await harness.cleanup();
+      harness.restoreEnvironment();
+    }
+    const invocations = (await telemetry(harness.path))
+      .filter(hasEvent("model.invocation"))
+      .filter((record) => record.details?.memoryAttempt !== undefined);
+    expect(invocations.map((record) => record.details?.memoryAttempt)).toEqual([1, 2, 3, 4]);
+    expect(invocations.map((record) => record.details?.memoryFailure)).toEqual([true, true, false, false]);
+  });
+
+  test("always fails on both models across generate and stream", async () => {
+    Bun.env.PROBE_MEMORY_FAILURES = "always";
+    const harness = await makeHarness("ordinary");
+    try {
+      for (const modelID of [PROBE_MODEL_ID, PROBE_MEMORY_MODEL_ID]) {
+        const language = await languageFor(harness, modelID);
+        for (const method of [...methods, ...methods]) {
+          expect(await responseText(language, method)).toBe("STM_PROBE_MALFORMED_MEMORY");
+        }
+      }
+    } finally {
+      await harness.cleanup();
+      harness.restoreEnvironment();
+    }
+  });
+
+  test("model-keyed failure and pending schedules keep counters and defaults isolated", async () => {
+    Bun.env.PROBE_MEMORY_FAILURES = JSON.stringify({ [PROBE_MEMORY_MODEL_ID]: 1 });
+    Bun.env.PROBE_MEMORY_PENDING_MS = JSON.stringify({ [PROBE_MEMORY_MODEL_ID]: 10 });
+    const harness = await makeHarness("ordinary");
+    try {
+      const primary = await languageFor(harness);
+      const memory = await languageFor(harness, PROBE_MEMORY_MODEL_ID);
+      expect(await responseText(primary, "doGenerate")).toBe(memoryUpdateResponse(harness.runId));
+      expect(await responseText(memory, "doStream")).toBe("STM_PROBE_MALFORMED_MEMORY");
+      expect(await responseText(primary, "doStream")).toBe(memoryUpdateResponse(harness.runId));
+      expect(await responseText(memory, "doGenerate")).toBe(memoryUpdateResponse(harness.runId));
+    } finally {
+      await harness.cleanup();
+      harness.restoreEnvironment();
+    }
+    expect(
+      (await telemetry(harness.path))
+        .filter(hasEvent("model.invocation"))
+        .map(({ model, details }) => ({ model, details })),
+    ).toEqual([
+      { model: PROBE_MODEL_ID, details: { memoryAttempt: 1, memoryFailure: false, memoryPendingMs: 0, toolNames: [] } },
+      {
+        model: PROBE_MEMORY_MODEL_ID,
+        details: { memoryAttempt: 1, memoryFailure: true, memoryPendingMs: 10, toolNames: [] },
+      },
+      { model: PROBE_MODEL_ID, details: { memoryAttempt: 2, memoryFailure: false, memoryPendingMs: 0, toolNames: [] } },
+      {
+        model: PROBE_MEMORY_MODEL_ID,
+        details: { memoryAttempt: 2, memoryFailure: false, memoryPendingMs: 10, toolNames: [] },
+      },
     ]);
   });
 
-  test("registers exact inventory/order/scope and replaces only its model", async () => {
+  test("new setup resets attempt and invocation counters", async () => {
+    Bun.env.PROBE_MEMORY_FAILURES = "1";
+    for (let setup = 0; setup < 2; setup++) {
+      const harness = await makeHarness("ordinary");
+      try {
+        const language = await languageFor(harness);
+        expect(await responseText(language, "doGenerate")).toBe("STM_PROBE_MALFORMED_MEMORY");
+        expect(await responseText(language, "doStream")).toBe(memoryUpdateResponse(harness.runId));
+      } finally {
+        await harness.cleanup();
+        harness.restoreEnvironment();
+      }
+      const invocations = (await telemetry(harness.path)).filter(hasEvent("model.invocation"));
+      expect(invocations.map((record) => record.invocation)).toEqual([1, 2]);
+      expect(invocations.map((record) => record.details?.memoryAttempt)).toEqual([1, 2]);
+    }
+  });
+
+  async function assertInvalidSchedule(name: string, value: string) {
+    const directory = await mkdtemp(join(tmpdir(), "stm-v2-probe-invalid-schedule-"));
+    temporaryDirectories.push(directory);
+    const path = join(directory, "telemetry.jsonl");
+    const previous = ["PROBE_RUN_ID", "PROBE_MODE", "PROBE_TELEMETRY_PATH"].map((key) => [key, Bun.env[key]] as const);
+    Bun.env.PROBE_RUN_ID = "invalid-schedule";
+    Bun.env.PROBE_MODE = "ordinary";
+    Bun.env.PROBE_TELEMETRY_PATH = path;
+    Bun.env[name] = value;
+    const accessContext = mock(() => {
+      throw new Error("Invalid schedule must not access the host context");
+    });
+    const context = new Proxy({} as Plugin.Context, { get: accessContext });
+    try {
+      const setup = probe.setup(context);
+      if (value === "" || value === "not-json") {
+        await expect(setup).rejects.toThrow(SyntaxError);
+        await expect(setup).rejects.toThrow(/JSON/i);
+      } else {
+        await expect(setup).rejects.toThrow(`Invalid ${name} for ${PROBE_MODEL_ID}`);
+      }
+      expect(accessContext).not.toHaveBeenCalled();
+      // Validation precedes registration and all telemetry, including model invocations.
+      expect(await Bun.file(path).exists()).toBe(false);
+    } finally {
+      for (const [key, original] of previous) {
+        if (original === undefined) delete Bun.env[key];
+        else Bun.env[key] = original;
+      }
+    }
+  }
+
+  test.each(["", "not-json", "-1", "1.5", "null", "true", "[]", '"1"', "9007199254740992"])(
+    "invalid failure knob %j rejects setup with a diagnostic and no model invocations",
+    async (value) => {
+      await assertInvalidSchedule("PROBE_MEMORY_FAILURES", value);
+    },
+  );
+
+  test.each(["", "not-json", "-1", "1.5", "null", "true", "[]", '"1"', "always", "30001"])(
+    "invalid pending knob %j rejects setup with a diagnostic and no model invocations",
+    async (value) => {
+      await assertInvalidSchedule("PROBE_MEMORY_PENDING_MS", value);
+    },
+  );
+
+  test.each(methods)("pending %s rejects request abort without emitting a successful result", async (method) => {
+    Bun.env.PROBE_MEMORY_PENDING_MS = "100";
+    const harness = await makeHarness("ordinary");
+    try {
+      const language = await languageFor(harness);
+      for (const preAborted of [false, true]) {
+        const controller = new AbortController();
+        const reason = new Error("scheduled memory cancelled");
+        if (preAborted) controller.abort(reason);
+        let settled = false;
+        const outcome = responseText(language, method, { ...memoryCall, abortSignal: controller.signal }).then(
+          (text) => {
+            settled = true;
+            return { text };
+          },
+          (error: unknown) => {
+            settled = true;
+            return { error };
+          },
+        );
+        if (!preAborted) {
+          await Bun.sleep(10);
+          expect(settled).toBe(false);
+          controller.abort(reason);
+        }
+        expect(await outcome).toEqual({ error: reason });
+      }
+      await Bun.sleep(110);
+    } finally {
+      await harness.cleanup();
+      harness.restoreEnvironment();
+    }
+    const records = await telemetry(harness.path);
+    expect(records.filter(hasEvent("model.invocation"))).toEqual([]);
+    expect(
+      records
+        .filter(hasEvent("event.observed"))
+        .filter((record) => record.observedEvent === "memory.schedule")
+        .map((record) => record.details?.phase),
+    ).toEqual(["start", "aborted", "start", "aborted"]);
+  });
+});
+
+describe("V2 deterministic provider and model", () => {
+  test.each([PROBE_MODEL_ID, PROBE_MEMORY_MODEL_ID])(
+    "%s preserves responses and records selected request/invocation identity and sorted function tool names",
+    async (modelID) => {
+      const harness = await makeHarness("ordinary");
+      const memoryCall: LanguageModelV3CallOptions = {
+        ...toolCall,
+        prompt: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "text",
+                text:
+                  "You are a short‑term session memory processor for an OpenCode plugin. <conversation_update> " +
+                  "### User Instructions ### Long Horizon Context ### Decisions ### Conclusions ### Active References",
+              },
+            ],
+          },
+        ],
+      };
+      try {
+        const input: LanguageInput = {
+          model: harness.addedProviders[0]!.models.find((model) => String(model.id) === modelID)!,
+          sdk: {},
+          options: {},
+        };
+        await harness.languageCallback()(input);
+        const language = input.language!;
+        expect(language.modelId).toBe(modelID);
+        await harness.sessionCallbacks.get("model.request")!({ kind: "generate", model: input.model });
+        expect((await language.doGenerate(toolCall)).content).toEqual([
+          { type: "text", text: PROBE_GENERATE_SENTINEL },
+        ]);
+        const ordinary = await language.doStream(toolCall);
+        const ordinaryParts: LanguageModelV3StreamPart[] = [];
+        for await (const part of ordinary.stream) ordinaryParts.push(part);
+        expect(ordinaryParts.filter((part) => part.type === "text-delta").map((part) => part.delta)).toEqual([
+          PROBE_STREAM_SENTINEL,
+        ]);
+        expect((await language.doGenerate(memoryCall)).content).toEqual([
+          { type: "text", text: memoryUpdateResponse(harness.runId) },
+        ]);
+        const compaction = await language.doStream({ ...toolCall, ...compactionCall });
+        const parts: LanguageModelV3StreamPart[] = [];
+        for await (const part of compaction.stream) parts.push(part);
+        expect(parts.find((part) => part.type === "text-delta")).toMatchObject({
+          delta: PROBE_COMPACTION_SUMMARY,
+        });
+      } finally {
+        await harness.cleanup();
+        harness.restoreEnvironment();
+      }
+      const records = await telemetry(harness.path);
+      assertTelemetry(records, harness.runId, "ordinary");
+      expect(records.filter(hasEvent("model.request"))).toEqual([
+        expect.objectContaining({ provider: PROBE_PROVIDER_ID, model: modelID, requestKind: "generate" }),
+      ]);
+      const invocations = records.filter(hasEvent("model.invocation"));
+      expect(
+        invocations.map(({ provider, model, requestKind, sentinel }) => ({ provider, model, requestKind, sentinel })),
+      ).toEqual(
+        [
+          { requestKind: "doGenerate" as const, sentinel: PROBE_GENERATE_SENTINEL },
+          { requestKind: "doStream" as const, sentinel: PROBE_STREAM_SENTINEL },
+          { requestKind: "doGenerate" as const, sentinel: memoryUpdateResponse(harness.runId) },
+          { requestKind: "doStream" as const, sentinel: PROBE_COMPACTION_SUMMARY },
+        ].map((invocation) => ({ provider: PROBE_PROVIDER_ID, model: modelID, ...invocation })),
+      );
+      expect(invocations.map((record) => record.details?.toolNames)).toEqual([
+        ["stm_memory_read", "stm_memory_status"],
+        ["stm_memory_read", "stm_memory_status"],
+        ["stm_memory_read", "stm_memory_status"],
+        ["stm_memory_read", "stm_memory_status"],
+      ]);
+    },
+  );
+
+  test("registers exact inventory/order/scope and replaces only its models", async () => {
     const harness = await makeHarness("ordinary");
     try {
       expect(harness.registrations).toEqual([
@@ -1919,7 +2225,10 @@ describe("V2 deterministic provider and model", () => {
       expect(harness.languageScope()).toEqual({ providerID: PROBE_PROVIDER_ID });
       expect(harness.addedProviders).toHaveLength(1);
       expect(String(harness.addedProviders[0]?.info.id)).toBe(PROBE_PROVIDER_ID);
-      expect(harness.addedProviders[0]?.models.map((model) => String(model.id))).toEqual([PROBE_MODEL_ID]);
+      expect(harness.addedProviders[0]?.models.map((model) => String(model.id))).toEqual([
+        PROBE_MODEL_ID,
+        PROBE_MEMORY_MODEL_ID,
+      ]);
 
       const matching: LanguageInput = {
         model: harness.addedProviders[0]!.models[0]!,

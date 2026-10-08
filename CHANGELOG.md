@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+Current Unreleased V2 parity changes are not shipped in published `1.4.0-rc.2`. The earlier build/typecheck, 777-test result and native main-workflow run `8b0960f9` are historical, not current-checkout qualification. A later local handoff reported 851 tests and typecheck passing before subsequent native-runner edits, not a full-suite rerun after them. Current immutable unpublished-package native acceptance passed on host `2.0.12` (run `852c6f8c`, 47.576 seconds), with all 72 packaged files matching the candidate; matching clean-package acceptance passed in 41.305 seconds. Bounded deterministic coverage includes default-off/opt-in injection, distinct clean-model routing, clean retry, active fallback, deletion persistence fencing, command reset boundaries, first-context task-child snapshots and completed native compaction injection. This does not establish every variant, paid-suite success or semantic-model quality. See [Feature Matrix](docs/FEATURE-MATRIX.md#current-artifact-qualification) for exact artifact identity and limits. Release version unchanged; no new publication.
+
+### Added
+
+- Debounced idle updates from native execution terminal events using fresh settled durable history, alongside context-hook catchup. Execution start, deletion, move and shutdown invalidate scheduled idle work.
+- Literal every-N-admitted-user-turn primary-session injection, retaining eligibility across tool continuations. Cadence is bounded and process-local; restart or eviction can restart counting.
+- Pre-compaction settled-history refresh with stored-memory fallback on skipped, failed or busy updates, bypassing reminder cadence without waiting for an active update to drain.
+- Persisted frozen parent-memory snapshots for task children on first eligible context read, controlled by `injectInSubagents`. This is not creation-time capture or fork inheritance; children never summarize, and child reset boundaries suppress injection.
+- Clean-mode `memoryModel` overrides, bounded retries for settled transient/malformed generation and opt-in active fallback without an explicit override. Active mode with an explicit override is unsupported.
+- Bounded project-root `AGENTS.md` reference data in the first chunk of an eligible no-checkpoint update, optional assistant-burst collapse, and debug generation/injection metadata with append-based `logMaxLines` retention.
+- V2 legacy `short_term_memory` compatibility tool, bringing both generations to eight tools: seven granular `stm_memory_*` tools plus legacy. V2 reset/setup retain literal confirmation and invoking-message tool reset boundaries.
+- Native qualification runner checks default-off and explicit opt-in injection plus bounded advanced variants against the current immutable candidate. Paid-runner `--cli-path` selects an absolute executable per run without replacing the installed CLI.
+
+### Fixed
+
+- V2 status/settings distinguish configured and effective model selection: valid clean overrides report `explicit-override`, inherited selection remains `unresolved`, and invalid/unsupported overrides report `unavailable` rather than claiming host-model resolution.
+- Hook log assertions are session-scoped instead of relying on shared-log size changes from unrelated sessions.
+
+### Known Limits
+
+- Native advanced coverage is bounded: pending-delta compaction refresh remains unqualified, task-child capture is first-context rather than creation-time/fork inheritance, and deletion fencing does not establish provider abort. Other model/reset/child/error variants remain local/source coverage; the outstanding paid legacy sweep is not a current PASS.
+- Timeout/cancellation does not trigger retries or fallback. An underlying generation may continue and retains its reservation until settled. Existing action timeout, delivery, trusted-server and forward-reset limits remain unchanged.
+- No DCP-compress trigger or durable cadence reconstruction. Task-child lineage/snapshot errors fail closed. Debug metadata excludes prompt/response bodies, but operational logs can still contain sensitive details.
+
 ## [1.4.0-rc.2] - 2026-10-06
 
 ### Fixed
@@ -12,7 +38,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - V1 native `/stm` commands now read `arguments` and deliver completed action results through in-place mutation of `output.parts`. Native command output remains model-mediated, not model-free.
 - V1 memory injection now recognizes the user role from `chat.message` output when native input metadata omits it.
 
-The corrected V1 runtime-equivalent candidate and exact rc.2 V2 named-file candidate passed bounded deterministic workflows. rc.2 remains unpublished; registry installation verification is separate.
+The corrected V1 runtime-equivalent candidate and exact rc.2 V2 named-file candidate passed bounded deterministic workflows. Subsequently published under the `rc` tag: isolated registry installation/loading/setup passed on V1 `1.14.25` and V2 `2.0.12`, including confirmation refusal, creation and no-overwrite refusal. Those setup-only checks did not rerun conversation/memory or validate the Unreleased additions.
 
 ## [1.4.0-rc.1] - 2026-10-06
 

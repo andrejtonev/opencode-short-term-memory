@@ -100,8 +100,20 @@ describe("plugin loads and /stm status works", () => {
     const result = runAttach(ws, "Reply with exactly the word DONE and nothing else.", SERVE_PORT, {
       timeoutMs: 120_000,
     });
-    expect(result.sessionID).toBeTruthy();
-    expect(result.events.length).toBeGreaterThan(0);
+    const diagnostics = JSON.stringify(
+      {
+        projectDir: ws.projectDir,
+        exitCode: result.exitCode,
+        eventCount: result.events.length,
+        stdoutTail: result.raw.slice(-4000),
+        stderrTail: result.stderr.slice(-4000),
+        memoryLogTail: readLog(ws).slice(-4000),
+      },
+      null,
+      2,
+    );
+    expect(result.sessionID, diagnostics).toBeTruthy();
+    expect(result.events.length, diagnostics).toBeGreaterThan(0);
 
     // Wait for the post-idle memory bootstrap to write a session file.
     const deadline = Date.now() + 15_000;

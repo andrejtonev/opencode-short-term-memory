@@ -435,6 +435,7 @@ test("connected TUI route rejection gives server uncertain mutation delivery fai
 test("server setup failures clean acquired resources and preserve original failure", async () => {
   for (const stage of ["rpc", "command"]) {
     const disposed: string[] = [];
+    const promptDisposals: string[] = [];
     const failure = new Error(stage);
     const context = {
       location: {
@@ -445,7 +446,8 @@ test("server setup failures clean acquired resources and preserve original failu
       session: {
         hook: async (name: string) => ({
           dispose: async () => {
-            disposed.push(name);
+            if (name === "prompt") promptDisposals.push(name);
+            else disposed.push(name);
           },
         }),
       },
@@ -473,14 +475,20 @@ test("server setup failures clean acquired resources and preserve original failu
           };
         },
       },
+      event: {
+        subscribe: () => ({
+          async *[Symbol.asyncIterator]() {},
+        }),
+      },
     } as unknown as V2Context;
     await expect(Root.setup(context)).rejects.toBe(failure);
     expect(disposed).toEqual([
       ...(stage === "command" ? ["rpc"] : []),
-      ...Array(7).fill("tool"),
+      ...Array(8).fill("tool"),
       "compaction",
       "context",
     ]);
+    expect(promptDisposals).toEqual(["prompt"]);
   }
 });
 

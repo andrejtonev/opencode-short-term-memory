@@ -757,7 +757,12 @@ export async function logEvent(config: SessionMemoryConfig, event: string, data:
     event,
     ...data,
   };
-  await appendText(logPath(config.memoryDir), JSON.stringify(entry) + "\n").catch(() => {});
+  const path = logPath(config.memoryDir);
+  await withPathWriteLock(path, async () => {
+    await ensureDir(dirname(path));
+    await appendFile(path, JSON.stringify(entry) + "\n", "utf8");
+    await trimLogUnlocked(path, config.logMaxLines);
+  }).catch(() => {});
 }
 
 export async function tailLog(lines = 80, memoryDir = DEFAULT_CONFIG.memoryDir) {
@@ -790,8 +795,19 @@ export async function tailLog(lines = 80, memoryDir = DEFAULT_CONFIG.memoryDir) 
 }
 
 export async function trimLog(config: SessionMemoryConfig) {
-  const text = await readText(logPath(config.memoryDir), "");
+  const path = logPath(config.memoryDir);
+  await withPathWriteLock(path, () => trimLogUnlocked(path, config.logMaxLines));
+}
+
+async function trimLogUnlocked(path: string, maxLines: number): Promise<void> {
+  if (maxLines <= 0) return;
+  let text: string;
+  try {
+    text = await readFile(path, "utf8");
+  } catch {
+    return;
+  }
   const lines = text.split(/\r?\n/).filter(Boolean);
-  if (lines.length <= config.logMaxLines) return;
-  await writeTextAtomic(logPath(config.memoryDir), lines.slice(-config.logMaxLines).join("\n") + "\n");
+  if (lines.length <= maxLines) return;
+  await writeTextAtomicUnlocked(path, `${lines.slice(-maxLines).join("\n")}\n`);
 }

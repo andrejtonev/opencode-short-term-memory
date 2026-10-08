@@ -41,7 +41,15 @@ function context(directory: string, calls: { prompts: string[] }) {
   const value = {
     location: { directory, project: { id: "p", directory, canonical: directory } },
     options: {},
-    session: { generate: async () => ({ text: VALID_MEMORY }), hook: async () => ({ dispose: async () => undefined }) },
+    session: {
+      get: async ({ sessionID }: { sessionID: string }) => ({
+        id: sessionID,
+        parentID: null,
+        model: { providerID: "provider", id: "model" },
+      }),
+      generate: async () => ({ text: VALID_MEMORY }),
+      hook: async () => ({ dispose: async () => undefined }),
+    },
     generate: {
       text: async ({ prompt }: { prompt: string }) => {
         calls.prompts.push(prompt);
@@ -88,7 +96,7 @@ describe("V2 reset boundary", () => {
     const boundary = resetBoundaryPathFor("causal", memoryDir);
     expect(await readFile(boundary, "utf8")).toBe('{"version":1,"anchorID":"tool-anchor"}\n');
     const calls = { prompts: [] as string[] };
-    await createV2MemoryUpdater(
+    const result = await createV2MemoryUpdater(
       context(directory, calls),
       directory,
     )(
@@ -99,6 +107,7 @@ describe("V2 reset boundary", () => {
         message("answer", "assistant", "new answer"),
       ]),
     );
+    expect(result.status).toBe("committed");
     expect(calls.prompts).toHaveLength(1);
     expect(conversation(calls.prompts[0]!)).not.toContain("OLD_SENTINEL");
     expect(conversation(calls.prompts[0]!)).toContain("NEW_SENTINEL");
@@ -109,16 +118,17 @@ describe("V2 reset boundary", () => {
     await resetV2MemoryPersistence("restart", directory, "anchor");
     await writeFile(checkpointPathFor("restart", memoryDir), "checkpoint-before-anchor\n");
     const firstCalls = { prompts: [] as string[] };
-    await createV2MemoryUpdater(
+    const firstResult = await createV2MemoryUpdater(
       context(directory, firstCalls),
       directory,
     )(
       input("restart", [message("old", "user", "OLD"), message("anchor", "user"), message("a1", "assistant", "FIRST")]),
     );
+    expect(firstResult.status).toBe("committed");
     expect(conversation(firstCalls.prompts[0]!)).not.toContain("OLD");
     expect(conversation(firstCalls.prompts[0]!)).toContain("FIRST");
     const secondCalls = { prompts: [] as string[] };
-    await createV2MemoryUpdater(
+    const secondResult = await createV2MemoryUpdater(
       context(directory, secondCalls),
       directory,
     )(
@@ -128,6 +138,7 @@ describe("V2 reset boundary", () => {
         message("a2", "assistant", "SECOND"),
       ]),
     );
+    expect(secondResult.status).toBe("committed");
     expect(secondCalls.prompts).toHaveLength(1);
     expect(conversation(secondCalls.prompts[0]!)).toContain("SECOND");
     expect(await readText(checkpointPathFor("restart", memoryDir))).toBe("a2\n");

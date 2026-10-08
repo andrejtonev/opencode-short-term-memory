@@ -39,6 +39,13 @@ function createContext() {
         return { dispose: async () => undefined };
       },
     },
+    event: {
+      subscribe: () => ({
+        async *[Symbol.asyncIterator]() {
+          // Root setup owns the subscription lifetime.
+        },
+      }),
+    },
     rpc: { register: async () => ({ events: { emit: async () => undefined }, dispose: async () => undefined }) },
   };
   return { context: context as unknown as V2Context, hooks, transforms };
@@ -349,8 +356,15 @@ describe("V2 adapter", () => {
     context.session.hook = async (name, callback) => {
       hooks.push({ name, callback });
       if (name === "context") return contextRegistration.promise;
-      compactionAttempted.resolve();
-      return compactionRegistration.promise;
+      if (name === "compaction") {
+        compactionAttempted.resolve();
+        return compactionRegistration.promise;
+      }
+      return {
+        dispose: async () => {
+          hostDisposals.push("prompt");
+        },
+      };
     };
 
     expect(RootDefault).toBe(SrcDefault);
@@ -388,8 +402,10 @@ describe("V2 adapter", () => {
     });
     const cleanup = await setup;
     expect(typeof cleanup).toBe("function");
-    expect(transforms).toHaveLength(8);
+    expect(hooks.map(({ name }) => name)).toEqual(["context", "compaction", "prompt"]);
+    expect(transforms).toHaveLength(9);
     expect(transforms.map(({ kind }) => kind)).toEqual([
+      "tool",
       "tool",
       "tool",
       "tool",
@@ -401,7 +417,7 @@ describe("V2 adapter", () => {
     ]);
     await expect(cleanup()).resolves.toBeUndefined();
     await expect(cleanup()).resolves.toBeUndefined();
-    expect(hostDisposals).toEqual(["compaction", "context"]);
+    expect(hostDisposals).toEqual(["prompt", "compaction", "context"]);
   });
 
   test("dual-loader setup preserves context registration rejection without attempting compaction", async () => {
