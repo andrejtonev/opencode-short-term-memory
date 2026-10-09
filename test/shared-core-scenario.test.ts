@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   runSharedCoreScenario,
   type AutomaticMemoryObservation,
+  type ExpectedInjection,
   type PromptObservation,
   type ProviderRequest,
   type SharedCoreAdapter,
@@ -137,6 +138,127 @@ describe("shared core scenario contract", () => {
       memory: { initial: data.initialMemory, followup: data.followupMemory },
     });
   });
+
+  for (const expectedInjection of [
+    undefined,
+    { transport: "system", role: "system" },
+    { transport: "no-reply", role: "user" },
+  ] satisfies (ExpectedInjection | undefined)[]) {
+    const label = expectedInjection?.transport ?? "default system";
+    const memoryRole = expectedInjection?.role ?? "system";
+    const taggedMemory = "[MEMORY_SYSTEM]\n- Use port 7319.\nSTM_PROBE_MEMORY_SENTINEL:shared-core-parity";
+
+    test(`${label}: appended memory uses the declared role`, async () => {
+      const { data, adapter } = fixture();
+      adapter.expectedInjection = expectedInjection;
+      data.followup.primaryRequests = [
+        {
+          messages: [
+            { role: "user", text: FOLLOWUP },
+            { role: memoryRole, text: taggedMemory },
+          ],
+          tools: [],
+        },
+      ];
+      expect((await runSharedCoreScenario(adapter)).verdict).toBe("PASS");
+      expect(data.calls).toHaveLength(4);
+    });
+
+    const corruptions: {
+      name: string;
+      messages: ProviderRequest["messages"];
+      error: string;
+    }[] = [
+      {
+        name: "wrong latest prompt cannot be hidden by an exact stale prompt or tagged memory",
+        messages: [
+          { role: "user", text: FOLLOWUP },
+          { role: "assistant", text: "earlier answer" },
+          { role: "user", text: "wrong latest prompt" },
+          { role: memoryRole, text: taggedMemory },
+        ],
+        error: "primary request does not contain exact supplied user prompt",
+      },
+      {
+        name: "absent supplied prompt cannot be hidden by tagged memory",
+        messages: [
+          { role: "user", text: INITIAL },
+          { role: memoryRole, text: taggedMemory },
+        ],
+        error: "primary request does not contain exact supplied user prompt",
+      },
+      {
+        name: "memory alone cannot substitute for supplied prompt",
+        messages: [{ role: memoryRole, text: taggedMemory }],
+        error: "primary request does not contain exact supplied user prompt",
+      },
+      {
+        name: "arbitrary user text containing the tag is not ignored",
+        messages: [
+          { role: "user", text: FOLLOWUP },
+          { role: memoryRole, text: taggedMemory },
+          { role: "user", text: `Discuss this memory: ${taggedMemory}` },
+        ],
+        error: "primary request does not contain exact supplied user prompt",
+      },
+      {
+        name: "missing memory",
+        messages: [{ role: "user", text: FOLLOWUP }],
+        error: `followup lacks ${memoryRole}-role memory marker, literal memory sentinel and port decision`,
+      },
+      ...(["system", "user", "assistant", "tool"] as const)
+        .filter((role) => role !== memoryRole)
+        .map((role) => ({
+          name: `wrong memory role ${role}`,
+          // Put memory first so the injection assertion, not prompt selection, rejects it.
+          messages: [
+            { role, text: taggedMemory },
+            { role: "user" as const, text: FOLLOWUP },
+          ],
+          error: `followup lacks ${memoryRole}-role memory marker, literal memory sentinel and port decision`,
+        })),
+      ...(["[MEMORY_SYSTEM]", "STM_PROBE_MEMORY_SENTINEL:shared-core-parity", "- Use port 7319."] as const).map(
+        (missing) => ({
+          name: `incomplete memory missing ${missing}`,
+          messages: [
+            { role: memoryRole, text: taggedMemory.replace(missing, "") },
+            { role: "user" as const, text: FOLLOWUP },
+          ],
+          error: `followup lacks ${memoryRole}-role memory marker, literal memory sentinel and port decision`,
+        }),
+      ),
+    ];
+
+    for (const row of corruptions) {
+      test(`${label}: fails closed: ${row.name}`, async () => {
+        const { data, adapter } = fixture();
+        adapter.expectedInjection = expectedInjection;
+        data.followup.primaryRequests = [{ messages: row.messages, tools: [] }];
+        await expect(runSharedCoreScenario(adapter)).rejects.toThrow(`Shared core parity: ${row.error}`);
+        expect(data.calls).toHaveLength(3);
+      });
+    }
+
+    if (memoryRole === "system") {
+      test(`${label}: rejects V1 appended user-role memory`, async () => {
+        const { data, adapter } = fixture();
+        adapter.expectedInjection = expectedInjection;
+        data.followup.primaryRequests = [
+          {
+            messages: [
+              { role: "user", text: FOLLOWUP },
+              { role: "user", text: taggedMemory },
+            ],
+            tools: [],
+          },
+        ];
+        await expect(runSharedCoreScenario(adapter)).rejects.toThrow(
+          "Shared core parity: primary request does not contain exact supplied user prompt",
+        );
+        expect(data.calls).toHaveLength(3);
+      });
+    }
+  }
 
   const failures: { name: string; corrupt(data: Evidence): void; error: string; calls: number }[] = [
     {

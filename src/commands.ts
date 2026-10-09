@@ -32,7 +32,22 @@ export interface CommandContext {
 }
 
 function memoryModelSelection(config: SessionMemoryConfig) {
-  return parseModel(config.memoryModel) ? "explicit-override" : "inherited-current-session";
+  const parsedModel = parseModel(config.memoryModel);
+  if (parsedModel) {
+    return { memoryModelSelection: "explicit-override", memoryModel: config.memoryModel };
+  }
+
+  if (!config.memoryModel.trim()) {
+    return {
+      memoryModelSelection: "host-default",
+      memoryModel: "host-default (no override configured)",
+    };
+  }
+
+  return {
+    memoryModelSelection: "invalid-override",
+    memoryModel: "unavailable (invalid override ignored; no configured selection)",
+  };
 }
 
 export async function statusText(sessionID: string | undefined, ctx: CommandContext): Promise<string> {
@@ -40,12 +55,13 @@ export async function statusText(sessionID: string | undefined, ctx: CommandCont
   const sid = sessionID || globalState.lastActiveSessionID;
   const sessionState = sid ? sessionStates.get(sid) : undefined;
   const memory = sid ? await readText(memoryPathFor(sid, config.memoryDir), "") : "";
+  const modelSelection = memoryModelSelection(config);
   return [
     "# Session Memory Plugin Status",
     `- enabled: ${config.enabled}`,
     `- activeSessionID: ${sid || "unknown"}`,
-    `- memoryModelSelection: ${memoryModelSelection(config)}`,
-    `- memoryModel: ${parseModel(config.memoryModel) ? config.memoryModel : "inherited-current-session"}`,
+    `- memoryModelSelection: ${modelSelection.memoryModelSelection}`,
+    `- memoryModel: ${modelSelection.memoryModel}`,
     `- summarizerMode: ${config.summarizerMode}`,
     `- cleanFallbackToActiveSession: ${config.cleanFallbackToActiveSession}`,
     `- includeAgentsMdOnFirstUpdate: ${config.includeAgentsMdOnFirstUpdate}`,
@@ -88,10 +104,11 @@ export async function executeMemoryAction(
   await logEvent(config, "tool_memory", { action, sessionID });
 
   if (action === "settings") {
+    const modelSelection = memoryModelSelection(config);
     return JSON.stringify(
       {
         ...config,
-        memoryModelSelection: memoryModelSelection(config),
+        memoryModelSelection: modelSelection.memoryModelSelection,
         effectiveDeliveryMode: config.enableLegacyPeriodicSystemTransform ? "legacySystemTransform" : "promptNoReply",
       },
       null,

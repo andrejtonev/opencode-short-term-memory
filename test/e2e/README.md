@@ -1,93 +1,135 @@
-# STM End-to-End Tests
+# STM end-to-end tests
 
-Live `opencode` instance with the local STM plugin loaded via symlink. Each
-suite gets a fresh temp project dir + temp `XDG_CONFIG_HOME` so the user's
-`~/.config/opencode/` is never touched. No npm install, no global mutation.
+These tests start a live `opencode serve` process and load the checkout's STM
+source through a temporary plugin symlink. Each suite creates a temporary
+project, `XDG_CONFIG_HOME`, and `XDG_DATA_HOME`. This is scoped isolation, not
+full process isolation: `HOME` is inherited, and the harness symlinks the
+normal `$HOME/.local/share/opencode/auth.json` when it exists. Other runtime
+cache, credential, proxy, or host settings may therefore still come from the
+normal user locations. The harness does not modify or delete the user's global
+configuration.
 
-## Prerequisites
+## Prerequisites and commands
 
-- `opencode` binary on `$PATH` (verified via `opencode --version`)
-- A working chat model accessible to the `opencode` binary
-- `OPENCODE_E2E=1` exported in the environment
+- `bun` (the package requires Bun `>=1.0.0`)
+- `opencode` on `$PATH` (the harness checks `opencode --version`)
+- credentials and a model available to the `opencode` process for tests that
+  perform real model calls
 
-## Running
+The package commands are:
 
 ```bash
-# default model + port
+# Runs all six suites; the package script sets the gate and a 300-second test timeout.
 bun run test:e2e
 
-# override the chat model (used by `opencode run --model`)
+# Equivalent direct invocation with the gate explicit.
+OPENCODE_E2E=1 bun test --isolate --timeout 300000 test/e2e/
+
+# Primary chat model used by opencode run.
 STM_E2E_MODEL=opencode-go/minimax-m2.7 bun run test:e2e
 
-# override the port (default 18999)
+# Model written into the project STM config for summarization.
+STM_E2E_FALLBACK_MODEL=opencode-go/minimax-m2.7 bun run test:e2e
+
+# Other supported harness overrides.
 STM_E2E_PORT=19000 bun run test:e2e
-
-# keep the temp project dir for debugging
 STM_E2E_KEEP_TMP=1 bun run test:e2e
-
-# raise the per-test timeout (opencode run can take 60–180s)
-bun test --isolate --timeout 300000 test/e2e/
+STM_E2E_TIMEOUT=300000 bun run test:e2e
 ```
+
+`OPENCODE_E2E=1` is a gate, not a cost or safety budget. A direct
+`bun run test:e2e` can make nonzero-cost model calls and does not enforce a
+spend cap. Paid runs are a separate workflow:
+
+```bash
+bun scripts/paid-e2e.ts --self-test
+bun scripts/paid-e2e.ts --run --prior-evidence /absolute/evidenceDirectory [--prior-report /absolute/report.json ...]
+```
+
+The paid guard requires prior ledgers/evidence, configured caps, and the
+appropriate credentials; its published-rate exposure limit is independent of
+the ordinary E2E command.
+
+## What the harness isolates—and what it does not
+
+`setupE2EWorkspace()` creates a temporary root containing the project,
+`XDG_CONFIG_HOME`, `XDG_DATA_HOME`, plugin directory, memory directory, and
+serve log. It seeds only project-local `opencode.json` and `.opencode/stm.jsonc`.
+`isolateServeEnv()` and `isolateRunEnv()` preserve the inherited environment,
+set the two temporary XDG homes, retain `HOME`, and remove
+`OPENCODE_SERVER_PASSWORD`/`OPENCODE_SERVER_USERNAME` for the local test
+server. Authentication is intentionally made available by symlinking the
+normal auth file into the temporary data home; this does not mean all runtime
+state is isolated.
+
+The harness stops only serve children that it owns. Before spawning, it probes
+the loopback port and refuses an occupied port with
+“refusing to kill or adopt its listener”; it does not `fuser`-kill or adopt an
+unrelated process. Cleanup removes the temporary root, unless
+`STM_E2E_KEEP_TMP=1` is set. Tests are not documented as parallel-safe, and
+`maxConcurrency` is not a required harness setting: a shared configured port
+still has to be free for the run.
+
+## Six-suite inventory
+
+| Suite                       | Scope                                                                                                             | Model calls?                                                                                    |
+| --------------------------- | ----------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| `stm-e2e.test.ts`           | Live serve/plugin status, memory-producing chat, clean side-session tracking, orphan cleanup, and startup timing. | **Yes** for chat and summarization; serve/status checks do not require a successful completion. |
+| `events.test.ts`            | Live plugin load plus synthetic event dispatch and filesystem/log assertions.                                     | **No**; uses a fake client for direct hook work.                                                |
+| `hooks.test.ts`             | Direct hook contracts, including command/chat hooks, deduplication, counters, and path safety.                    | **No**; synthetic payloads and a fake client.                                                   |
+| `wireup.test.ts`            | Live plugin hook surface and input/output wiring.                                                                 | **No**; handlers are exercised with a fake client.                                              |
+| `commands.test.ts`          | `/stm` command actions through the live server; command hook short-circuits the agent.                            | **No model completion** for command results.                                                    |
+| `include-agents-md.test.ts` | Project `AGENTS.md` inclusion in the first summarizer prompt.                                                     | **No real model**; captures the prompt with a fake client.                                      |
+
+All six suites require `OPENCODE_E2E=1` and an `opencode` binary, even when
+their assertions use fake clients. The live serve proves host/plugin loading;
+it does not turn synthetic hook tests into model or provider acceptance.
 
 ## Architecture
 
 ```
 test/e2e/
-├── harness.ts          # shared scaffolding (setup, serve, run, helpers)
-├── stm-e2e.test.ts     # the four test groups
-└── README.md           # this file
+├── harness.ts                 # workspace, environment, serve, run, helpers
+├── stm-e2e.test.ts            # live model and lifecycle scenarios
+├── events.test.ts             # synthetic event dispatch
+├── hooks.test.ts              # direct hook contracts
+├── wireup.test.ts             # direct wire-up contracts
+├── commands.test.ts           # live /stm command transport
+├── include-agents-md.test.ts  # captured summarizer prompt
+└── README.md
 
 scripts/
-└── e2e-symlink-plugin.mjs   # creates <XDG>/opencode/plugins/opencode-short-term-memory.ts
+└── e2e-symlink-plugin.mjs     # temporary XDG plugin symlink
 ```
 
-The harness:
+The primary model is `STM_E2E_MODEL`: it is passed to `opencode run --model`.
+`STM_E2E_FALLBACK_MODEL` is the model seeded as `memoryModel` in the temporary
+STM project config. They are separate variables even when their defaults are
+the same.
 
-1. `setupE2EWorkspace()` — `mkdtemp` a root dir, then create a sub-dir for
-   the project and one for the temp `XDG_CONFIG_HOME`. The test seeds a
-   per-project `.opencode/stm.jsonc`; plugin startup does not create global
-   configuration.
-2. `enableStmPluginSymlink()` — symlinks `src/index.ts` into
-   `<XDG>/opencode/plugins/opencode-short-term-memory.ts`. The user's real
-   `~/.config/opencode/plugins/` is left untouched.
-3. `startServe()` — spawns `opencode serve --port <STM_E2E_PORT>` with
-   `XDG_CONFIG_HOME=<temp>` and captures stderr to a file so the
-   `[STM-STARTUP]` factory-time marker is greppable.
-4. `runAttach()` — spawns `opencode run --attach http://localhost:<port>
---dir <projectDir> --model <STM_E2E_MODEL> <prompt>` and parses NDJSON.
-5. `cleanupE2EWorkspace()` — `rm -rf` the whole temp root unless
-   `STM_E2E_KEEP_TMP=1`.
+## Installation and release workflows
 
-## What the tests cover
+This checkout test harness intentionally uses a source symlink and does not
+test package installation. For release installation checks, prefer the pinned
+isolated native V1/V2 tarball runners (`scripts/published-v1-e2e.ts` and
+`scripts/published-v2-e2e.ts`), which exercise a package artifact. Their
+`--setup-only` mode prepares the isolated runner without executing the runtime
+journey; it is not equivalent to a completed acceptance run. The checkout
+suite and the tarball runners therefore answer different questions.
 
-| Group                                  | Test                                                                            | What it proves                                                                   |
-| -------------------------------------- | ------------------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
-| Plugin loads and /stm status works     | `opencode serve is up and serving HTTP`                                         | The serve actually came up.                                                      |
-|                                        | `plugin_loaded log entry was written`                                           | The plugin's background init ran.                                                |
-|                                        | `stm status returns the plugin status text`                                     | The plugin's tool responds to the slash command.                                 |
-|                                        | `a chat produces a memory file`                                                 | The end-to-end pipeline (chat → summarise → write) works.                        |
-| Clean summarizer side session tracking | `clean update creates and deletes a side session; tracking file is empty after` | The side session is created, used, and cleaned up.                               |
-| Orphan cleanup on next startup         | `stale side-sessions.json entries are deleted when serve restarts`              | The crash-recovery path works.                                                   |
-| Factory startup is <10ms               | `factory_returned_ms is under 10ms in the serve stderr`                         | The hard <10ms requirement holds under a live opencode, not just in a unit test. |
+## Troubleshooting and scope of guarantees
 
-## Differences from the unit tests
+- **`opencode --version` fails** — the suites skip because the E2E gate also
+  requires the host binary.
+- **Occupied port** — choose `STM_E2E_PORT`; the harness refuses to kill or
+  adopt the existing listener.
+- **Serve does not become ready** — inspect the retained temporary
+  `opencode.serve.log` with `STM_E2E_KEEP_TMP=1`.
+- **No memory file** — the real primary or summarizer model/auth request may
+  have failed; inspect the retained project and serve log.
 
-| Unit (`test/`)             | E2E (`test/e2e/`)                                                            |
-| -------------------------- | ---------------------------------------------------------------------------- |
-| Fake `client` (no network) | Live `opencode` process                                                      |
-| Deterministic timing       | Wall-clock LLM calls                                                         |
-| Runs on every `bun test`   | Gated by `OPENCODE_E2E=1`                                                    |
-| <50ms factory bound        | <10ms factory bound (live)                                                   |
-| Asserts in-process         | Asserts observable artifacts (memory files, log entries, side-session state) |
-
-## Troubleshooting
-
-- **`opencode --version` fails** — the harness reports `shouldRunE2E() = false`
-  and the suite is skipped. Install opencode or fix `$PATH`.
-- **`Serve on port X did not start within 60s`** — the temp symlink wasn't
-  found by opencode. The harness sets `XDG_CONFIG_HOME` for the serve; if your
-  opencode is older than 1.0.0 the XDG-aware plugin path may not be supported.
-- **`Memory file never appeared`** — the chat model may have failed. Run
-  with `STM_E2E_KEEP_TMP=1` and inspect `<tmp>/project/.opencode/memory/`.
-- **`plugin_loaded` log entry missing** — the plugin crashed during
-  background init. Read `<tmp>/opencode.serve.log` for the stderr trace.
+The suite reports measured assertions from the current tests. It does not
+promise unconditional startup timing, semantic memory quality, parallel
+execution, zero spend, or complete isolation from inherited user runtime
+state. Fake-client suites prove direct contracts; only the explicitly listed
+chat/summarization scenarios exercise real model calls.

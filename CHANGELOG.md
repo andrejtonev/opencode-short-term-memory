@@ -7,7 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Current Unreleased V2 parity changes are not shipped in published `1.4.0-rc.2`. The earlier build/typecheck, 777-test result and native main-workflow run `8b0960f9` are historical, not current-checkout qualification. A later local handoff reported 851 tests and typecheck passing before subsequent native-runner edits, not a full-suite rerun after them. Current immutable unpublished-package native acceptance passed on host `2.0.12` (run `852c6f8c`, 47.576 seconds), with all 72 packaged files matching the candidate; matching clean-package acceptance passed in 41.305 seconds. Bounded deterministic coverage includes default-off/opt-in injection, distinct clean-model routing, clean retry, active fallback, deletion persistence fencing, command reset boundaries, first-context task-child snapshots and completed native compaction injection. This does not establish every variant, paid-suite success or semantic-model quality. See [Feature Matrix](docs/FEATURE-MATRIX.md#current-artifact-qualification) for exact artifact identity and limits. Release version unchanged; no new publication.
+## [1.4.0-rc.3] - 2026-10-08
+
+Unpublished prerelease candidate for V2 parity and readiness improvements, not shipped in published `1.4.0-rc.2`. The bounded qualification recorded below applies only to the exact immutable candidate; no publication is established by this entry.
+
+The exact current candidate SHA-256 `1adcfdc1eefaa23704d7117f7f7321c40518f9312427d4723e55877f83a48212` passed bounded clean-consumer, native V1 and native V2 acceptance in 22.512, 49.725 and 52.736 seconds, respectively. The latest recorded local gate passed 897 tests and 4,074 assertions. These results qualify only the exact unpublished candidate and do not claim registry publication, semantic-model quality, universal host compatibility or generic V2 qualification; see [RC Readiness](docs/RC-READINESS.md) for retained evidence and limits. Prior exact candidate `1ca912...` and its bounded acceptance remain historical qualification, not evidence for these bytes. Paid V1 run `stm-paid-e2e-cNWSEN` remains 50/51; its serialization assertion was corrected and verified deterministically locally without a paid rerun or a claim of 51/51. The earlier 777-test result and native run `8b0960f9` remain historical evidence.
 
 ### Added
 
@@ -20,14 +24,23 @@ Current Unreleased V2 parity changes are not shipped in published `1.4.0-rc.2`. 
 - V2 legacy `short_term_memory` compatibility tool, bringing both generations to eight tools: seven granular `stm_memory_*` tools plus legacy. V2 reset/setup retain literal confirmation and invoking-message tool reset boundaries.
 - Native qualification runner checks default-off and explicit opt-in injection plus bounded advanced variants against the current immutable candidate. Paid-runner `--cli-path` selects an absolute executable per run without replacing the installed CLI.
 
+### Changed
+
+- All V2 system injection is disabled by default, including primary-session, task-child and compaction injection. Set `enableLegacyPeriodicSystemTransform: true` to opt in; automatic updates remain independently enabled.
+
 ### Fixed
 
 - V2 status/settings distinguish configured and effective model selection: valid clean overrides report `explicit-override`, inherited selection remains `unresolved`, and invalid/unsupported overrides report `unavailable` rather than claiming host-model resolution.
 - Hook log assertions are session-scoped instead of relying on shared-log size changes from unrelated sessions.
+- Received V2 session deletion synchronously tombstones the session, fences coordinated late local writes and removes its own memory, checkpoint, reset boundary and child snapshot. Locationless events are accepted on the location-scoped subscription; explicit locations must match. Parent deletion preserves surviving children's frozen snapshots while fencing new parent captures.
+- V1 serialization coverage now deterministically asserts non-overlapping updates and intentional queued replay rather than expecting one completion. Production replay behavior is unchanged.
+- Paid-result text parsing excludes consecutive repeated Bun failure-summary rows without suppressing separate same-name test executions; retained `stm-paid-e2e-cNWSEN` output correctly reports 50 pass, 1 fail and 0 skip.
+- V1 trailing-idle updates now use a generation fence so stale scheduled work cannot publish after newer durable history settles.
+- Current user-text handling now qualifies generation matching, model/path/limit behavior, and E2E configuration/listener ownership safety.
 
 ### Known Limits
 
-- Native advanced coverage is bounded: pending-delta compaction refresh remains unqualified, task-child capture is first-context rather than creation-time/fork inheritance, and deletion fencing does not establish provider abort. Other model/reset/child/error variants remain local/source coverage; the outstanding paid legacy sweep is not a current PASS.
+- Native advanced coverage is bounded: pending-delta compaction refresh remains unqualified, task-child capture is first-context rather than creation-time/fork inheritance, and deletion fencing does not establish provider abort or missed-event, crash or cross-process guarantees. Other model/reset/child/error variants remain local/source coverage; the retained paid V1 50/51 result is not a fully passing suite, and the bounded exact RC3 qualification above does not establish broader release qualification.
 - Timeout/cancellation does not trigger retries or fallback. An underlying generation may continue and retains its reservation until settled. Existing action timeout, delivery, trusted-server and forward-reset limits remain unchanged.
 - No DCP-compress trigger or durable cadence reconstruction. Task-child lineage/snapshot errors fail closed. Debug metadata excludes prompt/response bodies, but operational logs can still contain sensitive details.
 

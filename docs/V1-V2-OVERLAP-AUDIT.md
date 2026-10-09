@@ -6,6 +6,18 @@ helpers and common-invariant tests instead of merging a generic engine.** V2 is
 neither an independent implementation of every primitive nor simply V1 behind a
 new adapter. Release acceptance remains governed by [RC Readiness](RC-READINESS.md).
 
+> **Historical snapshot — not the current capability or inventory.** This audit
+> is an **October 5, 2026 working-tree snapshot**. Its findings, file inventory,
+> line counts and consolidation recommendation describe that point-in-time
+> state; they must not be read as the current capability matrix, readiness
+> status or recommendation. For current status, use the [Feature
+> Matrix](FEATURE-MATRIX.md) and [RC Readiness](RC-READINESS.md). Since this
+> snapshot, V2 task-child orchestration exists: it captures a frozen parent
+> snapshot on the child's first eligible context read, which is not equivalent
+> to V1 creation-time child handling. The proposed `test/shared-memory-contract.test.ts`
+> contract file has also since been added. The dated contents below, including
+> their counts and recommendation, are intentionally preserved unchanged.
+
 This is a source-verifying, read-only execution audit with one documentation
 addition. No source, tests, package, reset version or runtime behavior was changed;
 no tests, builds, live workflows, commits or pushes were executed for this report.

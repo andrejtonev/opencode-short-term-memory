@@ -383,7 +383,7 @@ export function createV2MemoryTools(
   const updateTool = {
     name: "stm_memory_update",
     description:
-      "Update current-session short-term memory from fresh settled durable visible text, using the current session model. Preserves assistant and reset-boundary gates; reports skips, failures and cumulative progress. Retry if busy.",
+      "Update current-session short-term memory from fresh settled durable visible text. Clean mode uses the current model unless a configured memoryModel override applies; active mode uses the current session model and does not support an explicit override. Preserves assistant and reset-boundary gates; reports skips, failures, and cumulative progress. Retry if busy.",
     input: EMPTY_INPUT,
     options: { codemode: false },
     execute: async (_input: Record<string, never>, context: ToolContext) =>

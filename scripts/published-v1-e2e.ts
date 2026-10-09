@@ -33,6 +33,22 @@ const stages: Record<Stage, { verdict: string; evidence?: unknown }> = {
   memory: { verdict: "NOTRUN" },
 };
 const commands: object[] = [];
+const manualUsage = {
+  verdict: "NOTRUN",
+  required: [
+    "default",
+    "status",
+    "show",
+    "logs",
+    "settings",
+    "update",
+    "reset",
+    "setupRefusal",
+    "setupCreate",
+    "setupNoOverwrite",
+  ],
+  results: {} as Record<string, unknown>,
+};
 const requests: object[] = [];
 const mockRequests: { path: string; body: unknown; summary: boolean; containsConversation: boolean }[] = [];
 const children = new Set<ChildProcess>();
@@ -71,12 +87,13 @@ const evidence: Record<string, unknown> = {
   commands,
   requests,
   mockRequests,
+  manualUsage,
   environment: env,
   costConsumed: 0,
   paidInference: false,
   globalBudgetChanged: false,
   limitations:
-    "Deterministic loopback model verifies plumbing, not model summarization quality. V1 command result delivery is model-mediated, not model-free. No STM exports called.",
+    "Deterministic loopback model verifies plumbing, not model summarization quality. V1 command result delivery is model-mediated, not model-free. The native V1 shared-core workflow is unpaced and records a sub-1500ms rapid-turn gap; the fixed candidate remains pending live qualification. Manual isolation restarts the host, resetting in-process diagnostics but preserving historical errors in evidence. No STM exports called.",
   inspectionReferences: [
     "https://raw.githubusercontent.com/anomalyco/opencode/v1.14.25/packages/opencode/src/plugin/index.ts",
     "https://raw.githubusercontent.com/anomalyco/opencode/v1.14.25/packages/opencode/src/plugin/shared.ts",
@@ -178,8 +195,13 @@ async function provenance(path: string, name: string, version: string) {
     entrySha256: createHash("sha256").update(readFileSync(entry)).digest("hex"),
   };
 }
-async function commandDelivery(sessionID: string, response: { info: { parentID: string } }, requestStart: number) {
-  const history = await api(`/session/${sessionID}/message`);
+async function commandDelivery(
+  sessionID: string,
+  response: { info: { parentID: string } },
+  requestStart: number,
+  timeoutMs = 45_000,
+) {
+  const history = await api(`/session/${sessionID}/message`, undefined, timeoutMs);
   const input = history.find((row: { info: { id: string } }) => row.info.id === response.info.parentID);
   assert.equal(input?.info.role, "user", "Command result input missing from persisted host history");
   const parts = input.parts.filter(
@@ -443,6 +465,15 @@ workflow: try {
   evidence.installedCommandAPI = { sdkRoot, version: (await Bun.file(sdkManifest).json()).version, commandTypes };
   const memoryDir = join(project, ".opencode", "memory");
   const logPath = join(memoryDir, "session-memory.log");
+  const completeLogLines = () => {
+    const contents = readFileSync(logPath, "utf8");
+    const completeEnd = contents.lastIndexOf("\n");
+    return completeEnd < 0 ? [] : contents.slice(0, completeEnd).split("\n").filter(Boolean);
+  };
+  const logRowsSince = (before: ReadonlySet<string>) =>
+    completeLogLines()
+      .filter((line) => !before.has(line))
+      .map((line) => JSON.parse(line));
   const loadedDeadline = Date.now() + remaining(15_000);
   while (
     Date.now() < loadedDeadline &&
@@ -487,6 +518,12 @@ workflow: try {
     "Production refusal result differs from setup contract",
   );
   evidence.setupRefusalDelivery = refusalDelivery;
+  manualUsage.results.setupRefusal = {
+    verdict: "PASS",
+    arguments: "setup",
+    delivery: refusalDelivery,
+    configAbsent: true,
+  };
   const confirmationStart = mockRequests.length;
   const confirmed = await api(`/session/${session.id}/command`, {
     command: "stm",
@@ -498,8 +535,14 @@ workflow: try {
   const confirmationDelivery = await commandDelivery(session.id, confirmed, confirmationStart);
   assert.equal(confirmationDelivery.result, `Created project example config at ${setupPath}.`);
   evidence.setupConfirmationDelivery = confirmationDelivery;
+  manualUsage.results.setupCreate = {
+    verdict: "PASS",
+    arguments: "setup confirm true",
+    delivery: confirmationDelivery,
+    setupPath,
+  };
   evidence.createdConfig = readFileSync(setupPath, "utf8");
-  if (setupOnly) {
+  {
     const before = readFileSync(setupPath);
     const repeatedStart = mockRequests.length;
     const repeated = await api(`/session/${session.id}/command`, {
@@ -522,12 +565,18 @@ workflow: try {
       beforeSha256: createHash("sha256").update(before).digest("hex"),
       afterSha256: createHash("sha256").update(after).digest("hex"),
     };
+    manualUsage.results.setupNoOverwrite = {
+      verdict: "PASS",
+      arguments: "setup confirm true",
+      delivery: repeatedDelivery,
+      ...(evidence.setupNoOverwrite as object),
+    };
   }
   stages.setup = {
     verdict: "PASS",
     evidence:
       "Exact production JSON refusal/setup results persisted as synthetic input and delivered to model; refusal did not write; confirmation created config. Model ACK is not proof." +
-      (setupOnly ? " Repeated confirmed setup returned exact no-overwrite refusal and preserved config bytes." : ""),
+      " Repeated confirmed setup returned exact no-overwrite refusal and preserved config bytes.",
   };
   if (setupOnly) break workflow;
   current = "run";
@@ -706,9 +755,32 @@ workflow: try {
     };
   }
   let requestStart = mockRequests.length;
+  let previousPrompt: { submittedAt: number; completedAt?: number } | undefined;
+  let automaticMemoryObservedAt: number | undefined;
+  const rapidTurn = {
+    scope: "Unpaced native V1 shared core rapid-turn workflow",
+    formerThrottleMs: 1500,
+    rapidTurnFailure: {
+      evidencePath: "/home/dev/workspace/opencode-work/stm-published-rc-e2e/v1-okjSZR/evidence.json",
+      verdict: "FAIL",
+      followupAfterFirstCommitMs: 53,
+      reason: "Shared core parity: checkpoint differs from latest durable assistant ID",
+    },
+    candidateVerdict: "PENDING_LIVE_QUALIFICATION",
+    turns: [] as object[],
+    previousPrompt: undefined as { submittedAt: number; completedAt?: number } | undefined,
+    firstAutomaticMemoryObservedAt: undefined as number | undefined,
+    followupSubmittedAt: undefined as number | undefined,
+    followupGapMs: undefined as number | undefined,
+    promptToFollowupMs: undefined as number | undefined,
+  };
+  evidence.rapidTurn = rapidTurn;
   const adapter: SharedCoreAdapter = {
+    expectedInjection: { transport: "no-reply", role: "user" },
     async prompt(text) {
       current = "run";
+      const submittedAt = Date.now();
+      const priorPrompt = previousPrompt;
       requestStart = mockRequests.length;
       await api(`/session/${conversation.id}/message`, {
         model: { providerID: "isolated", modelID: "deterministic" },
@@ -741,13 +813,34 @@ workflow: try {
         );
         messages.push({ id: row.info.id, role: row.info.role, text: visibleText });
       }
-      return {
+      const turn = {
         messages,
         primaryRequests: mockRequests
           .slice(requestStart)
           .filter((request) => !request.summary)
           .map(normalizeRequest),
       };
+      const completedAt = Date.now();
+      if (priorPrompt) {
+        const followupGapMs = submittedAt - (automaticMemoryObservedAt ?? priorPrompt.completedAt ?? submittedAt);
+        const promptToFollowupMs = submittedAt - priorPrompt.submittedAt;
+        rapidTurn.turns.push({
+          previousPrompt: priorPrompt,
+          automaticMemoryObservedAt,
+          followupSubmittedAt: submittedAt,
+          followupGapMs,
+          promptToFollowupMs,
+        });
+        rapidTurn.previousPrompt = priorPrompt;
+        rapidTurn.firstAutomaticMemoryObservedAt = automaticMemoryObservedAt;
+        rapidTurn.followupSubmittedAt = submittedAt;
+        rapidTurn.followupGapMs = followupGapMs;
+        rapidTurn.promptToFollowupMs = promptToFollowupMs;
+        assert.ok(followupGapMs <= 1000, "Follow-up exceeded the unpaced immediate-turn bound");
+        assert.ok(promptToFollowupMs < rapidTurn.formerThrottleMs, "Follow-up did not precede the former throttle");
+      }
+      previousPrompt = { submittedAt, completedAt };
+      return turn;
     },
     async waitForAutomaticMemory(assistantID) {
       current = "memory";
@@ -760,6 +853,7 @@ workflow: try {
         if (memory && checkpointID === assistantID) break;
         await Bun.sleep(Math.min(250, Math.max(0, memoryDeadline - Date.now())));
       } while (Date.now() < memoryDeadline);
+      if (memory && checkpointID === assistantID) automaticMemoryObservedAt = Date.now();
       return {
         memory,
         checkpoint: checkpointID,
@@ -772,11 +866,17 @@ workflow: try {
   };
   try {
     evidence.sharedCore = await runSharedCoreScenario(adapter);
+    rapidTurn.candidateVerdict = "PASS";
   } catch (error) {
+    rapidTurn.candidateVerdict = "FAIL";
     evidence.sharedCore = { scenarioID: sharedCoreScenario.scenarioID, verdict: "FAIL", reason: redact(String(error)) };
     throw error;
   }
-  stages.run = { verdict: "PASS", evidence: "Shared core exact initial/followup durable turns and provider requests" };
+  stages.run = {
+    verdict: "PASS",
+    evidence:
+      "Unpaced native V1 shared core exact initial/followup durable turns and provider requests; rapid-turn candidate passed",
+  };
   const log = readFileSync(logPath, "utf8");
   assert.ok(
     log.includes('"event":"side_session_created"') && log.includes('"event":"side_session_summarize_done"'),
@@ -787,9 +887,274 @@ workflow: try {
   stages.memory = {
     verdict: "PASS",
     evidence:
-      "Shared core exact automatic summaries, persisted memory/checkpoints and system injection; supplemental clean side-session lifecycle",
+      "Unpaced shared core exact automatic summaries, persisted memory/checkpoints and explicit no-reply user context injection; supplemental clean side-session lifecycle; rapid-turn candidate passed",
   };
+  // Keep manual command turns outside the fresh shared-core request/history assertions.
+  current = "run";
+  manualUsage.verdict = "PENDING";
+  const manualConfig = { ...activeConfig, debounceMs: 120_000 };
+  await Bun.write(setupPath, JSON.stringify(manualConfig));
+  const drainDeadline = Date.now() + remaining(15_000);
+  while (Date.now() < drainDeadline) {
+    const tracked: unknown = JSON.parse(readFileSync(sideSessionsPath, "utf8"));
+    assert.ok(
+      Array.isArray(tracked) && tracked.every((id) => typeof id === "string"),
+      "Invalid manual side-session tracker",
+    );
+    if (tracked.length === 0) break;
+    await Bun.sleep(100);
+  }
+  assert.deepEqual(
+    JSON.parse(readFileSync(sideSessionsPath, "utf8")),
+    [],
+    "Automatic side sessions not drained before manual usage",
+  );
+  const historicalErrors = readFileSync(logPath, "utf8")
+    .trim()
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => JSON.parse(line))
+    .filter((row) => typeof row.error === "string" && row.error.length > 0);
+  const manualHistory = await api(`/session/${conversation.id}/message`);
+  const manualStopped = new Promise<void>((resolve) => restarted.child.once("close", () => resolve()));
+  const previousURL = base;
+  kill(restarted.child);
+  let manualStopTimer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      manualStopped,
+      new Promise<never>((_, reject) => {
+        manualStopTimer = setTimeout(
+          () => reject(new Error("Automatic host did not exit before manual restart")),
+          remaining(5_000),
+        );
+      }),
+    ]);
+  } finally {
+    clearTimeout(manualStopTimer);
+  }
+  const manualDeadline = Date.now() + remaining(90_000);
+  const manualLogBefore = new Set(completeLogLines());
+  const manualHost = await startHost();
+  assert.deepEqual(
+    manualHost.availableCommands,
+    restarted.availableCommands,
+    "Native commands changed at manual restart",
+  );
+  const resumedHistory = await api(`/session/${conversation.id}/message`);
+  const historySignature = (history: { info: { id: string; role: string }; parts: unknown[] }[]) =>
+    history.map((row) => ({ id: row.info.id, role: row.info.role, parts: row.parts }));
+  assert.deepEqual(
+    historySignature(resumedHistory),
+    historySignature(manualHistory),
+    "Manual restart changed API history",
+  );
+  evidence.manualRestart = {
+    originalPID: restarted.child.pid,
+    originalExited: true,
+    originalSignal: restarted.child.signalCode,
+    previousURL,
+    pid: manualHost.child.pid,
+    url: base,
+    nativeCommands: manualHost.availableCommands,
+    historyPreserved: true,
+    messageIDs: historySignature(resumedHistory).map((row) => row.id),
+    historicalErrors,
+    limitation:
+      "Restart activates manual config and clears process-local lastError; historical errors are not resolved",
+  };
+  const manualSettingsStart = mockRequests.length;
+  const manualSettingsResponse = await api(
+    `/session/${session.id}/command`,
+    { command: "stm", arguments: "settings", model: "isolated/deterministic" },
+    5_000,
+  );
+  const manualSettingsDelivery = await commandDelivery(session.id, manualSettingsResponse, manualSettingsStart, 5_000);
+  const manualActiveConfig = JSON.parse(manualSettingsDelivery.result);
+  for (const [name, value] of Object.entries(manualConfig))
+    assert.deepEqual(manualActiveConfig[name], value, `Manual startup setting ${name} was not activated`);
+  evidence.manualSettingsDelivery = manualSettingsDelivery;
+  assert.ok(
+    !mockRequests.slice(manualSettingsStart).some((request) => request.summary),
+    "Manual config activation invoked a background summarizer",
+  );
+  const beforeMemory = readFileSync(memoryPath);
+  const beforeCheckpoint = readFileSync(checkpoint);
+  assert.equal(
+    beforeCheckpoint.toString("utf8").trim(),
+    checkpointID,
+    "Automatic checkpoint changed before manual update",
+  );
+  let resetTemplate = "";
+  for (const [key, argument] of [
+    ["update", "update"],
+    ["default", ""],
+    ["status", "status"],
+    ["show", "show"],
+    ["logs", "logs"],
+    ["settings", "settings"],
+    ["reset", "reset"],
+    ["showAfterReset", "show"],
+    ["statusAfterReset", "status"],
+  ] as const) {
+    assert.ok(Date.now() < manualDeadline, "Manual usage exceeded its 90s bound");
+    const requestStart = mockRequests.length;
+    const logBefore = new Set(completeLogLines());
+    const response = await api(
+      `/session/${conversation.id}/command`,
+      {
+        command: "stm",
+        arguments: argument,
+        model: "isolated/deterministic",
+      },
+      Math.min(5_000, manualDeadline - Date.now()),
+    );
+    const delivery = await commandDelivery(conversation.id, response, requestStart, 5_000);
+    const result = delivery.result;
+    const record: Record<string, unknown> = {
+      verdict: "PENDING",
+      arguments: argument,
+      sessionID: conversation.id,
+      delivery,
+    };
+    manualUsage.results[key] = record;
+    assert.ok(
+      !mockRequests.slice(requestStart).some((request) => request.summary),
+      `${key} invoked a background summarizer during isolated manual usage`,
+    );
+    if (key === "update") {
+      const rows = logRowsSince(logBefore);
+      const manualRows = rows.filter((row) => row.sessionID === conversation.id && row.reason === "manual_tool");
+      assert.ok(
+        manualRows.some((row) => row.event === "memory_update_skipped" && row.detail === "no_visible_recent_messages"),
+        "Manual update did not explicitly skip the already-checkpointed delta",
+      );
+      assert.ok(
+        !manualRows.some(
+          (row) =>
+            row.event === "memory_update_chunk_done" ||
+            row.event === "memory_update_done" ||
+            row.event === "memory_update_error",
+        ),
+        "No-delta manual update committed or failed",
+      );
+      assert.equal(result, beforeMemory.toString("utf8"), "Manual update result differs from preserved memory");
+      assert.deepEqual(readFileSync(memoryPath), beforeMemory, "Skipped manual update changed memory bytes");
+      assert.deepEqual(readFileSync(checkpoint), beforeCheckpoint, "Skipped manual update changed checkpoint bytes");
+      assert.ok(
+        !mockRequests.slice(requestStart).some((request) => request.summary),
+        "Skipped manual update invoked the summarizer",
+      );
+      Object.assign(record, {
+        outcome: "skipped: no_visible_recent_messages",
+        committedManualUpdateEvidence: false,
+        limitation: "No committed-manual-update evidence; automatic update already checkpointed the conversation",
+        unchangedMemoryBytes: true,
+        unchangedCheckpointBytes: true,
+        checkpointID,
+        memorySha256: createHash("sha256").update(beforeMemory).digest("hex"),
+        checkpointSha256: createHash("sha256").update(beforeCheckpoint).digest("hex"),
+        manualRows,
+      });
+    } else if (key === "default" || key === "status" || key === "statusAfterReset") {
+      for (const line of [
+        "# Session Memory Plugin Status",
+        "- enabled: true",
+        `- activeSessionID: ${conversation.id}`,
+        `- memoryPath: ${memoryPath}`,
+        `- logPath: ${logPath}`,
+        `- memoryBytes: ${key === "statusAfterReset" ? resetTemplate.length : beforeMemory.toString("utf8").length}`,
+        "- effectiveDeliveryMode: promptNoReply",
+      ])
+        assert.ok(result.split("\n").includes(line), `${key} missing exact production status line: ${line}`);
+      const errorLines = result.split("\n").filter((line) => line.startsWith("- lastError: "));
+      assert.equal(errorLines.length, 1, `${key} missing unique production lastError field`);
+      const processErrors = logRowsSince(manualLogBefore).filter(
+        (row) => typeof row.error === "string" && row.error.length > 0,
+      );
+      record.lastError = { line: errorLines[0], processErrors, historicalErrors };
+      // No summary commits occur in this phase to clear a fresh process error.
+      assert.equal(processErrors.length, 0, `${key} encountered errors after manual host restart`);
+      assert.equal(errorLines[0], "- lastError: none", `${key} reported an unexpected fresh-process error`);
+    } else if (key === "show" || key === "showAfterReset") {
+      assert.equal(
+        result,
+        key === "show" ? beforeMemory.toString("utf8") : resetTemplate,
+        `${key} differs from persisted memory`,
+      );
+      assert.equal(readFileSync(memoryPath, "utf8"), result, `${key} result not persisted`);
+    } else if (key === "logs") {
+      const rows = result
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line));
+      assert.ok(rows.length > 0 && rows.length <= 120, "Native logs result is not the bounded production log tail");
+      assert.ok(
+        rows.some((row) => row.event === "tool_memory" && row.action === "logs" && row.sessionID === conversation.id),
+        "Native logs result lacks its production action event",
+      );
+      const persisted = readFileSync(logPath, "utf8").split("\n");
+      assert.ok(
+        result
+          .trim()
+          .split("\n")
+          .every((line) => persisted.includes(line)),
+        "Native logs returned unpersisted rows",
+      );
+    } else if (key === "settings") {
+      const settings = JSON.parse(result);
+      for (const [name, value] of Object.entries(manualConfig))
+        assert.deepEqual(settings[name], value, `Manual setting ${name} differs from activated config`);
+      record.activeConfig = settings;
+    } else if (key === "reset") {
+      assert.equal(
+        result,
+        `Reset memory for session ${conversation.id}.`,
+        "V1 slash reset without confirm did not succeed",
+      );
+      resetTemplate =
+        "<!-- stm:v1 -->\n## Session Memory\n\n" +
+        ["User Instructions", "Long Horizon Context", "Decisions", "Conclusions", "Active References"]
+          .map((heading) => `### ${heading}\n- None captured yet.\n`)
+          .join("\n");
+      assert.equal(
+        readFileSync(memoryPath, "utf8"),
+        resetTemplate,
+        "Reset did not persist the exact empty memory template",
+      );
+      assert.ok(!existsSync(checkpoint), "Reset did not remove the checkpoint");
+      const rows = logRowsSince(logBefore);
+      assert.ok(
+        rows.some((row) => row.event === "memory_reset" && row.sessionID === conversation.id),
+        "Production reset event missing",
+      );
+      Object.assign(record, {
+        template: resetTemplate,
+        checkpointRemoved: true,
+        syntax: "/stm reset (V1 slash command; not tool confirmation syntax)",
+      });
+    }
+    if (resetTemplate) {
+      assert.equal(readFileSync(memoryPath, "utf8"), resetTemplate, "Fresh reset checks changed memory");
+      assert.ok(!existsSync(checkpoint), "Fresh reset checks recreated checkpoint");
+    } else {
+      assert.deepEqual(readFileSync(memoryPath), beforeMemory, `${key} changed memory before reset`);
+      assert.deepEqual(readFileSync(checkpoint), beforeCheckpoint, `${key} changed checkpoint before reset`);
+    }
+    record.verdict = "PASS";
+  }
+  for (const key of [...manualUsage.required, "showAfterReset", "statusAfterReset"]) {
+    assert.equal(
+      (manualUsage.results[key] as { verdict?: string } | undefined)?.verdict,
+      "PASS",
+      `Missing or failed manual usage command: ${key}`,
+    );
+  }
+  manualUsage.verdict = "PASS";
+  stages.run.evidence =
+    "Unpaced shared core exact initial/followup durable turns and provider requests with rapid-turn timestamps retained in evidence (rapid-turn candidate passed); all required native manual commands validated from production synthetic JSON results and persistence after isolated host restart, not model ACK";
 } catch (error) {
+  if (manualUsage.verdict === "PENDING") manualUsage.verdict = "FAIL";
   stages[current] = { verdict: "FAIL", evidence: redact(String(error)) };
   evidence.error = redact(String(error));
   process.exitCode = 1;
@@ -829,6 +1194,7 @@ workflow: try {
   evidence.elapsedMs = Date.now() - started;
   evidence.verdict =
     cleanupSucceeded &&
+    (setupOnly || manualUsage.verdict === "PASS") &&
     (setupOnly ? [stages.install, stages.load, stages.setup] : Object.values(stages)).every(
       (stage) => stage.verdict === "PASS",
     )

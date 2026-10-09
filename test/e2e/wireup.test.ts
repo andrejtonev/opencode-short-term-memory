@@ -17,7 +17,6 @@ import {
   disableStmPluginSymlink,
   enableStmPluginSymlink,
   type E2EWorkspace,
-  isServeRunning,
   readLog,
   readMemoryFile,
   setupE2EWorkspace,
@@ -48,8 +47,8 @@ beforeAll(async () => {
   await waitForStmLoaded(ws);
 });
 
-afterAll(() => {
-  if (isServeRunning(SERVE_PORT)) stopServe(SERVE_PORT);
+afterAll(async () => {
+  await stopServe(SERVE_PORT);
   if (ws) {
     if (pluginEnabled) {
       disableStmPluginSymlink(ws);

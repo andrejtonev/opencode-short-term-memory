@@ -8,7 +8,9 @@ generation probe is separate and unchanged.
 
 ## Validation Without Hosts
 
-From the repository root, using the existing installed dependencies:
+From the repository root, using the root development dependencies (including
+`node_modules/typescript` and `node_modules/prettier`) and the installed fixture
+dependencies:
 
 ```sh
 /home/dev/.bun/bin/bun test --isolate fixtures/v2-generation-probe/tui-output
@@ -21,9 +23,10 @@ baseline, packaging, readiness, file-state, screen and failure-observation helpe
 
 ## Authorized Live Workflow
 
-Requires existing production `dist` artifacts, installed fixture dependencies,
-the pinned host binary and tmux. This command launches hosts; run it only with
-separate authorization, not as part of ordinary fixture validation:
+Requires existing production `dist` artifacts, the root checkout dependencies,
+installed fixture dependencies, the pinned host binary and tmux. This command
+launches hosts; run it only with separate authorization, not as part of ordinary
+fixture validation:
 
 ```sh
 /usr/bin/timeout --kill-after=5s 100s /home/dev/.bun/bin/bun fixtures/v2-generation-probe/tui-output/production-acceptance.ts
@@ -68,9 +71,12 @@ This is an existing run, not a new execution performed by the retirement task.
 ## Scope Limits
 
 The named exact-version package target is backed by locally staged publishable
-files and a pinned host-compatible NPM cache generation. Dependencies are linked
-from the existing installation. This proves staged packaged activation, not a
-clean registry install, dependency installation, publication or release readiness.
+files and a pinned host-compatible NPM cache generation. The staged acceptance
+workflow uses dependencies from the checkout root and the installed fixture
+dependencies; it is not a clean production-final-artifact qualification. This
+proves staged packaged activation, not a clean registry install, dependency
+installation, publication or release readiness. Clean native tarball
+qualification remains covered by the existing native tarball scripts.
 
 The model-free workflow does not cover a successful native committed update;
 shared unit tests cover committed-update logic. Settled messages are imported

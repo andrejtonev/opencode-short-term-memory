@@ -46,7 +46,12 @@ export type AutomaticMemoryObservation = {
   summaryRequests: readonly ProviderRequest[];
 };
 
+export type ExpectedInjection = { transport: "system"; role: "system" } | { transport: "no-reply"; role: "user" };
+
+const defaultInjection: ExpectedInjection = { transport: "system", role: "system" };
+
 export type SharedCoreAdapter = {
+  expectedInjection?: ExpectedInjection;
   // Bind to a fresh native conversation and configure the provider with the shared fixture responses.
   // Capture requests from before submission; settle the prompt and read durable history.
   prompt(text: string): Promise<PromptObservation>;
@@ -67,7 +72,11 @@ function check(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(`Shared core parity: ${message}`);
 }
 
-export function assertCorePrompt(observation: PromptObservation, prompt: string): string {
+export function assertCorePrompt(
+  observation: PromptObservation,
+  prompt: string,
+  expectedInjection: ExpectedInjection = defaultInjection,
+): string {
   const { messages, primaryRequests } = observation;
   check(messages.length >= 2, "missing durable conversation");
   const ids = messages.map((message) => message.id);
@@ -89,7 +98,13 @@ export function assertCorePrompt(observation: PromptObservation, prompt: string)
   );
   check(primaryRequests.length > 0, "no primary provider evidence");
   for (const request of primaryRequests) {
-    const latestUser = request.messages.filter((message) => message.role === "user").at(-1);
+    const latestUser = request.messages
+      .filter(
+        (message) =>
+          message.role === "user" &&
+          !(expectedInjection.transport === "no-reply" && message.text.startsWith("[MEMORY_SYSTEM]\n")),
+      )
+      .at(-1);
     check(latestUser?.text === prompt, "primary request does not contain exact supplied user prompt");
     check(
       !request.messages.some((message) => message.text.includes("<conversation_update>\n")),
@@ -132,31 +147,35 @@ export function assertCoreMemory(observation: AutomaticMemoryObservation, assist
   }
 }
 
-export function assertCoreInjection(observation: PromptObservation): void {
+export function assertCoreInjection(
+  observation: PromptObservation,
+  expectedInjection: ExpectedInjection = defaultInjection,
+): void {
   check(observation.primaryRequests.length > 0, "no followup primary provider evidence");
   for (const request of observation.primaryRequests) {
     check(
       request.messages.some((message) => {
-        if (message.role !== "system") return false;
+        if (message.role !== expectedInjection.role) return false;
         const marker = message.text.indexOf("[MEMORY_SYSTEM]");
         if (marker < 0) return false;
+        if (expectedInjection.transport === "no-reply" && !message.text.startsWith("[MEMORY_SYSTEM]\n")) return false;
         const memory = message.text.slice(marker);
         return memory.includes("STM_PROBE_MEMORY_SENTINEL:shared-core-parity") && memory.includes("- Use port 7319.");
       }),
-      "followup lacks system-role memory marker, literal memory sentinel and port decision",
+      `followup lacks ${expectedInjection.role}-role memory marker, literal memory sentinel and port decision`,
     );
   }
 }
 
 export async function runSharedCoreScenario(adapter: SharedCoreAdapter): Promise<SharedCoreReport> {
   const initial = await adapter.prompt(sharedCoreScenario.initialPrompt);
-  const initialID = assertCorePrompt(initial, sharedCoreScenario.initialPrompt);
+  const initialID = assertCorePrompt(initial, sharedCoreScenario.initialPrompt, adapter.expectedInjection);
   check(initial.messages.length === 2, "initial prompt did not start a fresh durable conversation");
   const initialMemory = await adapter.waitForAutomaticMemory(initialID);
   assertCoreMemory(initialMemory, initialID, sharedCoreScenario.initialPrompt);
 
   const followup = await adapter.prompt(sharedCoreScenario.followupPrompt);
-  const followupID = assertCorePrompt(followup, sharedCoreScenario.followupPrompt);
+  const followupID = assertCorePrompt(followup, sharedCoreScenario.followupPrompt, adapter.expectedInjection);
   check(followup.messages.length === initial.messages.length + 2, "followup did not append exactly one durable turn");
   for (const [index, message] of initial.messages.entries()) {
     const retained = followup.messages[index]!;
@@ -165,7 +184,7 @@ export async function runSharedCoreScenario(adapter: SharedCoreAdapter): Promise
       "followup changed prior durable history",
     );
   }
-  assertCoreInjection(followup);
+  assertCoreInjection(followup, adapter.expectedInjection);
   const followupMemory = await adapter.waitForAutomaticMemory(followupID);
   assertCoreMemory(followupMemory, followupID, sharedCoreScenario.followupPrompt);
 

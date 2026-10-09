@@ -618,12 +618,9 @@ export const SessionMemoryPlugin = async (
         if (sessionID) {
           if (isSessionTerminal(sessionID)) return;
           if (sessionParents.has(sessionID)) return;
-          const s = ensureSessionState(sessionID, sessionStates, sessionStatesOrder, MAX_SESSION_STATES);
-          const now = Date.now();
-          if (now - s.lastIdleScheduledAt < Math.max(config.debounceMs, 1500)) return;
-          s.lastIdleScheduledAt = now;
+          const schedulingGeneration = lifecycleFor(sessionID).generation;
           await ensureMemoryFile(sessionID, config);
-          scheduleMemoryUpdate(client, sessionID, "session_idle", config);
+          scheduleMemoryUpdate(client, sessionID, "session_idle", config, schedulingGeneration);
         }
       }
 

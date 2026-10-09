@@ -4,8 +4,7 @@
 // test/e2e/README.md for how to run.
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { existsSync, rmSync } from "node:fs";
-import { homedir } from "node:os";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 
 import {
@@ -13,7 +12,6 @@ import {
   disableStmPluginSymlink,
   enableStmPluginSymlink,
   type E2EWorkspace,
-  isServeRunning,
   listMemoryFiles,
   parseStartupTime,
   readLog,
@@ -37,15 +35,6 @@ let pluginEnabled = false;
 
 beforeAll(async () => {
   if (!ENABLED) return;
-  // Belt-and-suspenders: if a previous manual run left a stm.jsonc in
-  // the real global config, delete it so the "no global pollution"
-  // assertion below is checking this suite, not stale state.
-  const realGlobal = join(homedir(), ".config", "opencode", "stm.jsonc");
-  try {
-    if (existsSync(realGlobal)) rmSync(realGlobal, { force: true });
-  } catch {
-    // best-effort
-  }
   ws = setupE2EWorkspace();
   enableStmPluginSymlink(ws);
   pluginEnabled = true;
@@ -54,8 +43,8 @@ beforeAll(async () => {
   await waitForStmLoaded(ws);
 });
 
-afterAll(() => {
-  if (isServeRunning(SERVE_PORT)) stopServe(SERVE_PORT);
+afterAll(async () => {
+  await stopServe(SERVE_PORT);
   if (ws) {
     if (pluginEnabled) {
       disableStmPluginSymlink(ws);
@@ -142,7 +131,7 @@ describe("clean summarizer side session tracking", () => {
     // doesn't wait 30s of idle debounce.
     await writeStmProjectConfig(ws, { summarizerMode: "clean", debug: true, debounceMs: 200 });
     // Restart the serve so the new config takes effect.
-    stopServe(SERVE_PORT);
+    await stopServe(SERVE_PORT);
     await startServe(ws, SERVE_PORT);
     await waitForStmLoaded(ws);
 
@@ -180,7 +169,7 @@ describe("orphan side sessions cleaned up on next opencode startup", () => {
 
     // Restart serve → plugin should run cleanupOrphanedSideSessions and
     // delete both stale entries.
-    stopServe(SERVE_PORT);
+    await stopServe(SERVE_PORT);
     await startServe(ws, SERVE_PORT);
     await waitForStmLoaded(ws);
 
@@ -209,7 +198,7 @@ describe("factory startup is <10ms under a live opencode", () => {
   test("factory_returned_ms is under 10ms in the serve stderr", async () => {
     if (!ENABLED) return;
     // Restart so we capture a fresh [STM-STARTUP] line.
-    stopServe(SERVE_PORT);
+    await stopServe(SERVE_PORT);
     await startServe(ws, SERVE_PORT);
     await waitForStmLoaded(ws);
 
@@ -222,14 +211,14 @@ describe("factory startup is <10ms under a live opencode", () => {
   });
 });
 
-// ── 5. No global config pollution ───────────────────────────────────
+// ── 5. Isolated XDG config remains unpolluted ───────────────────────
 
-describe("e2e tests do not pollute the user's global opencode config", () => {
-  test("~/.config/opencode/stm.jsonc is not created by the e2e run", () => {
+describe("isolated XDG config remains unpolluted", () => {
+  test("startup does not create an isolated global stm.jsonc", () => {
     if (!ENABLED) return;
-    // Plugin startup must never create a global STM config. The isolated
-    // XDG_CONFIG_HOME is defense in depth; the real user config stays untouched.
-    const realGlobal = join(homedir(), ".config", "opencode", "stm.jsonc");
-    expect(existsSync(realGlobal)).toBe(false);
+    // Plugin startup must not create a global STM config in the isolated
+    // XDG_CONFIG_HOME. The user's real config is intentionally not inspected.
+    const isolatedGlobal = join(ws.xdgHome, "opencode", "stm.jsonc");
+    expect(existsSync(isolatedGlobal)).toBe(false);
   });
 });

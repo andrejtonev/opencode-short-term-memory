@@ -364,20 +364,22 @@ const EXAMPLE_CONFIG_CONTENT = `{
   // Session memory plugin on/off
   "enabled": true,
 
-  // Model used by the summarizer (provider/model). An empty value inherits
-  // the active OpenCode model; set this explicitly only to override it.
+  // Model used by the summarizer (provider/model). V1 clean: empty uses the fresh host default;
+  // V1 active supports an explicit override. V2 clean: empty uses the current model or an override;
+  // V2 active does not support an explicit override.
   "memoryModel": "",
 
   // clean | active
   "summarizerMode": "${DEFAULT_CONFIG.summarizerMode}",
 
-  // Interval at which to inject memory summarization into chat (every N user turns)
+  // Delivery cadence: every N eligible user turns while delivery is enabled.
   "remindEveryN": ${DEFAULT_CONFIG.remindEveryN},
 
-  // Enable legacy periodic system-transform memory delivery
+  // V1: select legacy system-transform delivery instead of normal noReply.
+  // V2: opt in to all system injection, independent of updates.
   "enableLegacyPeriodicSystemTransform": ${DEFAULT_CONFIG.enableLegacyPeriodicSystemTransform},
 
-  // Max chars stored in session memory markdown
+  // Target length used to normalize stored session memory; not a strict file limit.
   "maxMemoryLength": ${DEFAULT_CONFIG.maxMemoryLength},
 
   // Debug logging

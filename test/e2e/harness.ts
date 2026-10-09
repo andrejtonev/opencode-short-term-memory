@@ -8,6 +8,7 @@
 
 import { execSync, spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync, mkdtempSync } from "node:fs";
+import { createServer } from "node:net";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
@@ -17,8 +18,9 @@ const PLUGIN_SOURCE = resolve(__dirname, "..", "..", "src", "index.ts");
 const STM_E2E_MODEL = process.env.STM_E2E_MODEL ?? "opencode-go/deepseek-v4-flash";
 const STM_E2E_FALLBACK_MODEL = process.env.STM_E2E_FALLBACK_MODEL ?? "opencode-go/deepseek-v4-flash";
 const SERVE_PORT = Number(process.env.STM_E2E_PORT ?? 18999);
+const SERVE_HOST = "127.0.0.1";
 const RUN_TIMEOUT_MS = Number(process.env.STM_E2E_TIMEOUT ?? 180_000);
-const SERVE_STDOUT = "ignore" as const;
+const SERVE_STDOUT = "pipe" as const;
 const SERVE_STDERR = "pipe" as const;
 
 // ── Skip condition ───────────────────────────────────────────────────
@@ -176,6 +178,7 @@ export function isolateRunEnv(ws: E2EWorkspace): NodeJS.ProcessEnv {
 // ── Project config seeding ───────────────────────────────────────────
 
 export interface StmSeedConfig {
+  enabled?: boolean;
   summarizerMode?: "clean" | "active";
   debounceMs?: number;
   memoryModel?: string;
@@ -184,6 +187,8 @@ export interface StmSeedConfig {
   remindEveryN?: number;
   cleanFallbackToActiveSession?: boolean;
   sideSessionRetries?: number;
+  injectInSubagents?: boolean;
+  logMaxLines?: number;
   includeAgentsMdOnFirstUpdate?: boolean;
   enableLegacyPeriodicSystemTransform?: boolean;
 }
@@ -221,10 +226,82 @@ export async function writeStmProjectConfig(ws: E2EWorkspace, cfg: StmSeedConfig
 
 // ── opencode serve lifecycle ─────────────────────────────────────────
 
-const _serveProcesses = new Map<number, { proc: ChildProcess; stderrFile: string }>();
+type ServeProcess = {
+  proc: ChildProcess;
+  startupTimer?: NodeJS.Timeout;
+  exit: Promise<void>;
+  resolveExit: () => void;
+  exited: boolean;
+};
 
-export function startServe(ws: E2EWorkspace, port = SERVE_PORT, opts?: { serveTimeoutMs?: number }): Promise<number> {
-  stopServe(port);
+const _serveProcesses = new Map<number, ServeProcess>();
+
+const SERVE_STOP_TIMEOUT_MS = 5_000;
+
+function terminateServe(entry: ServeProcess): void {
+  if (entry.exited) return;
+  try {
+    entry.proc.kill("SIGTERM");
+  } catch {
+    // already dead
+  }
+}
+
+async function stopOwnedServe(port: number): Promise<void> {
+  const entry = _serveProcesses.get(port);
+  if (!entry) return;
+
+  terminateServe(entry);
+  const waitForExit = async (): Promise<boolean> => {
+    let timeout!: NodeJS.Timeout;
+    const exited = await Promise.race([
+      entry.exit.then(() => true),
+      new Promise<boolean>((resolve) => {
+        timeout = setTimeout(() => resolve(false), SERVE_STOP_TIMEOUT_MS);
+      }),
+    ]);
+    clearTimeout(timeout);
+    return exited;
+  };
+
+  if (!(await waitForExit()) && !entry.exited) {
+    try {
+      entry.proc.kill("SIGKILL");
+    } catch {
+      // already dead
+    }
+    if (!(await waitForExit()) && !entry.exited) {
+      throw new Error(`Owned serve process on port ${port} did not exit after SIGKILL.`);
+    }
+  }
+  if (entry.exited && _serveProcesses.get(port) === entry) _serveProcesses.delete(port);
+}
+
+async function assertPortAvailable(port: number): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const probe = createServer();
+    const onError = (error: NodeJS.ErrnoException) => {
+      probe.close();
+      if (error.code === "EADDRINUSE") {
+        reject(new Error(`Serve port ${port} is already occupied; refusing to kill or adopt its listener.`));
+      } else {
+        reject(error);
+      }
+    };
+    probe.once("error", onError);
+    probe.listen({ host: "127.0.0.1", port }, () => {
+      probe.close((error) => (error ? reject(error) : resolve()));
+    });
+  });
+}
+
+export async function startServe(
+  ws: E2EWorkspace,
+  port = SERVE_PORT,
+  opts?: { serveTimeoutMs?: number },
+): Promise<number> {
+  await stopOwnedServe(port);
+  await assertPortAvailable(port);
 
   // Open the log file for streaming append. We write each stderr chunk
   // as it arrives so waitForStmLoaded can grep a live file, not a buffer
@@ -233,12 +310,44 @@ export function startServe(ws: E2EWorkspace, port = SERVE_PORT, opts?: { serveTi
   writeFileSync(ws.serveLogPath, "", "utf-8"); // truncate
 
   return new Promise((resolve, reject) => {
-    const proc = spawn("opencode", ["serve", "--port", String(port), "--print-logs"], {
+    const proc = spawn("opencode", ["serve", "--hostname", SERVE_HOST, "--port", String(port), "--print-logs"], {
       cwd: ws.projectDir,
       stdio: [SERVE_STDOUT, SERVE_STDOUT, SERVE_STDERR],
       detached: false,
       env: isolateServeEnv(ws),
     });
+
+    let resolveExit!: () => void;
+    const exit = new Promise<void>((resolveExitPromise) => {
+      resolveExit = resolveExitPromise;
+    });
+    const entry: ServeProcess = {
+      proc,
+      exit,
+      resolveExit,
+      exited: false,
+    };
+    // Register ownership before checking readiness. Only this exact child may
+    // be stopped; descendants are intentionally not group-killed.
+    _serveProcesses.set(port, entry);
+
+    const closeLog = () => {
+      try {
+        require("node:fs").closeSync(logFd);
+      } catch {
+        // already closed
+      }
+    };
+    const observeExit = () => {
+      if (entry.exited) return;
+      entry.exited = true;
+      if (entry.startupTimer) clearTimeout(entry.startupTimer);
+      closeLog();
+      entry.resolveExit();
+      if (_serveProcesses.get(port) === entry) _serveProcesses.delete(port);
+    };
+    proc.once("exit", observeExit);
+    proc.once("error", observeExit);
 
     // Stream stderr to the log file as it arrives.
     proc.stderr?.on("data", (chunk: Buffer) => {
@@ -249,21 +358,29 @@ export function startServe(ws: E2EWorkspace, port = SERVE_PORT, opts?: { serveTi
       }
     });
 
+    let stdoutTail = "";
+    const listeningMarker = `opencode server listening on http://${SERVE_HOST}:${port}`;
+    let hasListeningMarker = false;
+    proc.stdout?.on("data", (chunk: Buffer) => {
+      stdoutTail = (stdoutTail + chunk.toString("utf-8")).slice(-4000);
+      if (stdoutTail.split(/\r?\n/).some((line) => line === listeningMarker)) hasListeningMarker = true;
+    });
+
     let settled = false;
-    const settle = (ok: boolean, val: number | Error) => {
+    const settle = async (ok: boolean, val: number | Error) => {
       if (settled) return;
       settled = true;
-      try {
-        require("node:fs").closeSync(logFd);
-      } catch {
-        // already closed
-      }
+      if (entry.startupTimer) clearTimeout(entry.startupTimer);
       if (ok) {
-        _serveProcesses.set(port, { proc, stderrFile: ws.serveLogPath });
         resolve(val as number);
       } else {
-        proc.kill("SIGTERM");
-        reject(val);
+        terminateServe(entry);
+        try {
+          await stopOwnedServe(port);
+          reject(val);
+        } catch (error) {
+          reject(new Error(`${(val as Error).message}\n${(error as Error).message}`));
+        }
       }
     };
 
@@ -273,8 +390,12 @@ export function startServe(ws: E2EWorkspace, port = SERVE_PORT, opts?: { serveTi
     const deadline = Date.now() + serveStartupMs;
 
     const check = () => {
-      if (isServeRunning(port)) {
-        settle(true, port);
+      if (entry.exited) {
+        settle(false, new Error(`Serve on port ${port} exited before becoming ready.`));
+        return;
+      }
+      if (proc.exitCode === null && hasListeningMarker && isServeRunning(port)) {
+        void settle(true, port);
         return;
       }
       if (Date.now() > deadline) {
@@ -285,57 +406,33 @@ export function startServe(ws: E2EWorkspace, port = SERVE_PORT, opts?: { serveTi
         } catch {
           // ignore
         }
-        settle(
+        void settle(
           false,
-          new Error(`Serve on port ${port} did not start within ${serveStartupMs / 1000}s. ` + `Stderr tail:\n${tail}`),
+          new Error(
+            `Serve on port ${port} did not start within ${serveStartupMs / 1000}s. ` +
+              `Listening marker: ${hasListeningMarker ? "seen" : "missing"}. ` +
+              `Stdout tail:\n${stdoutTail}\nStderr tail:\n${tail}`,
+          ),
         );
         return;
       }
-      setTimeout(check, 500);
+      entry.startupTimer = setTimeout(check, 500);
     };
 
-    setTimeout(check, 1_000);
+    entry.startupTimer = setTimeout(check, 1_000);
   });
 }
 
-export function stopServe(port?: number): void {
+export async function stopServe(port?: number): Promise<void> {
   const targetPort = port ?? SERVE_PORT;
-  if (targetPort !== SERVE_PORT) {
-    throw new Error(
-      `stopServe called with port=${targetPort} (expected ${SERVE_PORT}). ` +
-        `Refusing to fuser-kill a non-test port to avoid touching the developer's opencode.`,
-    );
-  }
-  const entry = _serveProcesses.get(targetPort);
-  if (entry) {
-    try {
-      entry.proc.kill("SIGTERM");
-    } catch {
-      // already dead
-    }
-    _serveProcesses.delete(targetPort);
-  }
-  try {
-    execSync(`fuser -k ${targetPort}/tcp 2>/dev/null || true`, { stdio: "pipe" });
-  } catch {
-    // ignore
-  }
+  await stopOwnedServe(targetPort);
 }
 
 export function isServeRunning(port = SERVE_PORT): boolean {
-  // Guard against accidentally probing the user's long-running opencode
-  // (e.g. the web instance on :4000). The harness only ever uses
-  // SERVE_PORT (default 18999) — anything else is operator error.
-  if (port !== SERVE_PORT) {
-    throw new Error(
-      `isServeRunning called with port=${port} (expected ${SERVE_PORT}). ` +
-        `Refusing to probe a non-test port to avoid touching the developer's opencode.`,
-    );
-  }
   try {
     // The test serve is unsecured (we strip OPENCODE_SERVER_PASSWORD in
     // isolateServeEnv), so a plain curl to / is the right health check.
-    const resp = execSync(`curl -s -o /dev/null -w "%{http_code}" http://localhost:${port}/`, {
+    const resp = execSync(`curl -s -o /dev/null -w "%{http_code}" http://${SERVE_HOST}:${port}/`, {
       stdio: "pipe",
       encoding: "utf-8",
       timeout: 5_000,

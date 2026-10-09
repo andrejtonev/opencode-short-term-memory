@@ -1,6 +1,45 @@
 # RC Readiness
 
-**Latest status: 2026-10-06, rc.2 follow-up.** Published **1.4.0-rc.1** fails
+## Latest Status: 2026-10-08, RC3 Bounded Qualification
+
+**Authoritative current status: the corrected immutable RC3 candidate is
+bounded-qualified.** Candidate tarball
+`/home/dev/workspace/opencode-work/stm-readiness-improvements/user-text-pack-2026-10-08-ThDeA0TZ/atonev-opencode-short-term-memory-1.4.0-rc.3.tgz`
+has SHA256
+`1adcfdc1eefaa23704d7117f7f7321c40518f9312427d4723e55877f83a48212` and passed
+the recorded clean consumer plus native V1/V2 checks below. The candidate is
+**unpublished**: registry acceptance, minimum-host V2, semantic quality,
+committed manual coverage and typed acceptance remain separate gates. No
+publication, registry push, build, live run, or commit was performed by this
+documentation update; the recorded runs were performed by the lead.
+
+| Component/Logic Block                  | Current Findings/Hypothesis                                                                                                                                                                                                                               | Implications                                                                                                                                  | Verification Status                                                     |
+| -------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
+| Corrected immutable candidate/consumer | Candidate tarball `atonev-opencode-short-term-memory-1.4.0-rc.3.tgz`, SHA256 `1adcfdc1eefaa23704d7117f7f7321c40518f9312427d4723e55877f83a48212`; consumer evidence `/tmp/opencode/stm-package-acceptance-xYWR0B/evidence.json` is PASS in 22.512 seconds. | Clean tarball installation, public imports and strict published STM declaration closure pass for the corrected bytes.                         | PASS; exact artifact and evidence path recorded.                        |
+| Corrected native V1 qualification      | Evidence `/home/dev/workspace/opencode-work/stm-published-rc-e2e/v1-MBMuWp/evidence.json` is PASS in 49.725 seconds; rapid-turn candidate passed, with 1 ms memory-observed gap and 372 ms prompt gap.                                                    | Bounded V1 native workflow qualification for the corrected unpublished candidate.                                                             | PASS; lead-performed run, exact evidence path retained.                 |
+| Corrected native V2 qualification      | Evidence `/home/dev/workspace/opencode-work/stm-published-rc-e2e/v2-hVzQze/evidence.json` is PASS in 52.736 seconds, run `e532102b-ac2f-4f0e-b19e-5e047930cef1`; all 72 packaged files and manual coverage passed.                                        | Bounded V2 native workflow qualification for the corrected unpublished candidate, not minimum-host support.                                   | PASS; lead-performed run, exact evidence path retained.                 |
+| Full and safety test gates             | Final suite: 897 pass, 0 fail, 4,074 assertions in 30.26 seconds, including the five safety tests; strict types, format and build checks passed.                                                                                                          | Source-level and static gates are green for the tested working tree; this does not convert bounded qualification into publication acceptance. | PASS; results lead-reported and not rerun by this documentation update. |
+| Separate acceptance scope              | Registry/`plugin add`, minimum-host V2, semantic quality, committed manual coverage and typed acceptance remain separate acceptance work.                                                                                                                 | Do not broaden the bounded-candidate result into published, minimum-host or semantic-support claims.                                          | Pending separately; not a bounded-candidate qualification blocker.      |
+| Historical candidate                   | Prior digest `1ca912f7176d4c8965ce2f6a1763b6762851de62ea9c1fd82fcd8f798ad29e22` remains retained as historical evidence only.                                                                                                                             | Keep the prior short link separate; do not attribute its evidence to the corrected user-text candidate.                                       | Historical record retained; superseded as current authority.            |
+
+The external correction record is
+`/home/dev/workspace/opencode-work/stm-readiness-improvements/2026-10-08--user-text-corrections.html`;
+the exact consumer and native evidence JSONs are the source for the recorded
+results above. The packaged README remains frozen preparation wording; this
+document is the current evidence/status record.
+
+**Next milestone:** close the separately scoped registry/`plugin add`,
+minimum-host V2, semantic-quality, committed-manual and typed-acceptance gates
+against this exact digest using the absolute Bun executable
+`/home/dev/.bun/bin/bun` where Bun commands are required. Publication remains a
+separate authorization step.
+
+## Historical Status And Audit
+
+All sections below preserve their dated findings, release identities and pending
+checklists. They are historical records, not the authoritative current status.
+
+**Historical status: 2026-10-06, rc.2 follow-up.** Published **1.4.0-rc.1** fails
 native V1 setup but passes the recorded V2 workflow. An unpublished corrected V1
 candidate passes all stages; the exact **1.4.0-rc.2** tarball now passes V2 native
 named-file bootstrap and all workflow stages, with passing package gates and 61
@@ -9,7 +48,7 @@ for a focused commit within this disclosed scope, **not published**; this is not
 rc.2 registry or `plugin add` acceptance. See
 [RC.2 follow-up](#rc2-follow-up-2026-10-06); earlier status notes remain historical.
 
-**Current status: 2026-10-06.** Local RC qualification is complete within the
+**Historical status: 2026-10-06.** Local RC qualification is complete within the
 disclosed bounded scope for **1.4.0-rc.1**, dist-tag **rc**. Publication has not
 occurred; final `dev` commit/push identity is recorded externally by the
 finalization procedure. See

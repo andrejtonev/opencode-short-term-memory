@@ -2,40 +2,45 @@
   // Session memory plugin on/off
   "enabled": true,
 
-  // Empty inherits the active OpenCode session model. Set provider/model to override it.
+  // Model used by the summarizer. V1 clean mode omits an empty override and lets the host resolve it.
+  // V2 uses the current session model when empty; an explicit override is unsupported in active mode.
   "memoryModel": "",
 
   // clean | active
   "summarizerMode": "clean",
 
-  // If true, clean-mode failures will call active-session prompt fallback.
-  // Keep false to prevent side-session prompts from appearing in desktop chat.
+  // If true, clean-mode failures may fall back to the active session after retries.
+  // V1 catches failures after retries; V2 permits only settled retryable clean failures (not explicit override, timeout, or cancellation).
   "cleanFallbackToActiveSession": false,
 
   // If true, include AGENTS.md content in the first memory update prompt per session
   "includeAgentsMdOnFirstUpdate": false,
 
-  // If true, inject parent session memory into sub-agent (fork) sessions
+  // If true, inject parent memory into eligible task children.
+  // Parent-memory snapshots: V1 subagents at creation; V2 task children on first eligible read, gated by injection settings.
   "injectInSubagents": true,
 
-  // Number of retries for clean side-session summarizer failures (0 = no retry)
+  // Number of retries after clean generation failures (0 = no retry).
+  // V1 creates a fresh side session for each attempt; V2 uses bounded standalone generation attempts.
   "sideSessionRetries": 1,
 
-  // Interval at which to inject memory summarization into chat (every N prompts from user)
+  // V1 selects legacy system-transform transport; V2 gates all system injection.
+  "enableLegacyPeriodicSystemTransform": false,
+
+  // Inject every N eligible user turns when delivery is enabled; V2 also requires the gate above.
   "remindEveryN": 4,
 
-  // Max chars stored in session memory markdown
+  // Target length for stored session memory markdown; a complete line plus metadata can exceed it.
   "maxMemoryLength": 10000,
 
-  // Max chars from recent conversation sent to summarizer
+  // Max conversation-content chars per update chunk; prompt overhead is not included.
   "maxUpdateInputLength": 20000,
 
-  // Max number of recent messages processed per update cycle (limits look-back on stale checkpoints)
+  // V1 look-back limit; V2 applies this limit per update chunk.
   "maxDeltaMessages": 200,
 
-  // Collapse consecutive assistant messages between user turns into the last reply
-  // true = lower token usage, may drop intermediate reasoning
-  // false = keep every assistant turn (default)
+  // Collapse consecutive visible assistant replies between user turns into the last reply.
+  // Internal/reasoning parts are filtered before this option; false keeps every visible reply.
   "collapseAssistantBursts": false,
 
   // Debounce for scheduled updates (ms)
@@ -47,6 +52,6 @@
   // Max JSONL lines kept in .opencode/memory/session-memory.log
   "logMaxLines": 300,
 
-  // Directory where memory files, checkpoints, and logs are stored (relative to project root)
+  // Directory for memory files, checkpoints, and logs (relative to process CWD, not guaranteed project root).
   "memoryDir": ".opencode/memory",
 }

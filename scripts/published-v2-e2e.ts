@@ -89,6 +89,23 @@ const stages: Record<Stage, { verdict: string; evidence?: unknown }> = {
 };
 const commands: object[] = [];
 const rpc: object[] = [];
+const manualUsage = {
+  verdict: "NOTRUN",
+  required: [
+    "default",
+    "status",
+    "settings",
+    "logs",
+    "show",
+    "update",
+    "setupRefusal",
+    "setupCreate",
+    "setupNoOverwrite",
+    "resetRefusal",
+    "resetConfirmed",
+  ],
+  results: {} as Record<string, unknown>,
+};
 const children = new Set<ChildProcess>();
 const password = randomUUID();
 const basic = Buffer.from(`opencode:${password}`).toString("base64");
@@ -135,12 +152,13 @@ const evidence: Record<string, unknown> = {
   runID,
   root,
   started: new Date(started).toISOString(),
-  investigationArtifact: "/home/dev/workspace/opencode-work/stm-readiness-improvements/2026-10-08--v2-runner.html",
+  investigationArtifact: "/home/dev/workspace/opencode-work/stm-readiness-improvements/2026-10-08--rc3-end-to-end.html",
   limits: { outerMs: 350_000, internalMs: 320_000, cleanupReserveMs: 15_000 },
   spec,
   stages,
   commands,
   rpc,
+  manualUsage,
   environment: { ...env, OPENCODE_PASSWORD: "[redacted]" },
   socket,
   inference: "Existing stm-probe/deterministic provider fixture; deterministic inference, not semantic-quality proof",
@@ -356,6 +374,8 @@ workflow: try {
     productVersion = manifest.version;
     evidence.version = productVersion;
     configuredTarget = `${manifest.name}@file:${tarball}`;
+    spec = configuredTarget;
+    evidence.spec = spec;
     const extraction = join(root, "candidate-extracted");
     await mkdir(extraction);
     await command(["/usr/bin/tar", "-xzf", tarball, "-C", extraction], 5_000);
@@ -632,6 +652,7 @@ workflow: try {
     screenName = text.replaceAll(" ", "-"),
     sessionID = session.id,
   ) {
+    let renderedScreen = "";
     await call(
       "session.command",
       { sessionID, name: "stm", text },
@@ -645,13 +666,17 @@ workflow: try {
         await save(`${screenName}-screen.txt`, screen);
         const rows = screen.split(/\r?\n/);
         const titleMatch = rows.map((row) => new RegExp(`${title}[ \\t]+esc[ \\t]*$`).exec(row)).find(Boolean);
-        return !!titleMatch && dialogRows(rows.map((row) => row.slice(titleMatch.index)).join("\n"), title, lines);
+        const rendered =
+          !!titleMatch && dialogRows(rows.map((row) => row.slice(titleMatch.index)).join("\n"), title, lines);
+        if (rendered) renderedScreen = screen;
+        return rendered;
       },
       `Actual ${title} dialog missing expected rendered output`,
     );
     dialogs.push({ text, title, lines, screen: join(root, `${screenName}-screen.txt`), rendered: true });
     await terminal(["send-keys", "-t", "published:0.0", "Escape"]);
     await Bun.sleep(200);
+    return renderedScreen;
   }
   stages.load = {
     verdict: "PASS",
@@ -675,23 +700,24 @@ workflow: try {
   const createdSha256 = createHash("sha256").update(createdBytes).digest("hex");
   evidence.setupCreatedConfig = { path: setupPath, text: created, bytes: createdBytes.length, sha256: createdSha256 };
   await save("setup-created-stm.jsonc", created);
-  if (setupOnly) {
-    await nativeCommand(
-      "setup confirm true",
-      "STM setup",
-      [`No example config created: stm.jsonc already exists in ${dirname(setupPath)}.`],
-      "setup-confirm-true-no-overwrite",
-    );
-    const repeatedBytes = readFileSync(setupPath);
-    const repeatedSha256 = createHash("sha256").update(repeatedBytes).digest("hex");
-    evidence.setupNoOverwrite = {
-      path: setupPath,
-      beforeSha256: createdSha256,
-      afterSha256: repeatedSha256,
-      bytesUnchanged: createdBytes.equals(repeatedBytes),
-    };
-    assert.deepEqual(repeatedBytes, createdBytes, "Repeated confirmed setup changed config bytes");
-  }
+  await nativeCommand(
+    "setup confirm true",
+    "STM setup",
+    [`No example config created: stm.jsonc already exists in ${dirname(setupPath)}.`],
+    "setup-confirm-true-no-overwrite",
+  );
+  const repeatedBytes = readFileSync(setupPath);
+  const repeatedSha256 = createHash("sha256").update(repeatedBytes).digest("hex");
+  evidence.setupNoOverwrite = {
+    path: setupPath,
+    beforeSha256: createdSha256,
+    afterSha256: repeatedSha256,
+    bytesUnchanged: createdBytes.equals(repeatedBytes),
+  };
+  assert.deepEqual(repeatedBytes, createdBytes, "Repeated confirmed setup changed config bytes");
+  manualUsage.results.setupRefusal = { verdict: "PASS", configExistsAfter: false };
+  manualUsage.results.setupCreate = { verdict: "PASS", path: setupPath, sha256: createdSha256 };
+  manualUsage.results.setupNoOverwrite = { verdict: "PASS", sha256: repeatedSha256, bytesUnchanged: true };
   const readTelemetry = () =>
     existsSync(env.PROBE_TELEMETRY_PATH!)
       ? readFileSync(env.PROBE_TELEMETRY_PATH!, "utf8")
@@ -707,9 +733,8 @@ workflow: try {
   assert.deepEqual(setupInvocations, [], "Native setup commands invoked the provider");
   stages.setup = {
     verdict: "PASS",
-    evidence: setupOnly
-      ? "Native refusal rendered/no write; confirmed creation rendered; repeated confirmation no-overwrite rendered/config bytes unchanged"
-      : "Native refusal rendered/no write; confirmed creation rendered and actual config preserved before test settings adjustment",
+    evidence:
+      "Native refusal rendered/no write; confirmed creation rendered; repeated confirmation no-overwrite rendered/config bytes unchanged before test settings adjustment",
   };
   if (setupOnly) {
     const finalSession = await call("session.get", { sessionID: session.id }, (signal) =>
@@ -1840,6 +1865,28 @@ workflow: try {
     .filter((row) => row.event === "v2_memory_update_committed" && row.sessionID === session.id);
   assert.ok(commits.some((row) => row.checkpointID === checkpoint));
   const logRowsBeforeManual = log.split(/\r?\n/).filter(Boolean).length;
+  await nativeCommand(
+    "",
+    "STM status",
+    [
+      "generation: v2",
+      `enabled: ${settings.enabled}`,
+      `authoritative sessionID: ${session.id}`,
+      `configuredMemoryModel: ${settings.memoryModel || "none"}`,
+      "effectiveMemoryModel: unresolved",
+      "memoryModelSelection: inherited-current-session",
+      `summarizerMode: ${settings.summarizerMode}`,
+      `memoryDir: ${settings.memoryDir}`,
+      `memoryPath: ${memoryPath}`,
+      `checkpointPath: ${checkpointPath}`,
+      "resetBoundary: absent",
+      `memoryBytes: ${Buffer.byteLength(memory, "utf8")}`,
+      `checkpoint: ${checkpoint}`,
+      "updaterBusy: false",
+    ],
+    "default",
+  );
+  manualUsage.results.default = { verdict: "PASS", arguments: "", sessionID: session.id };
   await nativeCommand("update", "STM update", [
     "generation: v2",
     `sessionID: ${session.id}`,
@@ -1864,11 +1911,20 @@ workflow: try {
   );
   assert.ok(!manualLogRows.some((row) => row.event === "v2_memory_update_committed"));
   evidence.manualUpdate = { status: "skipped", reason: "no_assistant_in_delta", unchanged: true, manualLogRows };
+  manualUsage.results.update = {
+    verdict: "PASS",
+    status: "skipped",
+    reason: "no_assistant_in_delta",
+    committed: false,
+    unchanged: true,
+    manualLogRows,
+  };
   await nativeCommand("show", "STM show", [
     "## Session Memory",
     "### User Instructions",
     "STM_PROBE_MEMORY_SENTINEL:shared-core-parity",
   ]);
+  manualUsage.results.show = { verdict: "PASS", sessionID: session.id, persisted: true };
   await nativeCommand("status", "STM status", [
     "generation: v2",
     `sessionID: ${session.id}`,
@@ -1876,6 +1932,44 @@ workflow: try {
     `checkpoint: ${checkpoint}`,
     "updaterBusy: false",
   ]);
+  manualUsage.results.status = { verdict: "PASS", sessionID: session.id, checkpoint };
+  await nativeCommand("settings", "STM settings", [
+    '"generation": "v2"',
+    '"resolvedConfig":',
+    '"memoryModel": ""',
+    `"summarizerMode": "${settings.summarizerMode}"`,
+    `"memoryDir": "${settings.memoryDir.replaceAll("\\", "\\\\")}"`,
+    '"effective":',
+    '"memoryModel": null',
+    '"memoryModelSelection": "inherited-current-session"',
+    `"summarizerMode": "${settings.summarizerMode}"`,
+    '"activeWithExplicitMemoryModel": "unsupported"',
+  ]);
+  manualUsage.results.settings = {
+    verdict: "PASS",
+    resolvedConfig: settings,
+    effective: {
+      memoryModel: null,
+      memoryModelSelection: "inherited-current-session",
+      summarizerMode: settings.summarizerMode,
+      memoryDir: settings.memoryDir,
+    },
+  };
+  const exactSkip = manualLogRows.find(
+    (row) => row.event === "v2_memory_update_skipped" && row.reason === "no_assistant_in_delta",
+  );
+  assert.ok(exactSkip, "Manual update did not produce an exact session-scoped skip row for logs");
+  const renderedLogs = await (async () => {
+    const before = readFileSync(productionLogPath, "utf8").split(/\r?\n/).filter(Boolean).length;
+    const screen = await nativeCommand("logs", "STM logs", ["event", JSON.stringify(exactSkip)], "logs");
+    return { before, rows: readFileSync(productionLogPath, "utf8").split(/\r?\n/).filter(Boolean), screen };
+  })();
+  manualUsage.results.logs = {
+    verdict: "PASS",
+    exactSessionSkip: exactSkip,
+    persistedRows: renderedLogs.rows.length,
+    renderedScreen: renderedLogs.screen,
+  };
   const followupInvocations = sharedCore.rawTelemetry.followup.rawRequests.filter(
     (row) => !isSummary(normalizeRequest(row)),
   );
@@ -2392,6 +2486,12 @@ workflow: try {
     "Unconfirmed reset changed checkpoint bytes",
   );
   resetEvidence.refusalPreserved = true;
+  manualUsage.results.resetRefusal = {
+    verdict: "PASS",
+    memoryUnchanged: true,
+    checkpointUnchanged: true,
+    sessionID: resetSession.id,
+  };
   await call(
     "session.wait",
     { sessionID: resetSession.id },
@@ -2449,6 +2549,13 @@ workflow: try {
   const resetBoundary = parseV2ResetBoundary(readFileSync(resetBoundaryPath));
   assert.deepEqual(resetBoundary, { version: 1, anchorID: resetAnchor });
   resetEvidence.boundaryAnchor = resetBoundary.anchorID;
+  manualUsage.results.resetConfirmed = {
+    verdict: "PASS",
+    sessionID: resetSession.id,
+    anchor: resetBoundary.anchorID,
+    immediateTemplate: true,
+    checkpointEmpty: true,
+  };
   const resetMemory = readFileSync(resetMemoryPath);
   const resetCheckpoint = readFileSync(resetCheckpointPath);
   assert.deepEqual(resetMemory, Buffer.from(RESET_MEMORY_TEMPLATE, "utf8"), "Reset did not write the exact template");
@@ -2518,6 +2625,13 @@ workflow: try {
     "Post-reset update changed boundary",
   );
   resetEvidence.verdict = "PASS";
+  for (const key of manualUsage.required)
+    assert.equal(
+      (manualUsage.results[key] as { verdict?: string } | undefined)?.verdict,
+      "PASS",
+      `Missing or failed manual usage command: ${key}`,
+    );
+  manualUsage.verdict = "PASS";
   advancedUpdates.phases.push({ name: "reset-boundary", ...resetEvidence });
   advancedUpdates.verdict = "PASS";
   evidence.advancedNativeCoverage = {

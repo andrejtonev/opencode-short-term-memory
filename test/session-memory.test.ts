@@ -75,24 +75,44 @@ describe("SessionMemoryPlugin general functionality", () => {
     expect(String(status)).toContain("# Session Memory Plugin Status");
     expect(String(status)).toContain(`- activeSessionID: ${sessionID}`);
     expect(String(status)).toContain("- summarizerMode: clean");
-    expect(String(status)).toContain("- memoryModelSelection: inherited-current-session");
+    expect(String(status)).toContain("- memoryModelSelection: host-default");
     expect(String(status)).toContain("- injectCharCount: 0");
   });
 
-  test("status and settings distinguish inherited model selection from an explicit override", async () => {
-    const inherited = await createPlugin({ memoryModel: "", debug: false });
-    const inheritedStatus = await inherited.plugin.tool.stm_memory_status.execute({}, {});
-    const inheritedSettings = await inherited.plugin.tool.stm_memory_settings.execute({}, {});
-    expect(String(inheritedStatus)).toContain("- memoryModelSelection: inherited-current-session");
-    expect(String(inheritedSettings)).toContain('"memoryModelSelection": "inherited-current-session"');
+  for (const modelCase of [
+    {
+      name: "empty model uses the host default",
+      input: "",
+      selection: "host-default",
+      diagnostic: "- memoryModel: host-default (no override configured)",
+    },
+    {
+      name: "valid model uses an explicit override",
+      input: "openai/gpt-5.3",
+      selection: "explicit-override",
+      diagnostic: "- memoryModel: openai/gpt-5.3",
+    },
+    {
+      name: "malformed model reports an invalid override",
+      input: "not-a-model",
+      selection: "invalid-override",
+      diagnostic: "- memoryModel: unavailable (invalid override ignored; no configured selection)",
+    },
+  ]) {
+    test(`status and settings ${modelCase.name}`, async () => {
+      const { plugin } = await createPlugin({ memoryModel: modelCase.input, debug: false });
+      const status = String(await plugin.tool.stm_memory_status.execute({}, {}));
+      const settings = JSON.parse(String(await plugin.tool.stm_memory_settings.execute({}, {}))) as {
+        memoryModel: string;
+        memoryModelSelection: string;
+      };
 
-    const explicit = await createPlugin({ memoryModel: "openai/gpt-5.3", debug: false });
-    const explicitStatus = await explicit.plugin.tool.stm_memory_status.execute({}, {});
-    const explicitSettings = await explicit.plugin.tool.stm_memory_settings.execute({}, {});
-    expect(String(explicitStatus)).toContain("- memoryModelSelection: explicit-override");
-    expect(String(explicitStatus)).toContain("- memoryModel: openai/gpt-5.3");
-    expect(String(explicitSettings)).toContain('"memoryModelSelection": "explicit-override"');
-  });
+      expect(status).toContain(`- memoryModelSelection: ${modelCase.selection}`);
+      expect(status).toContain(modelCase.diagnostic);
+      expect(settings.memoryModelSelection).toBe(modelCase.selection);
+      expect(settings.memoryModel).toBe(modelCase.input);
+    });
+  }
 
   test("startup does not seed global STM config", async () => {
     const { plugin } = await createPlugin({ debug: false });
@@ -1194,6 +1214,77 @@ describe("SessionMemoryPlugin general functionality", () => {
     await new Promise((resolve) => setTimeout(resolve, 250));
 
     expect(client.calls.prompt.length).toBe(1);
+  });
+
+  test("session.idle checkpoints a trailing turn within the debounce window", async () => {
+    const sessionID = `idle-trailing-${Date.now()}`;
+    const messagesRows: unknown[] = [];
+    const summarizerPrompts: string[] = [];
+    const fakeClient = createFakeClient({
+      messagesRows,
+      promptResponder: (args?: unknown) => {
+        const prompt = String((args as any)?.body?.parts?.[0]?.text || "");
+        summarizerPrompts.push(prompt);
+        return prompt.includes("second user turn")
+          ? "## Session Memory\n\n### Current Context\n- second summary\n"
+          : "## Session Memory\n\n### Current Context\n- first summary\n";
+      },
+    });
+    const { plugin, client, cleanup } = await createPlugin(
+      {
+        summarizerMode: "active",
+        debounceMs: 100,
+        debug: false,
+      },
+      fakeClient,
+    );
+
+    const waitForCheckpoint = async (expected: string, timeoutMs: number) => {
+      const deadline = performance.now() + timeoutMs;
+      while (performance.now() < deadline) {
+        const checkpoint = (await readText(checkpointPathFor(sessionID), "")).trim();
+        if (checkpoint === expected) return checkpoint;
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      return (await readText(checkpointPathFor(sessionID), "")).trim();
+    };
+
+    try {
+      // Keep session.created from bootstrapping an empty history; the first
+      // actual idle event must be the only trigger for the m1/m2 checkpoint.
+      await plugin["session.created"]({ sessionID });
+      messagesRows.push(
+        { id: "m1", role: "user", content: "first user turn" },
+        { id: "m2", role: "assistant", content: "first assistant turn" },
+      );
+
+      const idle = { event: { type: "session.idle", properties: { sessionID } } } as any;
+      await plugin.event(idle);
+      expect(await waitForCheckpoint("m2", 1000)).toBe("m2");
+
+      const secondIdleAt = performance.now();
+      messagesRows.push(
+        { id: "m3", role: "user", content: "second user turn" },
+        { id: "m4", role: "assistant", content: "second assistant turn" },
+      );
+      await plugin.event(idle);
+      expect(await waitForCheckpoint("m4", 1000)).toBe("m4");
+
+      expect(performance.now() - secondIdleAt).toBeLessThanOrEqual(1000);
+      expect(client.calls.summarizerPrompts).toHaveLength(2);
+      expect(summarizerPrompts).toHaveLength(2);
+      expect(summarizerPrompts[1]).toContain("USER:\nsecond user turn");
+      expect(summarizerPrompts[1]).toContain("ASSISTANT:\nsecond assistant turn");
+      expect(summarizerPrompts[1]).not.toContain("first user turn");
+      expect(summarizerPrompts[1]).not.toContain("first assistant turn");
+
+      const memory = await readText(memoryPathFor(sessionID), "");
+      expect(Buffer.byteLength(memory, "utf8")).toBeGreaterThan(0);
+      expect(memory).toContain("- second summary");
+    } finally {
+      await plugin["session.deleted"]({ sessionID });
+      await cleanup();
+    }
   });
 
   test("session.updated logs session_updated", async () => {

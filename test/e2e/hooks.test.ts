@@ -29,7 +29,6 @@ import {
   disableStmPluginSymlink,
   enableStmPluginSymlink,
   type E2EWorkspace,
-  isServeRunning,
   readLog,
   readMemoryFile,
   setupE2EWorkspace,
@@ -63,8 +62,8 @@ beforeAll(async () => {
   await waitForStmLoaded(ws);
 });
 
-afterAll(() => {
-  if (isServeRunning(SERVE_PORT)) stopServe(SERVE_PORT);
+afterAll(async () => {
+  await stopServe(SERVE_PORT);
   if (ws) {
     if (pluginEnabled) {
       disableStmPluginSymlink(ws);
@@ -379,7 +378,7 @@ describe("remindEveryN controls how often the memory is injected", () => {
       remindEveryN: 2,
       enableLegacyPeriodicSystemTransform: true,
     });
-    stopServe(SERVE_PORT);
+    await stopServe(SERVE_PORT);
     await startServe(ws, SERVE_PORT);
     await waitForStmLoaded(ws);
 
@@ -419,7 +418,7 @@ describe("memory injection dedups the same messageID within the duplicate window
       remindEveryN: 1,
       enableLegacyPeriodicSystemTransform: true,
     });
-    stopServe(SERVE_PORT);
+    await stopServe(SERVE_PORT);
     await startServe(ws, SERVE_PORT);
     await waitForStmLoaded(ws);
 
