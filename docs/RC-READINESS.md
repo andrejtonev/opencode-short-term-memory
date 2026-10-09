@@ -1,26 +1,30 @@
 # RC Readiness
 
-## Latest Status: 2026-10-09, RC4 Preparation
+## Latest Status: 2026-10-09, RC4 Bounded Qualification
 
-**Current status: RC4 preparation is pending exact-artifact qualification.** The
-source base is commit `a3c22514967b7eca567c038330fd552d1cb06209`; the RC4
-identity is new and has not yet been assigned an immutable tarball digest. This
-preparation records no runtime or dependency changes. The npm tag remains
-unpublished, and the environment denies push; this document authorizes neither
-publication nor repository mutation beyond this documentation update.
+**Current status: the exact unpublished 1.4.0-rc.4 candidate is
+bounded-qualified.** The tarball was built from commit
+`f715752859d44d5dc0b18071ca6c6598264c8dc5` (preparation base
+`a3c22514967b7eca567c038330fd552d1cb06209`) and has SHA256
+`1d99e9968faac8af1cfa58d5816fd8b6f0e32251d04174efa76b9398e29a0646`.
+The intended npm dist-tag remains `rc`; the candidate itself is unpublished.
+Git push is blocked by the execution environment despite the user's prior safe
+push authorization. npm publication was not requested. These results do not
+claim registry acceptance, minimum-host coverage, or semantic quality.
 
-| Component/Logic Block     | Current Findings/Hypothesis                                                                        | Implications                                                                                          | Verification Status                                                           |
-| ------------------------- | -------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
-| RC4 source base           | New RC4 preparation is based on `a3c22514967b7eca567c038330fd552d1cb06209`.                        | Candidate identity must remain tied to this exact source base until a release artifact is produced.   | Source base resolved; exact RC4 artifact identity pending.                    |
-| Runtime and dependencies  | This preparation introduces no runtime changes and no dependency changes.                          | No new runtime or dependency behavior is claimed for RC4.                                             | Documentation scope recorded; no build or dependency qualification performed. |
-| Exact artifact and digest | RC4 tarball/package identity and SHA256 have not yet been created or verified.                     | Build and hash evidence are required before consumer or native results can be attributed to RC4.      | Pending separately.                                                           |
-| Consumer qualification    | Clean consumer acceptance has not yet been run against an RC4 artifact.                            | Published-package imports/declarations remain unqualified for RC4.                                    | Pending separately.                                                           |
-| Native milestone          | Native V1/V2 and current-revision acceptance have not yet been run against the exact RC4 artifact. | Native compatibility and current-revision behavior must not be inferred from historical RC3 evidence. | Pending separately.                                                           |
-| Publication and push      | npm remains unpublished; push is denied by the execution environment.                              | Do not claim registry acceptance, publication, or remote branch advancement.                          | Blocked/unauthorized in this environment.                                     |
+| Component/Logic Block      | Current Findings/Hypothesis                                                                                                                                                                                                   | Implications                                                                                                                           | Verification Status                                                            |
+| -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| RC4 artifact identity      | `/home/dev/workspace/opencode-work/stm-readiness-improvements/rc4-pack-2026-10-09-3rdmhE3f/atonev-opencode-short-term-memory-1.4.0-rc.4.tgz`; SHA256 recorded above.                                                          | All qualification results below refer to these immutable RC4 bytes and build commit `f715752`.                                         | PASS; tarball and hash independently recorded.                                 |
+| Clean consumer             | Consumer evidence `/tmp/opencode/stm-package-acceptance-tR2lSj/evidence.json`: PASS in 35.461 seconds; failures empty; cost 0.                                                                                                | Fresh package imports and strict public STM/TUI declaration gates pass for RC4.                                                        | PASS; exact evidence JSON parsed independently.                                |
+| Native V1                  | Evidence `/home/dev/workspace/opencode-work/stm-published-rc-e2e/v1-Gpt35C/evidence.json`: PASS in 49.678 seconds; the 368 ms rapid-turn value is the initial-prompt-to-follow-up interval, not total run or checkpoint time. | Bounded V1 native qualification passes for the exact unpublished RC4 candidate; the rapid-turn figure is reported only as an interval. | PASS; exact evidence JSON parsed independently.                                |
+| Native V2/current revision | Evidence `/home/dev/workspace/opencode-work/stm-published-rc-e2e/v2-5k2zpW/evidence.json`: PASS in 45.145 seconds, run `27edfce6-5426-4b39-9bd2-619d2344e8e5`; all 72 packaged files and manual coverage passed.              | Bounded V2/current-revision native qualification passes, including the recorded durable and setup paths.                               | PASS; exact evidence JSON parsed independently; cleanup verification retained. |
+| Checkout gates             | Commit `f715752` records the RC4 candidate; lead reports 897 tests, 0 failures, 4,076 assertions and hooks PASS.                                                                                                              | Source-level gates are green for the candidate commit; this does not expand the bounded package claim.                                 | PASS; lead-recorded result, not rerun by this documentation-only update.       |
+| Publication and push       | Candidate is unpublished; npm publication was not requested; Git push is blocked by an environment deny despite prior user authorization.                                                                                     | Do not claim registry acceptance or remote branch advancement; no further user authorization request is needed.                        | Git push blocked by environment permission.                                    |
 
-**Next milestone:** build the exact RC4 artifact from the source base, record
-its SHA256, run the clean consumer and native qualification milestones against
-those same bytes, and retain their evidence before making any release claim.
+**Next milestone:** retain this exact digest and evidence as the RC4 candidate
+record. Any future Git push requires the execution environment's permission;
+npm publication was not requested. Minimum-host, semantic-quality and any
+broader release gates remain separate from this bounded qualification.
 
 ## Historical Status: 2026-10-08, RC3 Bounded Qualification
 
