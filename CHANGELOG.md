@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.0-rc.4] - 2026-10-09
+
+Unpublished prerelease candidate based on local dev commit `a3c22514967b7eca567c038330fd552d1cb06209`. This candidate includes the finalized code and release text, with every suite awaiting owned Bun server shutdown before teardown. It adds no production feature or runtime-routing change relative to the latest committed dev state. The version identity is a new rc.4 candidate, not a requalification of rc.3; exact rc.4 qualification remains pending in the release notes. The `rc` tag is unchanged and this candidate is unpublished.
+
+### Known Limits
+
+- Registry/bootstrap, minimum-host compatibility, semantic quality, typed acceptance and committed manual coverage remain separately scoped release gates; see [RC Readiness](docs/RC-READINESS.md) for the retained evidence and gaps.
+
 ## [1.4.0-rc.3] - 2026-10-08
 
 Unpublished prerelease candidate for V2 parity and readiness improvements, not shipped in published `1.4.0-rc.2`. The bounded qualification recorded below applies only to the exact immutable candidate; no publication is established by this entry.
