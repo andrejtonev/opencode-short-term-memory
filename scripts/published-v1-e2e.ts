@@ -51,6 +51,13 @@ const manualUsage = {
 };
 const requests: object[] = [];
 const mockRequests: { path: string; body: unknown; summary: boolean; containsConversation: boolean }[] = [];
+const nativeTask = {
+  marker: "STM_TASK_NATIVE: invoke exactly the stm-probe-child subagent.",
+  childMarker: "STM_CHILD_NATIVE_TASK: respond with the child fixture sentinel.",
+  callID: "call_stm_probe_child_1",
+  emitted: false,
+  finishReason: undefined as string | undefined,
+};
 const children = new Set<ChildProcess>();
 const env: Record<string, string> = {
   HOME: join(root, "home"),
@@ -485,16 +492,81 @@ workflow: try {
       if (request.method !== "POST" || !path.endsWith("/chat/completions"))
         return new Response("Not found", { status: 404 });
       const body = await request.json();
-      const serialized = JSON.stringify(body.messages);
-      const summary = /<conversation_update>|<existing_memory>/.test(serialized);
+      const typedBody = body as {
+        messages?: { role?: string; content?: unknown }[];
+        tools?: { function?: { name?: string }; name?: string }[];
+        stream?: boolean;
+      };
+      const serialized = JSON.stringify(typedBody.messages ?? []);
+      const textContent = (content: unknown) =>
+        typeof content === "string"
+          ? content
+          : Array.isArray(content)
+            ? content
+                .filter((part): part is { type: string; text?: string } => Boolean(part && typeof part === "object"))
+                .filter((part) => part.type === "text")
+                .map((part) => part.text ?? "")
+                .join("\n")
+            : "";
+      const latestUserText = textContent(
+        typedBody.messages?.filter((message) => message.role === "user").at(-1)?.content,
+      );
+      const summary =
+        /^You are a short[\u2011-]term session memory processor for an OpenCode plugin\./.test(latestUserText) &&
+        latestUserText.includes("<conversation_update>") &&
+        latestUserText.includes("<existing_memory>");
       const containsConversation = serialized.includes(sharedCoreScenario.initialPrompt);
       mockRequests.push({ path, body, summary, containsConversation });
-      const content = summary ? sharedCoreScenario.memoryResponse : sharedCoreScenario.assistantText;
+      const hasTaskTool = (typedBody.tools ?? []).some((tool) => (tool.function?.name ?? tool.name) === "task");
+      const hasToolResult = (typedBody.messages ?? []).some((message) => message.role === "tool");
+      const isNativeTaskTurn = serialized.includes(nativeTask.marker) && hasTaskTool;
       const common = {
         id: `chatcmpl-${mockRequests.length}`,
         created: Math.floor(Date.now() / 1000),
         model: "deterministic",
       };
+      if (isNativeTaskTurn && !hasToolResult && !nativeTask.emitted) {
+        nativeTask.emitted = true;
+        nativeTask.finishReason = "tool_calls";
+        const argumentsText = JSON.stringify({
+          description: "STM probe child",
+          prompt: nativeTask.childMarker,
+          subagent_type: "stm-probe-child",
+        });
+        const toolChunks = [
+          {
+            ...common,
+            object: "chat.completion.chunk",
+            choices: [
+              {
+                index: 0,
+                delta: {
+                  role: "assistant",
+                  tool_calls: [
+                    {
+                      index: 0,
+                      id: nativeTask.callID,
+                      type: "function",
+                      function: { name: "task", arguments: argumentsText },
+                    },
+                  ],
+                },
+                finish_reason: null,
+              },
+            ],
+          },
+          {
+            ...common,
+            object: "chat.completion.chunk",
+            choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }],
+          },
+        ];
+        return new Response(
+          toolChunks.map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`).join("") + "data: [DONE]\n\n",
+          { headers: { "content-type": "text/event-stream" } },
+        );
+      }
+      const content = summary ? sharedCoreScenario.memoryResponse : sharedCoreScenario.assistantText;
       if (!body.stream)
         return Response.json({
           ...common,
@@ -537,6 +609,18 @@ workflow: try {
             cost: { input: 0, output: 0 },
           },
         },
+      },
+    },
+    agent: {
+      "stm-probe-parent": {
+        mode: "primary",
+        model: "isolated/deterministic",
+        permission: { "*": "deny", task: { "*": "deny", "stm-probe-child": "allow" } },
+      },
+      "stm-probe-child": {
+        mode: "subagent",
+        model: "isolated/deterministic",
+        permission: { "*": "deny", task: "deny" },
       },
     },
     permission: { "*": "deny" },
@@ -871,6 +955,7 @@ workflow: try {
     info: {
       id: string;
       role: string;
+      agent?: string;
       summary?: boolean;
       synthetic?: boolean;
       internal?: boolean;
@@ -1103,7 +1188,7 @@ workflow: try {
     log.includes('"event":"side_session_created"') && log.includes('"event":"side_session_summarize_done"'),
     "Clean side-session lifecycle missing",
   );
-  const checkpointID = readFileSync(checkpoint, "utf8").trim();
+  let checkpointID = readFileSync(checkpoint, "utf8").trim();
   evidence.memory = { memoryPath, checkpoint, checkpointID, text: readFileSync(memoryPath, "utf8") };
   stages.memory = {
     verdict: "PASS",
@@ -1196,6 +1281,258 @@ workflow: try {
     childDeleted = true;
   }
   assert.equal(childDeleted, true, "Native child cleanup did not use the DELETE session endpoint");
+  // Exercise the production TaskTool itself. The API-created child above remains an
+  // independent lifecycle check; this phase must discover its child exclusively
+  // from TaskTool metadata/durable tool-part metadata.
+  const taskParentMemoryBefore = readFileSync(memoryPath);
+  const taskParentCheckpointBefore = readFileSync(checkpoint);
+  const taskRequestStart = mockRequests.length;
+  const taskResponse = await api(
+    `/session/${conversation.id}/message`,
+    {
+      model: { providerID: "isolated", modelID: "deterministic" },
+      agent: "stm-probe-parent",
+      parts: [{ type: "text", text: nativeTask.marker }],
+    },
+    90_000,
+  );
+  const taskParentHistory = (await api(`/session/${conversation.id}/message`, undefined, 30_000)) as {
+    info: {
+      id: string;
+      role: string;
+      agent?: string;
+      summary?: boolean;
+      synthetic?: boolean;
+      internal?: boolean;
+      time?: { completed?: number };
+    };
+    parts: {
+      type: string;
+      text?: string;
+      tool?: string;
+      callID?: string;
+      metadata?: Record<string, unknown>;
+      state?: { status?: string; metadata?: Record<string, unknown>; output?: string; error?: string };
+      [key: string]: unknown;
+    }[];
+  }[];
+  const taskRequests = mockRequests.slice(taskRequestStart);
+  type TaskToolEvidence = {
+    verdict: "PENDING" | "PASS";
+    parentID: string;
+    taskRequestRange: [number, number];
+    requests: ProviderRequest[];
+    submittedTaskUserIDs?: string[];
+    injectedMemoryUserIDs?: string[];
+    [key: string]: unknown;
+  };
+  const taskToolEvidence: TaskToolEvidence = {
+    verdict: "PENDING",
+    parentID: conversation.id,
+    taskRequestRange: [taskRequestStart, mockRequests.length],
+    requests: taskRequests.map(normalizeRequest),
+  };
+  evidence.taskToolChild = taskToolEvidence;
+  const exactMessageText = (content: unknown) =>
+    typeof content === "string"
+      ? content
+      : Array.isArray(content)
+        ? content
+            .filter((part): part is { type: string; text?: string } => Boolean(part && typeof part === "object"))
+            .filter((part) => part.type === "text")
+            .map((part) => part.text ?? "")
+            .join("\n")
+        : "";
+  const submittedTaskUsers = taskParentHistory.filter(
+    (message) =>
+      message.info.role === "user" &&
+      message.info.agent === "stm-probe-parent" &&
+      message.parts.some((part) => part.type === "text" && part.text === nativeTask.marker),
+  );
+  assert.equal(submittedTaskUsers.length, 1, "Native task marker was not submitted exactly once by the task parent");
+  const injectedMemoryUsers = taskParentHistory.filter(
+    (message) =>
+      message.info.role === "user" &&
+      message.info.agent === "stm-probe-parent" &&
+      message.parts.some((part) => part.type === "text" && part.text?.startsWith("[MEMORY_SYSTEM]")),
+  );
+  assert.equal(injectedMemoryUsers.length, 1, "Native task parent memory injection is missing or duplicated");
+  assert.equal(taskResponse.info?.agent, "stm-probe-parent", "Native task response used the wrong agent");
+  Object.assign(taskToolEvidence, {
+    submittedTaskUserIDs: submittedTaskUsers.map((message) => message.info.id),
+    injectedMemoryUserIDs: injectedMemoryUsers.map((message) => message.info.id),
+  });
+  const findString = (value: unknown, keys: ReadonlySet<string>): string | undefined => {
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        const found = findString(item, keys);
+        if (found) return found;
+      }
+      return undefined;
+    }
+    if (!value || typeof value !== "object") return undefined;
+    for (const [key, item] of Object.entries(value)) {
+      if (keys.has(key) && typeof item === "string" && item.length > 0 && item !== conversation.id) return item;
+      const found = findString(item, keys);
+      if (found) return found;
+    }
+    return undefined;
+  };
+  const taskResultSessionID =
+    findString(taskResponse, new Set(["sessionId", "sessionID"])) ??
+    findString(taskParentHistory, new Set(["sessionId", "sessionID"]));
+  const taskParts = taskParentHistory.flatMap((message) =>
+    message.parts.filter((part) => part.type === "tool" && part.tool === "task"),
+  );
+  assert.ok(taskParts.length > 0, "Native TaskTool produced no durable task tool part");
+  const taskPart = taskParts.at(-1)!;
+  assert.notEqual(
+    taskPart.state?.status,
+    "error",
+    `Native TaskTool refused or failed: ${taskPart.state?.error ?? taskPart.state?.output ?? "unknown error"}`,
+  );
+  assert.equal(taskPart.callID, nativeTask.callID, "Native TaskTool durable call ID differs from streamed call ID");
+  assert.equal(nativeTask.finishReason, "tool_calls", "Native mock did not emit a streaming tool_calls finish reason");
+  assert.ok(taskResultSessionID, "Native TaskTool result did not expose a child session ID");
+  const taskChildID = taskResultSessionID;
+  assert.notEqual(taskChildID, conversation.id, "TaskTool metadata resolved the parent instead of a child");
+  const taskChild = await api(`/session/${taskChildID}`, undefined, 30_000);
+  assert.equal(taskChild.parentID, conversation.id, "TaskTool child metadata has the wrong parentID");
+  const taskChildMemoryPath = join(memoryDir, `session_${taskChildID}.md`);
+  const taskChildCheckpointPath = join(memoryDir, "checkpoints", `${taskChildID}.last-message-id.txt`);
+  const parentTaskRequest = taskRequests.find((request) => {
+    const requestBody = request.body as {
+      messages?: { content?: unknown }[];
+      tools?: { function?: { name?: string } }[];
+    };
+    return (
+      requestBody.messages?.some((message) => exactMessageText(message.content) === nativeTask.marker) === true &&
+      requestBody.tools?.some((tool) => tool.function?.name === "task")
+    );
+  });
+  assert.ok(parentTaskRequest, "Native parent request did not expose the task tool with the exact marker");
+  const parentTaskBody = parentTaskRequest.body as {
+    messages?: { role?: string; content?: unknown }[];
+    tools?: { function?: { name?: string } }[];
+  };
+  const taskCallMessages =
+    parentTaskBody.messages?.filter((message) => exactMessageText(message.content) === nativeTask.marker) ?? [];
+  assert.equal(taskCallMessages.length, 1, "Native task provider request submitted the marker more than once");
+  assert.equal(taskCallMessages[0]?.role, "user", "Native task marker was not submitted as a user message");
+  assert.ok(parentTaskBody.tools?.some((tool) => tool.function?.name === "task"));
+  const taskCallRecord = {
+    callID: nativeTask.callID,
+    description: "STM probe child",
+    prompt: nativeTask.childMarker,
+    subagent_type: "stm-probe-child",
+  };
+  const childRequests = taskRequests
+    .filter((request) => {
+      const messages = (request.body as { messages?: { role?: string; content?: unknown }[] }).messages ?? [];
+      return messages.some(
+        (message) => message.role === "user" && JSON.stringify(message.content).includes(nativeTask.childMarker),
+      );
+    })
+    .map(normalizeRequest);
+  assert.ok(childRequests.length > 0, "Native TaskTool child produced no provider request evidence");
+  assert.ok(
+    childRequests.every((request) => !request.tools.includes("task")),
+    "Native TaskTool child retained recursive task permission",
+  );
+  assert.ok(
+    childRequests[0]?.messages.some(
+      (message) => message.role === "user" && message.text.includes(nativeTask.childMarker),
+    ),
+    "Native TaskTool child first provider request lacks its exact prompt marker",
+  );
+  assert.ok(
+    childRequests[0]?.messages.some(
+      (message) =>
+        message.role === "system" &&
+        message.text.includes("STM_PROBE_MEMORY_SENTINEL:shared-core-parity") &&
+        message.text.includes("- Use port 7319."),
+    ),
+    "Native TaskTool child first provider request lacks the parent memory system sentinel",
+  );
+  assert.equal(
+    taskResponse.parts?.find((part: { type?: string; text?: string }) => part.type === "text")?.text,
+    sharedCoreScenario.assistantText,
+    "Native TaskTool parent did not receive the ordinary fixture response after tool result",
+  );
+  assert.ok(
+    taskRequests.some((request) => {
+      const messages = (request.body as { messages?: { role?: string; content?: unknown }[] }).messages ?? [];
+      return messages.some(
+        (message) => message.role === "tool" && JSON.stringify(message.content).includes("task_id:"),
+      );
+    }),
+    "Native TaskTool tool result was not delivered to the parent provider request",
+  );
+  const taskParentCheckpointDeadline = Date.now() + remaining(30_000);
+  const taskParentAssistantID = taskParentHistory.at(-1)?.info.id;
+  while (
+    taskParentAssistantID &&
+    (!existsSync(checkpoint) || readFileSync(checkpoint, "utf8").trim() !== taskParentAssistantID) &&
+    Date.now() < taskParentCheckpointDeadline
+  ) {
+    await Bun.sleep(250);
+  }
+  await Bun.sleep(500);
+  const taskChildHistory = (await api(`/session/${taskChildID}/message`, undefined, 30_000)) as {
+    info: { role: string; summary?: boolean; synthetic?: boolean; internal?: boolean };
+    parts: { type: string; text?: string }[];
+  }[];
+  assert.equal(
+    taskChildHistory.at(-1)?.parts.find((part) => part.type === "text")?.text,
+    sharedCoreScenario.assistantText,
+    "Native TaskTool child did not persist the ordinary fixture response",
+  );
+  assert.ok(!existsSync(taskChildCheckpointPath), "Native TaskTool child created a checkpoint without a summary");
+  const taskParentAssistant = taskParentHistory.at(-1);
+  assert.ok(
+    taskParentAssistant && taskParentAssistant.info.role === "assistant",
+    "Native TaskTool parent assistant missing from history",
+  );
+  assert.equal(
+    readFileSync(checkpoint, "utf8").trim(),
+    taskParentAssistant?.info.id,
+    "Native TaskTool parent checkpoint did not advance to the latest durable assistant",
+  );
+  assert.ok(taskParentAssistantID, "Native TaskTool parent assistant ID missing after checkpoint settle");
+  checkpointID = taskParentAssistantID;
+  const taskChildLogRows = logRowsSince(coreLogBefore);
+  const forbiddenTaskErrors = new Set([
+    "collect_recent_messages_error",
+    "memory_update_clean_failed_no_fallback",
+    "memory_update_error",
+  ]);
+  assert.deepEqual(
+    taskChildLogRows.filter((row) => forbiddenTaskErrors.has(row.event)),
+    [],
+    "Native TaskTool lifecycle recorded a forbidden production error",
+  );
+  Object.assign(taskToolEvidence, {
+    verdict: "PASS",
+    callID: nativeTask.callID,
+    parentID: conversation.id,
+    childID: taskChildID,
+    requests: taskRequests.map(normalizeRequest),
+    taskCallRecord,
+    taskPart,
+    streamFinishReason: nativeTask.finishReason,
+    toolResultSessionID: taskResultSessionID,
+    parentMemoryBeforeSha256: createHash("sha256").update(taskParentMemoryBefore).digest("hex"),
+    parentCheckpointBefore: taskParentCheckpointBefore.toString(),
+    parentCheckpointAfter: readFileSync(checkpoint, "utf8").trim(),
+    childMemoryPath: taskChildMemoryPath,
+    childFirstProviderRequest: childRequests[0],
+    childCheckpointCreated: false,
+    childHistory: taskChildHistory,
+    forbiddenErrorEvents: [...forbiddenTaskErrors],
+    errorRows: taskChildLogRows.filter((row) => forbiddenTaskErrors.has(row.event)),
+  });
+  evidence.taskToolChild = taskToolEvidence;
+  await api(`/session/${taskChildID}`, undefined, 5_000, "DELETE");
   // Keep manual command turns outside the fresh shared-core request/history assertions.
   current = "run";
   manualUsage.verdict = "PENDING";

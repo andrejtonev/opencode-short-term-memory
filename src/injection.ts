@@ -1,4 +1,4 @@
-import type { SystemTransformInput, SystemTransformOutput, Client } from "./types";
+import type { SystemTransformInput, SystemTransformOutput, Client, UserExecutionMetadata } from "./types";
 import type { SessionMemoryConfig, RuntimeState } from "./memory-utils";
 import type { RuntimeContract } from "./runtime-contract";
 import { logEvent, readText, memoryPathFor, INJECTION_PREFIX, showToast } from "./memory-utils";
@@ -51,6 +51,7 @@ export async function deliverMemoryViaNoReply(
   config: SessionMemoryConfig,
   globalState: RuntimeState,
   state: SessionRuntimeState,
+  executionMetadata?: UserExecutionMetadata,
 ): Promise<boolean> {
   if (!config.enabled || !sessionID || !turnID || !memory.trim()) return false;
   const injectedMessage = buildTaggedMemoryForInjection(memory, config.maxMemoryLength);
@@ -88,6 +89,7 @@ export async function deliverMemoryViaNoReply(
     await runtime.deliverContextNoReply({
       sessionId: sessionID,
       context: {
+        ...(executionMetadata ?? {}),
         parts: [{ type: "text" as const, text: injectedMessage }],
       },
       noReply: true,

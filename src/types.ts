@@ -4,6 +4,15 @@ import type { Part } from "@opencode-ai/sdk";
 export type Client = PluginInput["client"];
 export type { OpencodeConfig, ToolContext };
 
+export interface UserExecutionMetadata {
+  agent?: string;
+  model?: {
+    providerID: string;
+    modelID: string;
+  };
+  tools?: Record<string, boolean>;
+}
+
 // Runtime hooks not yet fully typed by the SDK @opencode-ai/plugin
 export interface SessionCreatedInput {
   sessionID?: string;
@@ -44,11 +53,17 @@ export interface ChatMessageInput {
   messageID?: string;
   messageId?: string;
   id?: string;
+  agent?: string;
+  model?: UserExecutionMetadata["model"];
+  tools?: UserExecutionMetadata["tools"];
   message?: {
     id?: string;
     role?: string;
     content?: string;
     parts?: unknown[];
+    agent?: string;
+    model?: UserExecutionMetadata["model"];
+    tools?: UserExecutionMetadata["tools"];
   };
   parts?: unknown[];
 }
@@ -57,11 +72,17 @@ export interface ChatMessageOutput {
   messageID?: string;
   messageId?: string;
   id?: string;
+  agent?: string;
+  model?: UserExecutionMetadata["model"];
+  tools?: UserExecutionMetadata["tools"];
   message?: {
     id?: string;
     role?: string;
     content?: string;
     parts?: unknown[];
+    agent?: string;
+    model?: UserExecutionMetadata["model"];
+    tools?: UserExecutionMetadata["tools"];
   };
   parts?: Part[];
 }

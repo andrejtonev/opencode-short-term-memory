@@ -1,5 +1,40 @@
 # V1 Manual Acceptance
 
+## Addendum — native task-tool gap closure (2026-10-10)
+
+The current bounded native V1 run `v1-ZC68GX` completed in `49.545s` with the
+functional, diagnostic, and clean gates passing. Its retained evidence is
+`/home/dev/workspace/opencode-work/stm-published-rc-e2e/v1-ZC68GX/evidence.json`.
+The tested unpublished candidate is
+`/home/dev/workspace/opencode-work/stm-readiness-improvements/taskscriptfixed-pack-2026-10-10-9Ncp1SJP/atonev-opencode-short-term-memory-1.4.0-rc.4.tgz`
+with SHA256
+`fa539f3684d0edeb91c1a50aab0cce3c4a63689d4ca4df5f27267cb1d16b39f8`.
+These results apply only to those bytes; no new version, publication, or
+release claim is made.
+
+### Current gap-closure summary
+
+| Component/Logic Block            | Current Findings/Hypothesis                                                                                                                                                                                                                                                                                       | Implications                                                                                                                                                            | Verification Status                                                                                                        |
+| -------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| Native task-tool call            | The run exercised a streamed native task call (`call_stm_probe_child_1`), not an API-created synthetic child. The durable task portion recorded child/parent linkage and a SYSTEM prompt.                                                                                                                         | This closes the previously unexercised task-tool creation path for the bounded scenario, while retaining the distinction from literal TUI or model-semantic acceptance. | PASS in the retained run; evidence path above.                                                                             |
+| Durable-task checkpoint boundary | The child produced no child checkpoint or summary, while the parent checkpoint advanced as expected.                                                                                                                                                                                                              | The observed child boundary and parent advancement are documented without inferring a child result that was not emitted.                                                | PASS for the exercised native task scenario.                                                                               |
+| No-reply metadata                | The earlier V1 no-reply path omitted the selected agent. The corrected run now snapshots the native custom agent, model, and tools metadata; raw internal IDs and SYSTEM payloads are intentionally not reproduced here.                                                                                          | Native metadata preservation is demonstrated without turning implementation identifiers or system content into acceptance claims.                                       | PASS for the corrected path; malformed diagnostic rows and literal keyboard/realtime semantic checks remain separate gaps. |
+| Offline validation               | `908` local tests covering `4,142` assertions passed in `32s`; type and format scans also passed.                                                                                                                                                                                                                 | The documentation update is backed by the reported offline validation, but this addendum does not claim a new build or live run.                                        | PASS as reported; no build or live command was run for this documentation-only change.                                     |
+| Harness history                  | Seven native harness runs were used in this iteration. Earlier runs exposed permission ordering (`tInAge`), persisted global allow state (`iKHuVn`/`bwhMMr`), product-agent loss (`y4KmYK`), a stale manual baseline (`zVRYVb`), and a false nested-log summary classification (`QxJkNJ`) before the current run. | Prior failures remain disclosed as harness-fix history; they are not rewritten as product failures or erased by the current PASS.                                       | Historical failures retained; current run PASS.                                                                            |
+
+The native task call therefore closes the specific task-tool creation and
+metadata-preservation gap exercised here. A no-reply DCP path whose metadata
+remains absent is still an open gap, as are malformed diagnostic-row policy,
+literal keyboard interaction, and real semantic-result verification. The
+existing failure records below remain unchanged.
+
+### Exact current evidence references
+
+- Evidence: `/home/dev/workspace/opencode-work/stm-published-rc-e2e/v1-ZC68GX/evidence.json`
+- Candidate: `/home/dev/workspace/opencode-work/stm-readiness-improvements/taskscriptfixed-pack-2026-10-10-9Ncp1SJP/atonev-opencode-short-term-memory-1.4.0-rc.4.tgz`
+- Candidate SHA256: `fa539f3684d0edeb91c1a50aab0cce3c4a63689d4ca4df5f27267cb1d16b39f8`
+- Investigation artifact: `/home/dev/workspace/opencode-work/stm-readiness-improvements/2026-10-10--v1-gap-closure.html`
+
 ## Current acceptance record — 2026-10-10
 
 The current unpublished RC4 candidate is:

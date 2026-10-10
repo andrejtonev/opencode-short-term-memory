@@ -14,6 +14,7 @@ import type {
   CompactionOutput,
   CommandExecuteBeforeInput,
   CommandExecuteBeforeOutput,
+  UserExecutionMetadata,
 } from "./types";
 import type { RuntimeContract } from "./runtime-contract";
 import { mkdir } from "node:fs/promises";
@@ -75,6 +76,20 @@ type SharedRuntime = Pick<
   | "getTemporarySession"
 > &
   SummarizerRuntime;
+
+function snapshotUserExecutionMetadata(
+  preferred: ChatMessageOutput["message"] | undefined,
+  fallback: ChatMessageInput,
+): UserExecutionMetadata {
+  const agent = preferred?.agent ?? fallback.agent ?? fallback.message?.agent;
+  const model = preferred?.model ?? fallback.model ?? fallback.message?.model;
+  const tools = preferred?.tools ?? fallback.tools ?? fallback.message?.tools;
+  return {
+    ...(agent === undefined ? {} : { agent }),
+    ...(model === undefined ? {} : { model: { providerID: model.providerID, modelID: model.modelID } }),
+    ...(tools === undefined ? {} : { tools: { ...tools } }),
+  };
+}
 
 // ── Centralised constants ─────────────────────────────────
 const MEMORY_DIR_FALLBACK = ".opencode/memory";
@@ -936,6 +951,7 @@ export const SessionMemoryPlugin = async (
     },
 
     "chat.message": async (input: ChatMessageInput, output: ChatMessageOutput) => {
+      const executionMetadata = snapshotUserExecutionMetadata(output?.message, input);
       await reloadConfigLocal();
       if (!config.enabled) return;
 
@@ -1005,7 +1021,17 @@ export const SessionMemoryPlugin = async (
 
       const memoryRevision = s.memoryRevision;
       const memory = await readText(memoryPathFor(sessionID, config.memoryDir), "");
-      await deliverMemoryViaNoReply(runtime, sessionID, turnID, memoryRevision, memory, config, globalState, s);
+      await deliverMemoryViaNoReply(
+        runtime,
+        sessionID,
+        turnID,
+        memoryRevision,
+        memory,
+        config,
+        globalState,
+        s,
+        executionMetadata,
+      );
     },
 
     "experimental.chat.system.transform": async (input: SystemTransformInput, output: SystemTransformOutput) => {

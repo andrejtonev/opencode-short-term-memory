@@ -383,27 +383,52 @@ describe("Side session tracking and orphan cleanup", () => {
         fakeClient.calls.abort.push(args);
         return { data: true };
       };
+      const originalCreate = fakeClient.session.create;
+      let createdID: string | undefined;
+      fakeClient.session.create = async (args?: unknown) => {
+        const result = (await originalCreate(args)) as { data?: { id?: string } };
+        createdID = result.data?.id;
+        return result;
+      };
 
-      const { plugin } = await createPlugin({ summarizerMode: "clean", debug: false }, fakeClient);
-      await plugin["session.created"]({ sessionID: "hang-1" });
+      // Do not dispatch session.created here: its history bootstrap schedules
+      // another update, which would race this timeout unit. The manual tool
+      // update creates its memory file and reads the session history itself.
+      const { plugin } = await createPlugin(
+        { summarizerMode: "clean", sideSessionRetries: 0, debounceMs: 120_000, debug: false },
+        fakeClient,
+      );
 
-      // The outer try/catch in updateMemory() swallows the timeout, so the
-      // tool call resolves normally. We assert the timeout path was taken
-      // by checking that the abort was called and the log records the
-      // timeout event.
-      await plugin.tool.short_term_memory.execute({ action: "update" }, { sessionID: "hang-1" });
+      try {
+        // The outer try/catch in updateMemory() swallows the timeout, so the
+        // tool call resolves normally. We assert the timeout path was taken
+        // by checking that the abort was called and the log records the
+        // timeout event.
+        await plugin.tool.short_term_memory.execute({ action: "update" }, { sessionID: "hang-1" });
 
-      // The plugin should have asked the server to abort the side session
-      // (proving the timeout fired and the catch branch ran).
-      expect(fakeClient.calls.abort.length).toBeGreaterThanOrEqual(1);
+        // One manual update must create exactly one side session, abort that
+        // same session on timeout, and delete it in the summarizer finally.
+        expect(fakeClient.calls.create.length).toBe(1);
+        expect(fakeClient.calls.abort.length).toBe(1);
+        expect(fakeClient.calls.delete.length).toBe(1);
+        const abortedID = (fakeClient.calls.abort[0] as { path?: { id?: string } })?.path?.id;
+        const deletedID = (fakeClient.calls.delete[0] as { path?: { id?: string } })?.path?.id;
+        expect(createdID).toBeDefined();
+        expect(abortedID).toBe(createdID);
+        expect(deletedID).toBe(createdID);
 
-      // The log should record the timeout and the per-session delete.
-      const logText = await readText(join(".opencode", "memory", "session-memory.log"), "");
-      expect(logText).toContain("side_session_prompt_timeout");
+        // The log should record the timeout and the per-session delete.
+        const logText = await readText(join(".opencode", "memory", "session-memory.log"), "");
+        expect(logText).toContain("side_session_prompt_timeout");
 
-      // The side session must still be cleaned up even on timeout.
-      const tracked = await loadActiveSideSessions(DEFAULT_CONFIG.memoryDir);
-      expect(tracked).toEqual([]);
+        // The side session must still be cleaned up even on timeout.
+        const tracked = await loadActiveSideSessions(DEFAULT_CONFIG.memoryDir);
+        expect(tracked).toEqual([]);
+      } finally {
+        // Directly terminate the test session to cancel any native work that
+        // could otherwise outlive this test; this is not a side-session delete.
+        await plugin["session.deleted"]({ sessionID: "hang-1" });
+      }
     } finally {
       summarizer.CLEAN_SUMMARIZER_TIMEOUT.ms = originalTimeout;
     }

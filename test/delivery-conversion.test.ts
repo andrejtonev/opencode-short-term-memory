@@ -137,6 +137,105 @@ describe("delivery conversion", () => {
     expect(client.calls.noReplyDeliveries).toHaveLength(1);
   });
 
+  test("native output metadata is preserved exactly and snapshotted before async delivery resumes", async () => {
+    const sessionID = "native-output-metadata";
+    const fakeClient = createFakeClient();
+    const { plugin, client } = await createPlugin({ remindEveryN: 1, debug: false }, fakeClient);
+    await writeText(memoryPathFor(sessionID), MEMORY);
+    await plugin["session.created"]({ sessionID });
+
+    let enteredResolve!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      enteredResolve = resolve;
+    });
+    let releaseDelivery!: () => void;
+    const deliveryReleased = new Promise<void>((resolve) => {
+      releaseDelivery = resolve;
+    });
+    const originalPrompt = fakeClient.session.prompt;
+    fakeClient.session.prompt = async (args?: unknown) => {
+      const body = (args as { body?: Record<string, unknown> } | undefined)?.body;
+      if (body?.noReply === true) {
+        enteredResolve();
+        await deliveryReleased;
+      }
+      return originalPrompt(args);
+    };
+
+    const output = {
+      message: {
+        role: "user",
+        id: "native-output-1",
+        agent: "custom-parent",
+        model: { providerID: "provider-a", modelID: "model-a" },
+        tools: { task: true, bash: false },
+      },
+      parts: [{ type: "text", text: "continue" }],
+      system: ["UNCHANGED_SYSTEM"],
+      permissions: { task: "allow" },
+    };
+    const deliveryPromise = plugin["chat.message"](
+      {
+        sessionID,
+        messageID: "native-output-1",
+        agent: "input-agent-must-not-win",
+        model: { providerID: "input-provider", modelID: "input-model" },
+        tools: { task: false, bash: true },
+      },
+      output,
+    );
+    await entered;
+
+    output.message.model.providerID = "mutated-provider";
+    output.message.model.modelID = "mutated-model";
+    output.message.tools.task = false;
+    output.message.tools.bash = true;
+    releaseDelivery();
+    await deliveryPromise;
+
+    expect(client.calls.noReplyDeliveries[0]).toEqual({
+      path: { id: sessionID },
+      body: {
+        agent: "custom-parent",
+        model: { providerID: "provider-a", modelID: "model-a" },
+        tools: { task: true, bash: false },
+        parts: [{ type: "text", text: expect.stringContaining(`${INJECTION_PREFIX}\n`) }],
+        noReply: true,
+      },
+    });
+    expect(output.message).toEqual({
+      role: "user",
+      id: "native-output-1",
+      agent: "custom-parent",
+      model: { providerID: "mutated-provider", modelID: "mutated-model" },
+      tools: { task: false, bash: true },
+    });
+    expect(output.system).toEqual(["UNCHANGED_SYSTEM"]);
+    expect(output.permissions).toEqual({ task: "allow" });
+
+    await plugin["chat.message"](
+      {
+        sessionID,
+        messageID: "native-input-fallback-1",
+        agent: "fallback-agent",
+        model: { providerID: "fallback-provider", modelID: "fallback-model" },
+        tools: { task: true, bash: false },
+      },
+      { message: { role: "user", id: "native-input-fallback-1" }, parts: [{ type: "text", text: "continue" }] },
+    );
+
+    expect(client.calls.noReplyDeliveries[1]).toEqual({
+      path: { id: sessionID },
+      body: {
+        agent: "fallback-agent",
+        model: { providerID: "fallback-provider", modelID: "fallback-model" },
+        tools: { task: true, bash: false },
+        parts: [{ type: "text", text: expect.stringContaining(`${INJECTION_PREFIX}\n`) }],
+        noReply: true,
+      },
+    });
+  });
+
   test("duplicate user identity neither advances cadence nor redelivers", async () => {
     const sessionID = "main-dedupe";
     const fakeClient = createFakeClient();
