@@ -1,5 +1,30 @@
 # V1 Manual Acceptance
 
+# Addendum — V2 same-artifact requalification (2026-10-10)
+
+The exact DCP-fixed candidate was requalified by the bounded native V2 run
+`v2-w8xIbL`, which completed in `62.741s` with all 72 evidence files matching
+SHA256
+`b4a4cf7ec856b9030f276a1f97a62c172754c624f656ad8f509ee3d1d9c2d9e1`.
+Evidence is retained at
+`/home/dev/workspace/opencode-work/stm-published-rc-e2e/v2-w8xIbL/evidence.json`.
+The run passed the 11 documented manual cases, including default-off,
+override, retry fallback, child, reset, and compaction scenarios. The prior
+`v2-or4cov` installation timeout (`100.692s`) remains preserved as historical
+evidence; this isolated rerun used the same bounds without a seeded cache.
+
+The run recorded one expected host warning for the unsupported local-file
+update checker (`NpmInstallFailedError`) and two expected shutdown interrupt
+errors. These are not treated as a blanket error-free claim. Cleanup completed
+with the child PID dead and the tmux socket removed; cost was zero and the
+global budget was unchanged. This addendum closes only the V2 installation and
+same-artifact requalification gap. It does not claim the strict whole-warning
+gate, pending-delta compaction (not run), minimum-host or universal cleanup
+support, semantic or registry qualification, or literal keyboard interaction.
+
+Investigation artifact:
+`/home/dev/workspace/opencode-work/stm-readiness-improvements/2026-10-10--v2-dcp-artifact-requalification.html`
+
 # Addendum — native DCP metadata closure (2026-10-10)
 
 The current bounded native DCP run `v1-2nieQM` completed in `67.709s` with
