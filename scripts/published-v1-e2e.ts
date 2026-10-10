@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
-import { mkdir, mkdtemp, readdir, realpath, stat } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, realpath, rm, stat } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative } from "node:path";
 import {
   runSharedCoreScenario,
@@ -20,6 +20,8 @@ const parent = "/home/dev/workspace/opencode-work/stm-published-rc-e2e";
 const root = await mkdtemp(join(parent, "v1-"));
 const project = join(root, "project");
 const host = join(root, "host");
+let nativeDcpConfigPath: string | undefined;
+let nativeDcpOriginalHostConfig: string | undefined;
 const bun = await realpath(process.execPath);
 let candidateArg: string | undefined;
 let setupOnly = false;
@@ -52,6 +54,16 @@ const manualUsage = {
 };
 const requests: object[] = [];
 const mockRequests: { path: string; body: unknown; summary: boolean; containsConversation: boolean }[] = [];
+const nativeDcp = {
+  marker: "STM_DCP_NATIVE_INITIAL: preserve the initial user and assistant sentinels.",
+  compressMarker: "STM_DCP_NATIVE_COMPRESS: compress the two preceding sentinel messages now.",
+  assistantMarker: "STM_DCP_NATIVE_ASSISTANT: completed the initial sentinel turn.",
+  emitted: false,
+  callID: "call_stm_dcp_compress_1",
+  finishReason: undefined as string | undefined,
+  aliases: [] as string[],
+  argumentsContent: [] as { messageId: string; topic: string; summary: string }[],
+};
 const nativeTask = {
   marker: "STM_TASK_NATIVE: invoke exactly the stm-probe-child subagent.",
   childMarker: "STM_CHILD_NATIVE_TASK: respond with the child fixture sentinel.",
@@ -522,6 +534,9 @@ workflow: try {
       const hasTaskTool = (typedBody.tools ?? []).some((tool) => (tool.function?.name ?? tool.name) === "task");
       const hasToolResult = (typedBody.messages ?? []).some((message) => message.role === "tool");
       const isNativeTaskTurn = serialized.includes(nativeTask.marker) && hasTaskTool;
+      const isNativeDcpTurn =
+        serialized.includes(nativeDcp.compressMarker) &&
+        (typedBody.tools ?? []).some((tool) => (tool.function?.name ?? tool.name) === "compress");
       const common = {
         id: `chatcmpl-${mockRequests.length}`,
         created: Math.floor(Date.now() / 1000),
@@ -568,7 +583,89 @@ workflow: try {
           { headers: { "content-type": "text/event-stream" } },
         );
       }
-      const content = summary ? sharedCoreScenario.memoryResponse : sharedCoreScenario.assistantText;
+      if (isNativeDcpTurn && !hasToolResult && !nativeDcp.emitted) {
+        const directTexts = (typedBody.messages ?? []).flatMap((message) => {
+          if (typeof message.content === "string") return [message.content];
+          if (!Array.isArray(message.content)) return [];
+          return message.content.flatMap((part) =>
+            part && typeof part === "object" && part.type === "text" && typeof part.text === "string"
+              ? [part.text]
+              : [],
+          );
+        });
+        const taggedSentinels = directTexts.filter(
+          (text) => text.includes(nativeDcp.marker) || text.includes(nativeDcp.assistantMarker),
+        );
+        assert.equal(taggedSentinels.length, 2, "Native DCP did not expose exactly the initial sentinel messages");
+        const aliases = [
+          ...new Set(
+            taggedSentinels.flatMap((text) =>
+              [...text.matchAll(/<dcp-message-id(?:\s+priority="[^"]+")?>([^<]+)<\/dcp-message-id>/g)].map(
+                (match) => match[1]!,
+              ),
+            ),
+          ),
+        ];
+        assert.equal(aliases.length, 2, "Native DCP did not expose two distinct XML message aliases");
+        assert.ok(
+          aliases.every((alias) => /^m\d+$/.test(alias)),
+          "Native DCP XML aliases have an invalid format",
+        );
+        nativeDcp.emitted = true;
+        nativeDcp.aliases = aliases;
+        nativeDcp.finishReason = "tool_calls";
+        const argumentsText = JSON.stringify({
+          topic: "STM native DCP metadata preservation",
+          content: [
+            { messageId: aliases[0], topic: "native-user", summary: "The user requested native DCP compression." },
+            {
+              messageId: aliases[1],
+              topic: "native-assistant",
+              summary: "The assistant completed the native DCP fixture.",
+            },
+          ],
+        });
+        nativeDcp.argumentsContent = JSON.parse(argumentsText).content;
+        const toolChunks = [
+          {
+            ...common,
+            object: "chat.completion.chunk",
+            choices: [
+              {
+                index: 0,
+                delta: {
+                  role: "assistant",
+                  tool_calls: [
+                    {
+                      index: 0,
+                      id: nativeDcp.callID,
+                      type: "function",
+                      function: { name: "compress", arguments: argumentsText },
+                    },
+                  ],
+                },
+                finish_reason: null,
+              },
+            ],
+          },
+          {
+            ...common,
+            object: "chat.completion.chunk",
+            choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }],
+          },
+        ];
+        return new Response(
+          toolChunks.map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`).join("") + "data: [DONE]\n\n",
+          {
+            headers: { "content-type": "text/event-stream" },
+          },
+        );
+      }
+      const content = summary
+        ? sharedCoreScenario.memoryResponse
+        : serialized.includes(nativeDcp.marker) && !hasToolResult
+          ? nativeDcp.assistantMarker
+          : sharedCoreScenario.assistantText;
       if (!body.stream)
         return Response.json({
           ...common,
@@ -632,6 +729,7 @@ workflow: try {
   assert.equal(await realpath(gitRoot), await realpath(project), "Sandbox Git boundary resolved outside project");
   evidence.gitRoot = gitRoot;
   await Bun.write(join(project, "opencode.json"), JSON.stringify(config, null, 2));
+  const originalHostConfigJSON = JSON.stringify(config, null, 2);
   async function startHost() {
     const logStart = serveLog.length;
     base = "";
@@ -913,7 +1011,7 @@ workflow: try {
     shutdown: restartShutdown,
     previousURL: base,
   };
-  const restarted = await startHost();
+  let restarted = await startHost();
   snapshotDiagnostics("afterRestart");
   assert.ok(
     Array.isArray(restarted.availableCommands) && restarted.availableCommands.some((entry) => entry.name === "stm"),
@@ -1528,6 +1626,463 @@ workflow: try {
   });
   evidence.taskToolChild = taskToolEvidence;
   await api(`/session/${taskChildID}`, undefined, 5_000, "DELETE");
+  // Native DCP qualification: install the published plugin in the isolated host,
+  // exercise its real compress tool, and restore the original host config before
+  // entering the manual phase. This intentionally does not synthesize a DCP event.
+  const dcpSpec = "@tarquinen/opencode-dcp@3.1.9";
+  const dcpConfigPath = join(project, ".opencode", "dcp.jsonc");
+  nativeDcpConfigPath = dcpConfigPath;
+  nativeDcpOriginalHostConfig = originalHostConfigJSON;
+  const dcpConfigText = `{
+   "enabled": true,
+  "compress": { "mode": "message", "permission": "allow", "protectUserMessages": false },
+  "pruneNotification": "off",
+  "commands": { "enabled": false },
+  "strategies": {
+    "deduplication": { "enabled": false },
+    "purgeErrors": { "enabled": false }
+  }
+}\n`;
+  const dcpConfig = {
+    ...config,
+    plugin: [...config.plugin, dcpSpec],
+    permission: { "*": "deny", compress: "ask" },
+    agent: {
+      ...config.agent,
+      "stm-dcp-parent": {
+        mode: "primary",
+        model: "isolated/deterministic",
+        permission: { "*": "deny", compress: "allow" },
+      },
+      "stm-probe-parent": {
+        ...config.agent["stm-probe-parent"],
+        permission: { ...config.agent["stm-probe-parent"].permission, compress: "deny" },
+      },
+      "stm-probe-child": {
+        ...config.agent["stm-probe-child"],
+        permission: { ...config.agent["stm-probe-child"].permission, compress: "deny" },
+      },
+      build: {
+        mode: "primary",
+        model: "isolated/deterministic",
+        permission: { "*": "deny", compress: "deny" },
+      },
+    },
+  };
+  const dcpEvidence: Record<string, unknown> = {
+    verdict: "PENDING",
+    spec: dcpSpec,
+    configPath: dcpConfigPath,
+    config: JSON.parse(dcpConfigText),
+    originalHostConfigSha256: createHash("sha256").update(originalHostConfigJSON).digest("hex"),
+  };
+  evidence.nativeDcp = dcpEvidence;
+  await Bun.write(dcpConfigPath, dcpConfigText);
+  await Bun.write(join(project, "opencode.json"), JSON.stringify(dcpConfig, null, 2));
+  const dcpShutdown = await shutdown(restarted.child, "native-dcp-phase");
+  assert.ok(dcpShutdown.exited, "Host did not exit before native DCP phase");
+  const dcpHost = await startHost();
+  const dcpInventory = await files(root);
+  const dcpMessageSourcePath = dcpInventory.find((path) =>
+    path.endsWith("/@tarquinen/opencode-dcp/dist/lib/compress/message.js"),
+  );
+  const dcpConfigSourcePath = dcpInventory.find((path) => path.endsWith("/@tarquinen/opencode-dcp/dist/lib/config.js"));
+  assert.ok(dcpMessageSourcePath, "Installed DCP 3.1.9 message implementation is missing");
+  assert.ok(dcpConfigSourcePath, "Installed DCP 3.1.9 config implementation is missing");
+  const dcpMessageSource = readFileSync(dcpMessageSourcePath, "utf8");
+  const dcpConfigSource = readFileSync(dcpConfigSourcePath, "utf8");
+  for (const field of ["topic", "content", "messageId", "summary"])
+    assert.ok(dcpMessageSource.includes(field), `Installed DCP message source lacks ${field} schema field`);
+  for (const field of [
+    "compress.mode",
+    "compress.permission",
+    "compress.protectUserMessages",
+    "strategies.deduplication",
+    "strategies.purgeErrors",
+  ])
+    assert.ok(dcpConfigSource.includes(field.split(".").at(-1)!), `Installed DCP config source lacks ${field} schema`);
+  dcpEvidence.installedMessageSource = {
+    path: dcpMessageSourcePath,
+    sha256: createHash("sha256").update(dcpMessageSource).digest("hex"),
+    schemaFields: ["topic", "content", "messageId", "summary"],
+    configSource: { path: dcpConfigSourcePath, sha256: createHash("sha256").update(dcpConfigSource).digest("hex") },
+  };
+  const dcpSession = await api("/session", { title: "Native DCP metadata preservation" });
+  const dcpRequestStart = mockRequests.length;
+  const dcpFirst = await api(
+    `/session/${dcpSession.id}/message`,
+    {
+      model: { providerID: "isolated", modelID: "deterministic" },
+      agent: "stm-dcp-parent",
+      tools: { edit: true, bash: false },
+      parts: [{ type: "text", text: nativeDcp.marker }],
+    },
+    60_000,
+  );
+  assert.equal(dcpFirst.info.agent, "stm-dcp-parent", "Native DCP parent used the wrong agent");
+  const dcpMemoryPath = join(memoryDir, `session_${dcpSession.id}.md`);
+  const dcpCheckpointPath = join(memoryDir, "checkpoints", `${dcpSession.id}.last-message-id.txt`);
+  const dcpMemoryDeadline = Date.now() + remaining(30_000);
+  while (
+    Date.now() < dcpMemoryDeadline &&
+    (!existsSync(dcpMemoryPath) ||
+      !existsSync(dcpCheckpointPath) ||
+      readFileSync(dcpCheckpointPath, "utf8").trim() !== dcpFirst.info.id)
+  )
+    await Bun.sleep(150);
+  assert.ok(existsSync(dcpMemoryPath), "Native DCP parent did not complete automatic memory before compression");
+  assert.equal(
+    readFileSync(dcpCheckpointPath, "utf8").trim(),
+    dcpFirst.info.id,
+    "Native DCP automatic memory checkpoint did not advance",
+  );
+  const dcpHistoryBeforeCompress = (await api(`/session/${dcpSession.id}/message`)) as {
+    info: { id: string; role: string; time?: { created?: number } };
+    parts: { type: string; text?: string }[];
+  }[];
+  const dcpCompress = await api(
+    `/session/${dcpSession.id}/message`,
+    {
+      model: { providerID: "isolated", modelID: "deterministic" },
+      agent: "stm-dcp-parent",
+      tools: { edit: true, bash: false },
+      parts: [{ type: "text", text: nativeDcp.compressMarker }],
+    },
+    60_000,
+  );
+  assert.equal(dcpCompress.info.agent, "stm-dcp-parent", "Native DCP compress turn used the wrong agent");
+  let dcpHistory = (await api(`/session/${dcpSession.id}/message`)) as {
+    info: {
+      id: string;
+      role: string;
+      parentID?: string;
+      agent?: string;
+      model?: unknown;
+      tools?: Record<string, boolean>;
+      time?: { created?: number };
+      summary?: boolean;
+      synthetic?: boolean;
+    };
+    parts: {
+      type: string;
+      text?: string;
+      tool?: string;
+      callID?: string;
+      state?: {
+        status?: string;
+        output?: string;
+        error?: string;
+        time?: { end?: number };
+        input?: { content?: { messageId?: string }[] };
+      };
+      [key: string]: unknown;
+    }[];
+  }[];
+  const dcpToolParts = dcpHistory.flatMap((row) =>
+    row.parts.filter((part) => part.type === "tool" && part.tool === "compress"),
+  );
+  assert.equal(dcpToolParts.length, 1, "Native DCP did not persist exactly one compress tool part");
+  dcpEvidence.toolPart = dcpToolParts[0];
+  dcpEvidence.historyBeforeToolAssertions = dcpHistory;
+  assert.equal(dcpToolParts[0]?.callID, nativeDcp.callID, "Native DCP durable call ID differs from streamed call ID");
+  assert.equal(dcpToolParts[0]?.state?.status, "completed", "Native DCP compress tool did not complete");
+  const compressCompletedAt = dcpToolParts[0]?.state?.time?.end;
+  assert.ok(typeof compressCompletedAt === "number", "Native DCP tool completion timestamp is missing");
+  assert.ok(
+    dcpToolParts[0]?.state?.output?.startsWith("Compressed 2 messages"),
+    "Native DCP compress tool did not persist successful output",
+  );
+  assert.equal(nativeDcp.finishReason, "tool_calls", "Native mock did not emit tool_calls for DCP");
+  const dcpRequests = mockRequests.slice(dcpRequestStart).map(normalizeRequest);
+  assert.ok(
+    dcpRequests.some((request) => request.tools.includes("compress")),
+    "DCP provider request lacked compress tool",
+  );
+  assert.ok(
+    dcpRequests.some((request) => request.messages.some((message) => message.text.includes(nativeDcp.marker))),
+    "DCP marker absent from provider request",
+  );
+  assert.ok(
+    dcpRequests[0]?.messages.every((message) => !message.text.includes("[MEMORY_SYSTEM]")),
+    "Native DCP initial parent request unexpectedly included an injected memory user",
+  );
+  assert.ok(
+    dcpRequests
+      .filter((request) => request.messages.some((message) => message.text.includes("<conversation_update>")))
+      .every((request) => request.tools.length === 0),
+    "Native DCP summary request exposed tools",
+  );
+  const dcpAssistant = dcpHistory.find(
+    (row) => row.info.role === "assistant" && row.parts.some((part) => part.text === nativeDcp.assistantMarker),
+  );
+  assert.ok(dcpAssistant, "Native DCP assistant fixture was not persisted");
+  const dcpEventRows = () =>
+    completeLogLines()
+      .map(
+        (line) =>
+          JSON.parse(line) as {
+            event?: string;
+            sessionID?: string;
+            reason?: string;
+            detail?: string;
+            ts?: string;
+            transport?: string;
+          },
+      )
+      .filter((row) => row.sessionID === dcpSession.id);
+  const dcpLogDeadline = Date.now() + Math.min(10_000, remaining(10_000));
+  let dcpRows = dcpEventRows();
+  while (
+    Date.now() < dcpLogDeadline &&
+    !dcpRows.some((row) => row.event === "dcp_compress_triggered" || row.event === "dcp_compress_queued_after_inflight")
+  ) {
+    await Bun.sleep(150);
+    dcpRows = dcpEventRows();
+  }
+  const immediateRows = dcpRows.filter((row) => row.event === "dcp_compress_triggered");
+  const queuedRows = dcpRows.filter((row) => row.event === "dcp_compress_queued_after_inflight");
+  assert.ok(
+    immediateRows.length > 0 || queuedRows.length > 0,
+    "Native DCP bridge logged neither immediate nor queued dispatch",
+  );
+  const bridgePath = queuedRows.length > 0 ? "queued_after_inflight" : "immediate";
+  const queueRow = queuedRows.at(-1);
+  Object.assign(dcpEvidence, { bridgePath, bridgeEvents: dcpRows, queuedEvent: queueRow ?? null });
+  const replayDeadline = Date.now() + Math.min(10_000, remaining(10_000));
+  while (Date.now() < replayDeadline) {
+    dcpRows = dcpEventRows();
+    dcpEvidence.bridgeEvents = dcpRows;
+    const replayDone = dcpRows.find(
+      (row) =>
+        row.event === "memory_update_done" &&
+        row.reason === "post_in_flight_replay" &&
+        (queueRow?.ts === undefined || (row.ts ?? "") >= queueRow.ts),
+    );
+    const immediateRow = immediateRows.at(-1);
+    const immediateDone = dcpRows.find(
+      (row) =>
+        row.event === "memory_update_done" &&
+        row.reason === "dcp_compress" &&
+        (immediateRow?.ts === undefined || (row.ts ?? "") >= immediateRow.ts),
+    );
+    const immediateSkipped = dcpRows.find(
+      (row) =>
+        row.event === "memory_update_skipped" &&
+        row.reason === "dcp_compress" &&
+        row.detail === "no_visible_recent_messages" &&
+        (immediateRow?.ts === undefined || (row.ts ?? "") >= immediateRow.ts),
+    );
+    const immediateReinjected = immediateSkipped
+      ? dcpRows.some(
+          (row) =>
+            row.event === "memory_inject_start" &&
+            row.transport === "prompt_no_reply" &&
+            (immediateSkipped.ts === undefined || (row.ts ?? "") >= immediateSkipped.ts),
+        )
+      : false;
+    if (bridgePath === "queued_after_inflight" ? replayDone : immediateDone || immediateReinjected) break;
+    await Bun.sleep(150);
+  }
+  dcpRows = dcpEventRows();
+  const replayDone = dcpRows.find(
+    (row) =>
+      row.event === "memory_update_done" &&
+      row.reason === "post_in_flight_replay" &&
+      (queueRow?.ts === undefined || (row.ts ?? "") >= queueRow.ts),
+  );
+  const immediateRow = immediateRows.at(-1);
+  const immediateDone = dcpRows.find(
+    (row) =>
+      row.event === "memory_update_done" &&
+      row.reason === "dcp_compress" &&
+      (immediateRow?.ts === undefined || (row.ts ?? "") >= immediateRow.ts),
+  );
+  const immediateSkipped = dcpRows.find(
+    (row) =>
+      row.event === "memory_update_skipped" &&
+      row.reason === "dcp_compress" &&
+      row.detail === "no_visible_recent_messages" &&
+      (immediateRow?.ts === undefined || (row.ts ?? "") >= immediateRow.ts),
+  );
+  const immediateReinjected = immediateSkipped
+    ? dcpRows.some(
+        (row) =>
+          row.event === "memory_inject_start" &&
+          row.transport === "prompt_no_reply" &&
+          (immediateSkipped.ts === undefined || (row.ts ?? "") >= immediateSkipped.ts),
+      )
+    : false;
+  if (bridgePath === "queued_after_inflight")
+    assert.ok(replayDone, "Queued native DCP dispatch lacked a later post_in_flight_replay completion");
+  else
+    assert.ok(
+      immediateDone || immediateReinjected,
+      "Immediate native DCP dispatch lacked a terminal dcp_compress result",
+    );
+  const dcpNoReply = dcpRequests.some((request) =>
+    request.messages.some((message) => message.text.includes("[MEMORY_SYSTEM]")),
+  );
+  assert.ok(dcpNoReply, "Native DCP follow-up did not carry STM noReply context");
+  const dcpParentUsers = dcpHistory.filter((row) => row.info.role === "user" && row.info.agent === "stm-dcp-parent");
+  assert.ok(dcpParentUsers.length >= 2, "Native DCP parent user context was not retained");
+  for (const user of dcpParentUsers) {
+    assert.deepEqual(
+      user.info.model,
+      { providerID: "isolated", modelID: "deterministic" },
+      "DCP user model metadata changed",
+    );
+    assert.deepEqual(user.info.tools, { edit: true, bash: false }, "DCP user tools metadata changed");
+  }
+  const compressRawRequest = mockRequests.slice(dcpRequestStart).find((request) => {
+    const body = request.body as {
+      messages?: { role?: string; content?: unknown }[];
+      tools?: { function?: { name?: string }; name?: string }[];
+    };
+    const hasCompress = (body.tools ?? []).some((tool) => (tool.function?.name ?? tool.name) === "compress");
+    const hasCompressPrompt = (body.messages ?? []).some(
+      (message) =>
+        message.role === "user" &&
+        (typeof message.content === "string"
+          ? message.content.includes(nativeDcp.compressMarker)
+          : Array.isArray(message.content) &&
+            message.content.some(
+              (part) =>
+                part &&
+                typeof part === "object" &&
+                part.type === "text" &&
+                typeof part.text === "string" &&
+                part.text.includes(nativeDcp.compressMarker),
+            )),
+    );
+    return hasCompress && hasCompressPrompt;
+  });
+  assert.ok(compressRawRequest, "Native DCP compression prompt request missing");
+  const compressRequest = normalizeRequest(compressRawRequest);
+  assert.ok(compressRequest, "Native DCP compress request missing");
+  assert.deepEqual(nativeDcp.aliases.length, 2, "Native DCP alias capture did not produce two IDs");
+  const compressSourceFragments = compressRequest.messages
+    .map((message) => message.text)
+    .filter((text) => text.includes("<dcp-message-id"));
+  const taggedSourceMessages = compressRequest.messages.filter(
+    (message) => (message.role === "user" || message.role === "assistant") && message.text.includes("<dcp-message-id"),
+  );
+  for (const alias of nativeDcp.aliases)
+    assert.ok(
+      taggedSourceMessages.some((message) =>
+        new RegExp(`<dcp-message-id(?:\\s+priority="[^"]+")?>${alias}</dcp-message-id>`).test(message.text),
+      ),
+      `Native DCP compression request lost XML alias ${alias}`,
+    );
+  assert.ok(
+    taggedSourceMessages.some((message) => message.role === "user"),
+    "DCP user XML alias source missing",
+  );
+  assert.ok(
+    taggedSourceMessages.some((message) => message.role === "assistant"),
+    "DCP assistant XML alias source missing",
+  );
+  assert.deepEqual(
+    nativeDcp.argumentsContent.map((entry) => entry.messageId),
+    nativeDcp.aliases,
+    "Native DCP compress content IDs differ from extracted aliases",
+  );
+  assert.deepEqual(
+    dcpToolParts[0]?.state?.input?.content?.map((entry) => entry.messageId),
+    nativeDcp.aliases,
+    "Durable native DCP tool input IDs differ from extracted aliases",
+  );
+  const priorDcpHistoryIDs = new Set(dcpHistoryBeforeCompress.map((row) => row.info.id));
+  const postCompressionMemoryUsersFor = (history: typeof dcpHistory) =>
+    history.filter(
+      (row) =>
+        row.info.role === "user" &&
+        !priorDcpHistoryIDs.has(row.info.id) &&
+        (row.info.time?.created ?? 0) >= compressCompletedAt &&
+        row.parts.some((part) => part.text?.includes("[MEMORY_SYSTEM]")),
+    );
+  const durableMemoryDeadline = Date.now() + Math.min(5_000, remaining(5_000));
+  let memoryUsersAfterCompress = dcpHistory.filter(
+    (row) =>
+      row.info.role === "user" &&
+      !priorDcpHistoryIDs.has(row.info.id) &&
+      row.parts.some((part) => part.text?.includes("[MEMORY_SYSTEM]")),
+  );
+  let postCompressionMemoryUsers = postCompressionMemoryUsersFor(dcpHistory);
+  while (postCompressionMemoryUsers.length === 0 && Date.now() < durableMemoryDeadline) {
+    await Bun.sleep(100);
+    dcpHistory = (await api(`/session/${dcpSession.id}/message`)) as typeof dcpHistory;
+    memoryUsersAfterCompress = dcpHistory.filter(
+      (row) =>
+        row.info.role === "user" &&
+        !priorDcpHistoryIDs.has(row.info.id) &&
+        row.parts.some((part) => part.text?.includes("[MEMORY_SYSTEM]")),
+    );
+    postCompressionMemoryUsers = postCompressionMemoryUsersFor(dcpHistory);
+  }
+  const preexistingMemoryUserIDs = new Set(
+    dcpHistoryBeforeCompress
+      .filter((row) => row.info.role === "user" && row.parts.some((part) => part.text?.includes("[MEMORY_SYSTEM]")))
+      .map((row) => row.info.id),
+  );
+  assert.ok(postCompressionMemoryUsers.length >= 1, "Native DCP produced no new post-compress durable MEMORY user");
+  for (const memoryUser of postCompressionMemoryUsers) {
+    assert.ok(
+      (memoryUser.info.time?.created ?? 0) >= compressCompletedAt,
+      "Durable MEMORY user predates the completed native compress tool",
+    );
+    assert.equal(memoryUser.info.agent, "stm-dcp-parent", "DCP MEMORY user lost its owning agent");
+    assert.deepEqual(
+      memoryUser.info.model,
+      { providerID: "isolated", modelID: "deterministic" },
+      "DCP MEMORY user lost its owning model",
+    );
+    assert.deepEqual(memoryUser.info.tools, { edit: true, bash: false }, "DCP MEMORY user lost its owning tools");
+  }
+  const noReplyInjectionRows = dcpRows.filter(
+    (row) => row.event === "memory_inject_start" && row.transport === "prompt_no_reply",
+  );
+  assert.ok(noReplyInjectionRows.length >= 1, "Native DCP durable MEMORY user lacks prompt_no_reply bridge evidence");
+  const latestVisibleAssistant = [...dcpHistory]
+    .reverse()
+    .find((row) => row.info.role === "assistant" && row.parts.some((part) => part.type === "text" && part.text));
+  assert.equal(
+    latestVisibleAssistant?.parts.find((part) => part.type === "text")?.text,
+    sharedCoreScenario.assistantText,
+    "Native DCP latest visible assistant was not the ordinary post-compress response",
+  );
+  Object.assign(dcpEvidence, {
+    verdict: "PASS",
+    sessionID: dcpSession.id,
+    requestRange: [dcpRequestStart, mockRequests.length],
+    requests: dcpRequests,
+    toolCallID: nativeDcp.callID,
+    streamFinishReason: nativeDcp.finishReason,
+    aliases: nativeDcp.aliases,
+    compressContent: nativeDcp.argumentsContent,
+    compressSourceFragments,
+    durableHistory: dcpHistory,
+    preexistingMemoryUserIDs: [...preexistingMemoryUserIDs],
+    memoryUserIDsAfterCompress: memoryUsersAfterCompress.map((row) => row.info.id),
+    postCompressionMemoryUserIDs: postCompressionMemoryUsers.map((row) => row.info.id),
+    dcpCompressTriggered: true,
+    stmMemoryUpdateDone: true,
+    noReplyMemoryContextObserved: dcpNoReply,
+    bridgePath,
+    bridgeEvents: dcpRows,
+    queuedEvent: queueRow ?? null,
+    replayCompletion: replayDone ?? null,
+    memoryUsersAfterCompress: memoryUsersAfterCompress.map((row) => ({ id: row.info.id, time: row.info.time })),
+    noReplyInjectionRows,
+    automaticMemoryBeforeCompress: true,
+    metadataSource: "durable native parent execution context; no inferred IDs",
+  });
+  await api(`/session/${dcpSession.id}`, undefined, 5_000, "DELETE");
+  await shutdown(dcpHost.child, "native-dcp-drain");
+  await Bun.write(join(project, "opencode.json"), originalHostConfigJSON);
+  await rm(dcpConfigPath, { force: true });
+  await Bun.write(setupPath, JSON.stringify(activeConfig));
+  restarted = await startHost();
+  assert.deepEqual(restarted.availableCommands, availableCommands, "Restored host command inventory changed");
   // Keep manual command turns outside the fresh shared-core request/history assertions.
   current = "run";
   manualUsage.verdict = "PENDING";
@@ -1787,6 +2342,10 @@ workflow: try {
   evidence.error = redact(String(error));
   process.exitCode = 1;
 } finally {
+  if (nativeDcpOriginalHostConfig !== undefined) {
+    await Bun.write(join(project, "opencode.json"), nativeDcpOriginalHostConfig).catch(() => undefined);
+    if (nativeDcpConfigPath) await rm(nativeDcpConfigPath, { force: true }).catch(() => undefined);
+  }
   clearTimeout(overall);
   server?.stop(true);
   const shutdowns: unknown[] = [];

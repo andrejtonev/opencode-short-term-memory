@@ -52,6 +52,7 @@ export async function deliverMemoryViaNoReply(
   globalState: RuntimeState,
   state: SessionRuntimeState,
   executionMetadata?: UserExecutionMetadata,
+  isDeliveryStillValid?: () => boolean,
 ): Promise<boolean> {
   if (!config.enabled || !sessionID || !turnID || !memory.trim()) return false;
   const injectedMessage = buildTaggedMemoryForInjection(memory, config.maxMemoryLength);
@@ -86,6 +87,11 @@ export async function deliverMemoryViaNoReply(
   }
 
   try {
+    if (isDeliveryStillValid && !isDeliveryStillValid()) {
+      releaseMemoryDelivery(state, claim);
+      await logEvent(config, "memory_inject_skipped", { sessionID, reason: "delivery_context_changed" });
+      return false;
+    }
     await runtime.deliverContextNoReply({
       sessionId: sessionID,
       context: {

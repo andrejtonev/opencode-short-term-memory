@@ -64,6 +64,10 @@ import {
   rememberCanonicalTurn,
   waitForSessionIdle,
   waitForSessionUpdateDrain,
+  rememberAssistantOriginOwner,
+  resetSessionDeliveryState,
+  admitOriginUserTurn,
+  rememberTaggedOriginAlias,
 } from "./session-state";
 import { maybeBootstrapSessionHistory, processMemoryChunks } from "./memory-lifecycle";
 
@@ -424,19 +428,73 @@ export const SessionMemoryPlugin = async (
     if (!s?.mainDcpDeliveryPending || !s.lastDcpCompressAt || isSessionTerminal(sessionID)) return;
 
     const dcpIdentity = s.lastDcpCompressAt;
+    const pendingOrigin = s.pendingDcpOrigin;
+    const generation = lifecycleFor(sessionID).generation;
+    if (pendingOrigin && pendingOrigin.generation !== generation) {
+      if (s.pendingDcpOrigin?.identity === pendingOrigin.identity) {
+        s.mainDcpDeliveryPending = false;
+        s.pendingDcpOrigin = undefined;
+      }
+      return;
+    }
+    if (!isCurrentGeneration(sessionID, generation)) return;
+    const clearMatchingPending = () => {
+      if (pendingOrigin && s.pendingDcpOrigin?.identity !== pendingOrigin.identity) return;
+      s.mainDcpDeliveryPending = false;
+      s.pendingDcpOrigin = undefined;
+    };
+    if (
+      !pendingOrigin?.originUserID ||
+      !pendingOrigin.executionMetadata ||
+      pendingOrigin.originUserID !== s.latestOriginUserID
+    ) {
+      await logEvent(config, "dcp_origin_context_skipped", {
+        sessionID,
+        reason: !pendingOrigin?.originUserID ? "missing_native_owner_context" : "stale_origin_context",
+        ownerID: pendingOrigin?.ownerID,
+        originUserID: pendingOrigin?.originUserID,
+      });
+      clearMatchingPending();
+      return;
+    }
     const memoryRevision = s.memoryRevision;
     const memory = await readText(memoryPathFor(sessionID, config.memoryDir), "");
+    if (
+      !isCurrentGeneration(sessionID, generation) ||
+      sessionStates.get(sessionID) !== s ||
+      s.pendingDcpOrigin?.identity !== pendingOrigin.identity ||
+      s.latestOriginUserID !== pendingOrigin.originUserID ||
+      s.originUserContexts.get(pendingOrigin.originUserID) !== pendingOrigin.executionMetadata
+    ) {
+      clearMatchingPending();
+      return;
+    }
+    const executionMetadata = pendingOrigin.executionMetadata;
     const delivered = await deliverMemoryViaNoReply(
       runtime,
       sessionID,
-      `dcp:${dcpIdentity}`,
+      `dcp:${pendingOrigin?.identity || dcpIdentity}`,
       memoryRevision,
       memory,
       config,
       globalState,
       s,
+      executionMetadata,
+      () =>
+        isCurrentGeneration(sessionID, generation) &&
+        sessionStates.get(sessionID) === s &&
+        s.pendingDcpOrigin?.identity === pendingOrigin.identity &&
+        s.latestOriginUserID === pendingOrigin.originUserID &&
+        s.originUserContexts.get(pendingOrigin.originUserID!) === executionMetadata,
     );
-    if (delivered && s.lastDcpCompressAt === dcpIdentity) s.mainDcpDeliveryPending = false;
+    if (
+      delivered &&
+      s.lastDcpCompressAt === dcpIdentity &&
+      (!pendingOrigin || s.pendingDcpOrigin?.identity === pendingOrigin.identity)
+    ) {
+      s.mainDcpDeliveryPending = false;
+      if (!pendingOrigin || s.pendingDcpOrigin?.identity === pendingOrigin.identity) s.pendingDcpOrigin = undefined;
+    }
   }
 
   async function updateMemory(
@@ -683,7 +741,11 @@ export const SessionMemoryPlugin = async (
         const partState = part?.state as Record<string, unknown> | undefined;
         if (part?.type === "tool" && part?.tool === "compress" && partState?.status === "completed") {
           const sessionID =
-            props?.sessionID && typeof props.sessionID === "string" ? props.sessionID : getSessionID(input);
+            props?.sessionID && typeof props.sessionID === "string"
+              ? props.sessionID
+              : typeof part?.sessionID === "string"
+                ? part.sessionID
+                : getSessionID(input);
           if (sessionID) {
             if (isInternalSession(sessionID)) return;
             if (isSessionTerminal(sessionID)) return;
@@ -703,6 +765,17 @@ export const SessionMemoryPlugin = async (
             }
             s.lastDcpCompressAt = now;
             s.mainDcpDeliveryPending = true;
+            const ownerID = typeof part?.messageID === "string" ? part.messageID : "";
+            const originUserID = ownerID ? s.assistantOriginOwners.get(ownerID) : undefined;
+            const originMetadata = originUserID ? s.originUserContexts.get(originUserID) : undefined;
+            const identity = ownerID || `dcp:${now}`;
+            s.pendingDcpOrigin = {
+              identity,
+              ownerID,
+              originUserID,
+              executionMetadata: originMetadata,
+              generation: lifecycleFor(sessionID).generation,
+            };
 
             // If an update is already in-flight, queue a pending replay
             if (updateInFlight.has(sessionID)) {
@@ -891,6 +964,7 @@ export const SessionMemoryPlugin = async (
       // Clean up per‑session runtime state
       const s = sessionStates.get(sessionID);
       if (s?.timer) clearTimeout(s.timer);
+      if (s) resetSessionDeliveryState(s);
       sessionStates.delete(sessionID);
       childDeliveryMetadata.delete(sessionID);
       // I2 – Cleanup parent/child mappings
@@ -905,6 +979,7 @@ export const SessionMemoryPlugin = async (
           childDeliveryMetadata.delete(child);
           const childState = sessionStates.get(child);
           if (childState?.timer) clearTimeout(childState.timer);
+          if (childState) resetSessionDeliveryState(childState);
           sessionStates.delete(child);
           const childIdx = sessionStatesOrder.indexOf(child);
           if (childIdx !== -1) sessionStatesOrder.splice(childIdx, 1);
@@ -933,6 +1008,17 @@ export const SessionMemoryPlugin = async (
     },
 
     "message.updated": async (input: MessageUpdatedInput) => {
+      const earlySessionID = input.sessionID;
+      const earlyMessage = input.message;
+      const earlyOwnerID = earlyMessage?.id || earlyMessage?.messageID;
+      const earlyParentID =
+        earlyMessage?.parentID || earlyMessage?.parentId || earlyMessage?.parent?.id || earlyMessage?.parent?.messageID;
+      if (earlySessionID && earlyOwnerID && earlyParentID) {
+        const earlyState = sessionStates.get(earlySessionID);
+        if (earlyState?.originUserContexts.has(earlyParentID)) {
+          rememberAssistantOriginOwner(earlyState, earlyOwnerID, earlyParentID);
+        }
+      }
       await reloadConfigLocal();
       if (!config.enabled) return;
       const sessionID = getSessionID(input);
@@ -944,6 +1030,16 @@ export const SessionMemoryPlugin = async (
       if (!(await ensureMemoryFileForGeneration(sessionID, generation, config))) return;
 
       const role = getMessageRole(input.message || input);
+      if (role === "assistant") {
+        const message = (input.message || input) as MessageUpdatedInput["message"];
+        const ownerID = message?.id || message?.messageID;
+        const parentID = message?.parentID || message?.parentId || message?.parent?.id || message?.parent?.messageID;
+        if (ownerID && parentID) {
+          const originUserID = parentID;
+          const state = sessionStates.get(sessionID);
+          if (state) rememberAssistantOriginOwner(state, ownerID, originUserID);
+        }
+      }
       const text = getMessageText(input);
       if (!text || isSelfInjection(text)) return;
 
@@ -952,6 +1048,38 @@ export const SessionMemoryPlugin = async (
 
     "chat.message": async (input: ChatMessageInput, output: ChatMessageOutput) => {
       const executionMetadata = snapshotUserExecutionMetadata(output?.message, input);
+      const userID =
+        input.messageID ||
+        input.messageId ||
+        input.message?.id ||
+        input.id ||
+        output?.messageID ||
+        output?.messageId ||
+        output?.message?.id ||
+        output?.id;
+      const earlyRole = getMessageRole(output?.message) ?? getMessageRole(input.message || input);
+      const hasOriginMetadata = executionMetadata.agent !== undefined && executionMetadata.model !== undefined;
+      const taggedOutput = [
+        ...(Array.isArray(input.parts) ? input.parts : []),
+        ...(Array.isArray(output?.parts) ? output.parts : []),
+      ].some(
+        (part) =>
+          typeof (part as { text?: unknown })?.text === "string" &&
+          String((part as { text: string }).text).includes("[MEMORY_SYSTEM]"),
+      );
+      const explicitSessionID = input.sessionID;
+      const earlyEligible =
+        explicitSessionID &&
+        !internalSessionIDs.has(explicitSessionID) &&
+        !isSessionTerminal(explicitSessionID) &&
+        !sessionParents.has(explicitSessionID);
+      if (earlyEligible && userID && earlyRole === "user" && !taggedOutput) {
+        const earlyState = ensureSessionState(explicitSessionID, sessionStates, sessionStatesOrder, MAX_SESSION_STATES);
+        admitOriginUserTurn(earlyState, String(userID), hasOriginMetadata ? executionMetadata : undefined);
+      } else if (earlyEligible && userID && earlyRole === "user" && taggedOutput && hasOriginMetadata) {
+        const earlyState = sessionStates.get(explicitSessionID);
+        if (earlyState) rememberTaggedOriginAlias(earlyState, String(userID), executionMetadata);
+      }
       await reloadConfigLocal();
       if (!config.enabled) return;
 

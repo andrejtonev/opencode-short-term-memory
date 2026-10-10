@@ -1,5 +1,16 @@
+import type { UserExecutionMetadata } from "./types";
+
 export const MAX_SESSION_STATES = 200;
 export const MAX_CANONICAL_TURN_IDS = 64;
+export const MAX_ORIGIN_CONTEXTS = 16;
+
+export interface PendingDcpOrigin {
+  identity: string;
+  ownerID: string;
+  originUserID?: string;
+  executionMetadata?: UserExecutionMetadata;
+  generation: number;
+}
 
 export interface MemoryDeliveryClaim {
   turnID: string;
@@ -22,6 +33,14 @@ export interface SessionRuntimeState {
   mainDcpDeliveryPending: boolean;
   lastIdleScheduledAt: number;
   lastDcpCompressAt: number;
+  latestOriginUserID?: string;
+  originUserContexts: Map<string, UserExecutionMetadata>;
+  originUserOrder: string[];
+  assistantOriginOwners: Map<string, string>;
+  assistantOriginOrder: string[];
+  originAliases: Map<string, string>;
+  originAliasOrder: string[];
+  pendingDcpOrigin?: PendingDcpOrigin;
   timer?: ReturnType<typeof setTimeout>;
 }
 
@@ -43,6 +62,12 @@ export function createSessionRuntimeState(): SessionRuntimeState {
     mainDcpDeliveryPending: false,
     lastIdleScheduledAt: 0,
     lastDcpCompressAt: 0,
+    originUserContexts: new Map(),
+    originUserOrder: [],
+    assistantOriginOwners: new Map(),
+    assistantOriginOrder: [],
+    originAliases: new Map(),
+    originAliasOrder: [],
   };
 }
 
@@ -60,6 +85,58 @@ export function resetSessionDeliveryState(state: SessionRuntimeState): void {
   state.childStartupInjectionPending = false;
   state.childDcpInjectionPending = false;
   state.mainDcpDeliveryPending = false;
+  state.latestOriginUserID = undefined;
+  state.originUserContexts.clear();
+  state.originUserOrder.length = 0;
+  state.assistantOriginOwners.clear();
+  state.assistantOriginOrder.length = 0;
+  state.originAliases.clear();
+  state.originAliasOrder.length = 0;
+  state.pendingDcpOrigin = undefined;
+}
+
+function rememberBounded<K, V>(map: Map<K, V>, order: K[], key: K, value: V): void {
+  const existing = order.indexOf(key);
+  if (existing !== -1) order.splice(existing, 1);
+  map.set(key, value);
+  order.push(key);
+  while (order.length > MAX_ORIGIN_CONTEXTS) map.delete(order.shift()!);
+}
+
+export function admitOriginUserTurn(
+  state: SessionRuntimeState,
+  userID: string,
+  metadata?: UserExecutionMetadata,
+): void {
+  state.latestOriginUserID = userID;
+  if (metadata) {
+    rememberBounded(state.originUserContexts, state.originUserOrder, userID, metadata);
+    return;
+  }
+  state.originUserContexts.delete(userID);
+  const index = state.originUserOrder.indexOf(userID);
+  if (index !== -1) state.originUserOrder.splice(index, 1);
+}
+
+export function rememberTaggedOriginAlias(
+  state: SessionRuntimeState,
+  aliasUserID: string,
+  metadata: UserExecutionMetadata,
+): void {
+  const originUserID = state.latestOriginUserID;
+  if (!originUserID || !metadataMatches(state.originUserContexts.get(originUserID), metadata)) return;
+  rememberBounded(state.originAliases, state.originAliasOrder, aliasUserID, originUserID);
+}
+
+function metadataMatches(left: UserExecutionMetadata | undefined, right: UserExecutionMetadata): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+export function rememberAssistantOriginOwner(state: SessionRuntimeState, ownerID: string, userID: string): void {
+  const canonicalUserID = state.originAliases.get(userID) || userID;
+  if (state.originUserContexts.has(canonicalUserID)) {
+    rememberBounded(state.assistantOriginOwners, state.assistantOriginOrder, ownerID, canonicalUserID);
+  }
 }
 
 export function rememberCanonicalTurn(state: SessionRuntimeState, turnID: string): boolean {

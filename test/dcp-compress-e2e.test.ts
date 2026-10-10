@@ -45,21 +45,44 @@ describe("DCP compress event integration", () => {
         summarizerMode: "active",
         debug: false,
         debounceMs: 0,
+        remindEveryN: 1000,
       },
       fakeClient,
     );
 
     await plugin["session.created"]({ sessionID });
 
+    await plugin["chat.message"](
+      { sessionID, messageID: "u1" },
+      {
+        message: {
+          id: "u1",
+          role: "user",
+          agent: "build",
+          model: { providerID: "provider", modelID: "model" },
+          tools: { edit: true, bash: false },
+        },
+      },
+    );
+    await plugin.event({
+      event: {
+        type: "message.updated",
+        properties: {
+          info: { id: "a1", parentID: "u1", sessionID, role: "assistant" },
+        },
+      },
+    } as any);
+
     // Simulate what OpenCode sends when DCP's compress tool completes
     const dcpCompressEvent = {
       event: {
         type: "message.part.updated",
         properties: {
-          sessionID,
           part: {
             type: "tool",
             tool: "compress",
+            messageID: "a1",
+            sessionID,
             state: { status: "completed" },
           },
         },
@@ -76,6 +99,13 @@ describe("DCP compress event integration", () => {
     expect(client.calls.noReplyDeliveries[0]).toMatchObject({
       path: { id: sessionID },
       body: { noReply: true },
+    });
+    expect(client.calls.noReplyDeliveries[0]).toMatchObject({
+      body: {
+        agent: "build",
+        model: { providerID: "provider", modelID: "model" },
+        tools: { edit: true, bash: false },
+      },
     });
     expect(client.calls.noReplyDeliveries[0]).toMatchObject({
       body: { parts: [{ type: "text", text: expect.stringContaining(INJECTION_PREFIX) }] },
@@ -99,12 +129,34 @@ describe("DCP compress event integration", () => {
       {
         summarizerMode: "active",
         debug: false,
-        debounceMs: 50,
+        debounceMs: 1000,
+        remindEveryN: 1000,
       },
       fakeClient,
     );
 
     await plugin["session.created"]({ sessionID });
+
+    await plugin["chat.message"](
+      { sessionID, messageID: "u1" },
+      {
+        message: {
+          id: "u1",
+          role: "user",
+          agent: "build",
+          model: { providerID: "provider", modelID: "model" },
+          tools: { edit: true, bash: false },
+        },
+      },
+    );
+    await plugin.event({
+      event: {
+        type: "message.updated",
+        properties: {
+          info: { id: "a1", parentID: "u1", sessionID, role: "assistant" },
+        },
+      },
+    } as any);
 
     const dcpCompressEvent = {
       event: {
@@ -114,6 +166,7 @@ describe("DCP compress event integration", () => {
           part: {
             type: "tool",
             tool: "compress",
+            messageID: "a1",
             state: { status: "completed" },
           },
         },
@@ -164,11 +217,33 @@ describe("DCP compress event integration", () => {
         summarizerMode: "active",
         debug: false,
         debounceMs: 0,
+        remindEveryN: 1000,
       },
       fakeClient,
     );
 
     await plugin["session.created"]({ sessionID });
+
+    await plugin["chat.message"](
+      { sessionID, messageID: "m1" },
+      {
+        message: {
+          id: "m1",
+          role: "user",
+          agent: "build",
+          model: { providerID: "provider", modelID: "model" },
+          tools: { edit: true, bash: false },
+        },
+      },
+    );
+    await plugin.event({
+      event: {
+        type: "message.updated",
+        properties: {
+          info: { id: "m2", parentID: "m1", sessionID, role: "assistant" },
+        },
+      },
+    } as any);
 
     // Start a manual update (will be in-flight)
     const updatePromise = plugin.tool.short_term_memory.execute({ action: "update" }, { sessionID });
@@ -185,12 +260,26 @@ describe("DCP compress event integration", () => {
           part: {
             type: "tool",
             tool: "compress",
+            messageID: "m2",
             state: { status: "completed" },
           },
         },
       },
     };
     await plugin.event(dcpCompressEvent as any);
+
+    await plugin["chat.message"](
+      { sessionID, messageID: "m3" },
+      {
+        message: {
+          id: "m3",
+          role: "user",
+          agent: "review",
+          model: { providerID: "provider", modelID: "new-model" },
+          tools: { edit: false, bash: true },
+        },
+      },
+    );
 
     // Release the first update
     firstPromptResolve?.();
@@ -203,7 +292,172 @@ describe("DCP compress event integration", () => {
     expect(logText).toContain('"event":"dcp_compress_queued_after_inflight"');
     expect(logText).toContain('"reason":"post_in_flight_replay"');
     expect(client.calls.summarizerPrompts).toHaveLength(1);
+    expect(client.calls.noReplyDeliveries).toHaveLength(0);
+    expect(logText).toContain('"reason":"stale_origin_context"');
+  });
+
+  test("DCP compress without a native assistant owner fails closed", async () => {
+    const sessionID = `dcp-missing-owner-${Date.now()}`;
+    const fakeClient = createFakeClient({
+      messagesRows: [{ id: "u1", role: "user", content: "missing owner" }],
+      promptText: "## Session Memory\n\n### Active References\n- should not deliver\n",
+    });
+    const { plugin, client } = await createPlugin(
+      { summarizerMode: "active", debug: false, debounceMs: 0, remindEveryN: 1000 },
+      fakeClient,
+    );
+    await plugin["session.created"]({ sessionID });
+    await plugin.event({
+      event: {
+        type: "message.part.updated",
+        properties: { sessionID, part: { type: "tool", tool: "compress", state: { status: "completed" } } },
+      },
+    } as any);
+    expect(client.calls.summarizerPrompts).toHaveLength(1);
+    expect(client.calls.noReplyDeliveries).toHaveLength(0);
+    const logText = await readText(join(".opencode", "memory", "session-memory.log"), "");
+    expect(logText).toContain('"reason":"missing_native_owner_context"');
+  });
+
+  test("newest metadata-less user turn blocks pending DCP delivery without history", async () => {
+    const sessionID = `dcp-newest-missing-metadata-${Date.now()}`;
+    let releasePrompt: (() => void) | undefined;
+    const promptGate = new Promise<void>((resolve) => {
+      releasePrompt = resolve;
+    });
+    const fakeClient = createFakeClient({
+      messagesRows: [
+        { id: "old-user", role: "user", content: "old context" },
+        { id: "old-assistant", role: "assistant", content: "old answer" },
+      ],
+      promptResponder: async () => {
+        await promptGate;
+        return "## Session Memory\n\n### Active References\n- old context\n";
+      },
+    });
+    const { plugin, client } = await createPlugin(
+      { summarizerMode: "active", debug: false, debounceMs: 0, remindEveryN: 1000 },
+      fakeClient,
+    );
+    await plugin["session.created"]({ sessionID });
+    await plugin["chat.message"](
+      { sessionID, messageID: "old-user" },
+      {
+        message: {
+          id: "old-user",
+          role: "user",
+          agent: "build",
+          model: { providerID: "provider", modelID: "model" },
+          tools: { edit: true },
+        },
+      },
+    );
+    await plugin.event({
+      event: {
+        type: "message.updated",
+        properties: { info: { id: "old-assistant", parentID: "old-user", sessionID, role: "assistant" } },
+      },
+    } as any);
+    const updatePromise = plugin.tool.short_term_memory.execute({ action: "update" }, { sessionID });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await plugin.event({
+      event: {
+        type: "message.part.updated",
+        properties: {
+          part: {
+            type: "tool",
+            tool: "compress",
+            messageID: "old-assistant",
+            sessionID,
+            state: { status: "completed" },
+          },
+        },
+      },
+    } as any);
+    await plugin["chat.message"]({ sessionID, messageID: "new-user" }, { message: { id: "new-user", role: "user" } });
+    releasePrompt?.();
+    await updatePromise;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(client.calls.noReplyDeliveries).toHaveLength(0);
+    const logText = await readText(join(".opencode", "memory", "session-memory.log"), "");
+    expect(logText).toContain('"reason":"stale_origin_context"');
+  });
+
+  test("session reset clears the cached DCP origin owner", async () => {
+    const sessionID = `dcp-reset-origin-${Date.now()}`;
+    const fakeClient = createFakeClient({ messagesRows: [{ id: "u1", role: "user", content: "reset origin" }] });
+    const { plugin, client } = await createPlugin(
+      { summarizerMode: "active", debug: false, debounceMs: 0, remindEveryN: 1000 },
+      fakeClient,
+    );
+    await plugin["session.created"]({ sessionID });
+    await plugin["chat.message"](
+      { sessionID, messageID: "u1" },
+      {
+        message: {
+          id: "u1",
+          role: "user",
+          agent: "build",
+          model: { providerID: "provider", modelID: "model" },
+          tools: { edit: true },
+        },
+      },
+    );
+    await plugin.event({
+      event: {
+        type: "message.updated",
+        properties: { info: { id: "a1", parentID: "u1", sessionID, role: "assistant" } },
+      },
+    } as any);
+    await plugin.tool.stm_memory_reset.execute({ confirm: true }, { sessionID });
+    await plugin.event({
+      event: {
+        type: "message.part.updated",
+        properties: {
+          sessionID,
+          part: { type: "tool", tool: "compress", messageID: "a1", state: { status: "completed" } },
+        },
+      },
+    } as any);
+    expect(client.calls.noReplyDeliveries).toHaveLength(0);
+  });
+
+  test("native self-injection alias preserves the originating DCP identity", async () => {
+    const sessionID = `dcp-self-alias-${Date.now()}`;
+    const fakeClient = createFakeClient({
+      messagesRows: [
+        { id: "u1", role: "user", content: "alias origin" },
+        { id: "a-alias", role: "assistant", content: "alias response" },
+      ],
+    });
+    const { plugin, client } = await createPlugin(
+      { summarizerMode: "active", debug: false, debounceMs: 0, remindEveryN: 1000 },
+      fakeClient,
+    );
+    const metadata = { agent: "build", model: { providerID: "provider", modelID: "model" }, tools: { edit: true } };
+    await plugin["session.created"]({ sessionID });
+    await plugin["chat.message"]({ sessionID, messageID: "u1" }, { message: { id: "u1", role: "user", ...metadata } });
+    await plugin["chat.message"](
+      { sessionID, messageID: "memory-user-alias", parts: [{ type: "text", text: "[MEMORY_SYSTEM]" }] },
+      { message: { id: "memory-user-alias", role: "user", ...metadata } },
+    );
+    await plugin.event({
+      event: {
+        type: "message.updated",
+        properties: { info: { id: "a-alias", parentID: "memory-user-alias", sessionID, role: "assistant" } },
+      },
+    } as any);
+    await plugin.event({
+      event: {
+        type: "message.part.updated",
+        properties: {
+          sessionID,
+          part: { type: "tool", tool: "compress", messageID: "a-alias", state: { status: "completed" } },
+        },
+      },
+    } as any);
     expect(client.calls.noReplyDeliveries).toHaveLength(1);
+    expect(client.calls.noReplyDeliveries[0]).toMatchObject({ body: metadata });
   });
 
   test("DCP compress event schedules one additional child snapshot injection without an update", async () => {
@@ -285,10 +539,7 @@ describe("DCP compress event integration", () => {
     // DCP marks exactly one additional snapshot injection pending.
     const dcpOutput = { system: [] as string[] };
     const afterDcpOutput = { system: [] as string[] };
-    await plugin["experimental.chat.system.transform"](
-      { sessionID: subSessionID, messageID: "sub-dcp" },
-      dcpOutput,
-    );
+    await plugin["experimental.chat.system.transform"]({ sessionID: subSessionID, messageID: "sub-dcp" }, dcpOutput);
     await plugin["experimental.chat.system.transform"](
       { sessionID: subSessionID, messageID: "sub-after-dcp" },
       afterDcpOutput,

@@ -41,6 +41,11 @@ export interface EventInput {
 export interface MessageUpdatedInput {
   sessionID?: string;
   message?: {
+    id?: string;
+    messageID?: string;
+    parentID?: string;
+    parentId?: string;
+    parent?: { id?: string; messageID?: string };
     role?: string;
     content?: string;
     parts?: unknown[];

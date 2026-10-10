@@ -1,5 +1,53 @@
 # V1 Manual Acceptance
 
+# Addendum — native DCP metadata closure (2026-10-10)
+
+The current bounded native DCP run `v1-2nieQM` completed in `67.709s` with
+functional, diagnostic, and clean gates passing. Evidence is retained at
+`/home/dev/workspace/opencode-work/stm-published-rc-e2e/v1-2nieQM/evidence.json`.
+The tested unpublished candidate is
+`/home/dev/workspace/opencode-work/stm-readiness-improvements/2026-10-10--dcp-rebuilt-candidate-H7TpDARz/atonev-opencode-short-term-memory-1.4.0-rc.4.tgz`
+with SHA256
+`b4a4cf7ec856b9030f276a1f97a62c172754c624f656ad8f509ee3d1d9c2d9e1`.
+These results apply only to those bytes; this is not a publication or registry
+release claim.
+
+The native compress operation was the tool message `call_stm_dcp_compress_1`.
+Its output reported `Compressed 2 messages`; the source XML contained the
+actual message IDs `m0001` and `m0002`, rather than inferred fixture IDs. The
+durable tool input matched that operation. The immediate bridge path and the
+replay completion were both recorded. After compression, the `MEMORY` user
+message preserved `stm-dcp-parent`, the isolated deterministic tool context,
+and `toolsedit=true`; no `bash` tool was introduced.
+
+### Current DCP-closure summary
+
+| Component/Logic Block                 | Current Findings/Hypothesis                                                                                                                                                                                                                                                                              | Implications                                                                                                                                                                                                                | Verification Status                                                                                                  |
+| ------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| Native DCP operation identity         | The installed native host exercised `call_stm_dcp_compress_1`; its compressed source was exactly `m0001` and `m0002`, and the durable input matched the native operation.                                                                                                                                | The closure is bounded to an actual installed DCP operation and its recorded message identity, not a synthetic compress event or inferred message set.                                                                      | PASS in `v1-2nieQM`; evidence path above.                                                                            |
+| Origin, owner, and alias context      | DCP origin state is bounded to 16 cached origin-user contexts, 16 assistant-owner mappings, and 16 origin aliases. The completed tool's native `part.messageID` is the owner key; the owner resolves to the canonical origin user and its execution metadata.                                            | Metadata follows the originating user/assistant ownership chain instead of the latest unrelated default context.                                                                                                            | Source-bounded by `src/session-state.ts:3-13,35-43,98-139` and `src/session-memory.ts:768-778`; native closure PASS. |
+| Pending-generation validity           | The pending DCP record captures the current lifecycle generation and an identity. Delivery first rejects terminal or non-current generations, then requires the pending identity, latest origin user, and cached execution-metadata object to remain unchanged before and during no-reply delivery.      | A stale or newer-turn pending record cannot reinject old metadata. The timestamp is only the debounce/identity fallback (`Date.now()`); lifecycle generation and identity are the ordering guards, not wall-clock ordering. | Source-bounded by `src/session-memory.ts:426-498,758-778`; current native closure PASS.                              |
+| Missing, stale, or newer-turn context | Missing owner/metadata or an origin user different from `latestOriginUserID` logs `dcp_origin_context_skipped` and clears only the matching pending DCP state. A generation or identity mismatch similarly abandons that delivery.                                                                       | DCP reinjection fails closed without borrowing another agent's metadata, while ordinary memory updates remain permitted; skipping reinjection is not a session-wide update ban.                                             | Guard behavior verified from source; native run recorded immediate bridge and replay completion.                     |
+| Native post-compress memory           | The post-compress `MEMORY` user message retained `stm-dcp-parent`, isolated deterministic tools, and `toolsedit=true`, with `bash=false`.                                                                                                                                                                | The observed native path preserves the intended parent/tool context after compression.                                                                                                                                      | PASS in retained native evidence; no broader semantic-model claim.                                                   |
+| Offline and coverage boundary         | The candidate reported `938` tests and `4,221` assertions passing in `31.74s`; type, format, and scan checks were clear. Remaining gates are literal keyboard interaction, real-model semantics, minimum-host support, registry release identity, cache eviction, and additional DCP operation variants. | This addendum closes the exercised DCP metadata path only; it does not claim the remaining interaction, compatibility, release, eviction, or operation-variant gates.                                                       | PASS for reported offline checks; remaining gates explicitly open.                                                   |
+
+The seven recorded native attempts remain factual history: `rz5BId` invalid
+configuration, `1FM6dH` queued assertion, `SZNapA` immediate-wait failure,
+`jWpUf8` distributed aliases, `0o3nF5` pre-existing timestamp,
+`oxf21r` wrong polling subset, and the current `v1-2nieQM` pass. The earlier
+failed or queued harness records are not independent live qualifications and
+are not rewritten as such. The candidate metadata is a different RC4 artifact
+from earlier records.
+
+### Exact source and evidence references
+
+- Evidence: `/home/dev/workspace/opencode-work/stm-published-rc-e2e/v1-2nieQM/evidence.json`
+- Candidate: `/home/dev/workspace/opencode-work/stm-readiness-improvements/2026-10-10--dcp-rebuilt-candidate-H7TpDARz/atonev-opencode-short-term-memory-1.4.0-rc.4.tgz`
+- Candidate SHA256: `b4a4cf7ec856b9030f276a1f97a62c172754c624f656ad8f509ee3d1d9c2d9e1`
+- Investigation artifact: `/home/dev/workspace/opencode-work/stm-readiness-improvements/2026-10-10--v1-dcp-metadata.html`
+- DCP state/cache source: `src/session-state.ts:3-13,35-43,74-139`
+- DCP capture source: `src/session-memory.ts:426-498,737-789`
+
 ## Addendum — fail-closed diagnostic policy (2026-10-10)
 
 The bounded native V1 run `v1-74XMSf` completed in `65.734s` against the same

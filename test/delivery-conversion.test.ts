@@ -2,8 +2,17 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { checkpointPathFor, INJECTION_PREFIX, memoryPathFor, readText, writeText } from "../src/memory-utils";
-import { MAX_SESSION_STATES } from "../src/session-state";
+import { deliverMemoryViaNoReply } from "../src/injection";
+import {
+  checkpointPathFor,
+  DEFAULT_CONFIG,
+  INJECTION_PREFIX,
+  memoryPathFor,
+  readText,
+  createRuntimeState,
+  writeText,
+} from "../src/memory-utils";
+import { createSessionRuntimeState, MAX_SESSION_STATES } from "../src/session-state";
 import { createFakeClient, createPlugin, extractTaggedChildSystemDeliveries } from "./test-helpers";
 
 const MEMORY = "## Session Memory\n\n### Long Horizon Context\n- Preserve DELIVERY_TOKEN\n";
@@ -18,13 +27,18 @@ function childCreatedInput(sessionID: string, parentID: string) {
   };
 }
 
-function dcpCompressEvent(sessionID: string) {
+function dcpCompressEvent(sessionID: string, messageID?: string) {
   return {
     event: {
       type: "message.part.updated",
       properties: {
         sessionID,
-        part: { type: "tool", tool: "compress", state: { status: "completed" } },
+        part: {
+          type: "tool",
+          tool: "compress",
+          ...(messageID === undefined ? {} : { messageID }),
+          state: { status: "completed" },
+        },
       },
     },
   };
@@ -236,6 +250,47 @@ describe("delivery conversion", () => {
     });
   });
 
+  test("stale no-reply delivery releases its claim without dispatching", async () => {
+    const state = createSessionRuntimeState();
+    const globalState = createRuntimeState();
+    const executionMetadata = {
+      agent: "preserved-agent",
+      model: { providerID: "preserved-provider", modelID: "preserved-model" },
+      tools: { task: true, bash: false },
+    };
+    let runtimeCallCount = 0;
+    let valid = true;
+    const runtime = {
+      deliverContextNoReply: async () => {
+        runtimeCallCount += 1;
+      },
+    };
+
+    const deliveryPromise = deliverMemoryViaNoReply(
+      runtime,
+      "direct-fake-runtime",
+      "turn-1",
+      state.memoryRevision,
+      MEMORY,
+      { ...DEFAULT_CONFIG, debug: false },
+      globalState,
+      state,
+      executionMetadata,
+      () => valid,
+    );
+    valid = false;
+
+    expect(await deliveryPromise).toBe(false);
+    expect(runtimeCallCount).toBe(0);
+    expect(state.deliveryClaim).toBeUndefined();
+    expect(state.retryableDeliveryClaim).toEqual({ turnID: "turn-1", memoryRevision: 0 });
+    expect(executionMetadata).toEqual({
+      agent: "preserved-agent",
+      model: { providerID: "preserved-provider", modelID: "preserved-model" },
+      tools: { task: true, bash: false },
+    });
+  });
+
   test("duplicate user identity neither advances cadence nor redelivers", async () => {
     const sessionID = "main-dedupe";
     const fakeClient = createFakeClient();
@@ -288,17 +343,49 @@ describe("delivery conversion", () => {
   test("main DCP with persisted memory and no collected messages still delivers without summarizing", async () => {
     const sessionID = "main-dcp-no-write";
     const fakeClient = createFakeClient({ messagesRows: [] });
-    const { plugin, client } = await createPlugin({ debug: false }, fakeClient);
+    const { plugin, client } = await createPlugin({ debug: false, remindEveryN: 1000 }, fakeClient);
     await writeText(memoryPathFor(sessionID), MEMORY);
     await plugin["session.created"]({ sessionID });
 
-    await plugin.event(dcpCompressEvent(sessionID) as any);
+    await plugin["chat.message"](
+      { sessionID, messageID: "dcp-origin-user" },
+      {
+        message: {
+          role: "user",
+          id: "dcp-origin-user",
+          agent: "dcp-agent",
+          model: { providerID: "dcp-provider", modelID: "dcp-model" },
+          tools: { edit: true, bash: false },
+        },
+      },
+    );
+    expect(client.calls.noReplyDeliveries).toHaveLength(0);
+
+    await plugin.event({
+      event: {
+        type: "message.updated",
+        properties: {
+          info: { id: "dcp-assistant", parentID: "dcp-origin-user", sessionID, role: "assistant" },
+        },
+      },
+    } as any);
+    await plugin.event(dcpCompressEvent(sessionID, "dcp-assistant") as any);
 
     expect(await readText(memoryPathFor(sessionID), "")).toBe(MEMORY);
     expect(client.calls.messages).toHaveLength(1);
     expect(client.calls.summarizerPrompts).toHaveLength(0);
     expect(client.calls.noReplyDeliveries).toHaveLength(1);
-    expectTaggedNoReplyDelivery(client.calls.noReplyDeliveries[0], sessionID);
+    expect(client.calls.noReplyDeliveries[0]).toEqual({
+      path: { id: sessionID },
+      body: {
+        agent: "dcp-agent",
+        model: { providerID: "dcp-provider", modelID: "dcp-model" },
+        tools: { edit: true, bash: false },
+        parts: [{ type: "text", text: expect.stringContaining(`${INJECTION_PREFIX}\n`) }],
+        noReply: true,
+      },
+    });
+    expect((client.calls.noReplyDeliveries[0] as any).body.parts[0].text).toContain("DELIVERY_TOKEN");
   });
 
   test("legacy opt-in keeps cadence in the system transform and chat does not noReply", async () => {
