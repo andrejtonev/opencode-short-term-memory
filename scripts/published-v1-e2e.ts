@@ -11,6 +11,7 @@ import {
   type ProviderRequest,
   type SharedCoreAdapter,
 } from "../test/e2e/shared-core-scenario";
+import { classifyDiagnosticRows, parseDiagnosticLog, type DiagnosticRow } from "./v1-diagnostic-policy";
 
 // Explicit invocation only. STM is installed exclusively by the native host loader.
 const started = Date.now();
@@ -125,22 +126,20 @@ type DiagnosticPhase =
   | "beforeManualRestart"
   | "afterManualRestart"
   | "final";
-interface DiagnosticRow {
-  readonly [key: string]: unknown;
-  readonly event?: string;
-  readonly error?: string;
-  readonly level?: string;
-  readonly sessionID?: string;
-  readonly operationID?: string;
-  readonly operationId?: string;
-  readonly attempt?: number;
-  readonly timestamp?: number;
-  readonly time?: number;
-}
 interface DiagnosticSnapshot {
   readonly capturedLines: number;
+  readonly completeLines: number;
+  readonly parseIssueCount: number;
+  readonly incompleteTail?: { readonly line: number; readonly byteLength: number; readonly reason: string };
   readonly configuredMaxLines: number;
   readonly complete: boolean;
+}
+interface DiagnosticParseIssueEvidence {
+  readonly phase: DiagnosticPhase;
+  readonly line: number;
+  readonly reason: string;
+  readonly byteLength: number;
+  readonly sha256: string;
 }
 interface DiagnosticState {
   readonly configuredMaxLines: Record<DiagnosticPhase, number>;
@@ -152,6 +151,8 @@ interface DiagnosticState {
   stmErrors: DiagnosticRow[];
   recoveredStmErrors: DiagnosticRow[];
   unexplainedHostErrors: string[];
+  diagnosticParseIssues: DiagnosticParseIssueEvidence[];
+  finalTail?: { readonly line: number; readonly byteLength: number; readonly reason: string };
   incomplete: boolean;
 }
 const newDiagnosticState = (): DiagnosticState => ({
@@ -173,6 +174,7 @@ const newDiagnosticState = (): DiagnosticState => ({
   stmErrors: [],
   recoveredStmErrors: [],
   unexplainedHostErrors: [],
+  diagnosticParseIssues: [],
   incomplete: false,
 });
 let diagnostic: DiagnosticState = newDiagnosticState();
@@ -690,97 +692,90 @@ workflow: try {
   const logPath = join(memoryDir, "session-memory.log");
   diagnosticLogPath = logPath;
   diagnosticRoots = [memoryDir];
-  const completeLogLines = () => {
+  const completeLogText = () => {
     const contents = readFileSync(logPath, "utf8");
     const completeEnd = contents.lastIndexOf("\n");
-    return completeEnd < 0 ? [] : contents.slice(0, completeEnd).split("\n").filter(Boolean);
+    return completeEnd < 0 ? "" : contents.slice(0, completeEnd + 1);
   };
-  const logRowsSince = (before: ReadonlySet<string>) =>
-    completeLogLines()
+  const completeLogLines = () => completeLogText().split("\n").filter(Boolean);
+  const logRowsSince = (before: ReadonlySet<string>) => {
+    return completeLogLines()
       .filter((line) => !before.has(line))
-      .map((line) => JSON.parse(line));
+      .flatMap((line) => parseDiagnosticLog(`${line}\n`).rows);
+  };
   retainedDiagnosticLines = new Set<string>();
   diagnostic = newDiagnosticState();
   evidence.diagnostics = diagnostic;
   snapshotDiagnostics = (phase: DiagnosticPhase) => {
     if (!diagnosticLogPath) return;
-    const lines = completeLogLines();
+    const contents = readFileSync(logPath, "utf8");
+    const completeEnd = contents.lastIndexOf("\n");
+    const completeText = completeEnd < 0 ? "" : contents.slice(0, completeEnd + 1);
+    const parsed = parseDiagnosticLog(contents);
+    const completeParsed = parseDiagnosticLog(completeText);
+    const lines = completeText.split("\n").filter(Boolean);
     for (const line of lines) retainedDiagnosticLines.add(line);
-    const rows = lines.flatMap((line) => {
-      try {
-        const row: unknown = JSON.parse(line);
-        return row !== null && typeof row === "object" ? [row as DiagnosticRow] : [];
-      } catch {
-        return [];
-      }
+    const issueEvidence = completeParsed.issues.map((issue) => {
+      const rawLine = completeText.split("\n")[issue.line - 1] ?? "";
+      return {
+        phase,
+        line: issue.line,
+        reason: issue.reason,
+        byteLength: issue.byteLength,
+        sha256: createHash("sha256").update(rawLine).digest("hex"),
+      };
     });
+    const issueKeys = new Set(
+      diagnostic.diagnosticParseIssues.map((issue) => `${issue.line}:${issue.reason}:${issue.sha256}`),
+    );
+    for (const issue of issueEvidence) {
+      const key = `${issue.line}:${issue.reason}:${issue.sha256}`;
+      if (!issueKeys.has(key)) diagnostic.diagnosticParseIssues.push(issue);
+    }
     const maxLines = diagnostic.configuredMaxLines[phase];
     diagnostic.snapshots[phase] = {
       capturedLines: lines.length,
+      completeLines: lines.length,
+      parseIssueCount: completeParsed.issues.length,
+      ...(parsed.incompleteTail
+        ? {
+            incompleteTail: {
+              line: parsed.incompleteTail.line,
+              byteLength: parsed.incompleteTail.byteLength,
+              reason: "unterminated final diagnostic row",
+            },
+          }
+        : {}),
       configuredMaxLines: maxLines,
       complete: lines.length < maxLines,
     };
     diagnostic.incomplete ||= lines.length >= maxLines;
-    diagnostic.retainedRows = [...retainedDiagnosticLines].flatMap((line): DiagnosticRow[] => {
-      try {
-        const row: unknown = JSON.parse(line);
-        return row !== null && typeof row === "object" ? [row as DiagnosticRow] : [];
-      } catch {
-        return [];
-      }
-    });
+    const retainedText = [...retainedDiagnosticLines].join("\n") + (retainedDiagnosticLines.size > 0 ? "\n" : "");
+    diagnostic.retainedRows = parseDiagnosticLog(retainedText).rows;
     // Every retained row comes from the STM-owned diagnostic log; do not narrow
     // classification by event name, so collection/orphan *_error rows cannot
     // be silently excluded from the diagnostic gate.
     diagnostic.stmErrors = diagnostic.retainedRows.filter(
-      (row) =>
-        (typeof row.error === "string" && row.error.trim().length > 0) ||
-        /error/i.test(typeof row.level === "string" ? row.level : ""),
+      (row) => row.error !== undefined || /error/i.test(row.level ?? ""),
     );
+    if (phase === "final") {
+      diagnostic.finalTail = parsed.incompleteTail
+        ? {
+            line: parsed.incompleteTail.line,
+            byteLength: parsed.incompleteTail.byteLength,
+            reason: "unterminated final diagnostic row",
+          }
+        : undefined;
+    }
   };
   classifyDiagnostics = () => {
-    const lines = serveLog.split(/\r?\n/).filter(Boolean);
-    diagnostic.hostErrors = lines.filter((line) => /^\s*ERROR\b/.test(line) || /\blevel=ERROR\b/.test(line));
-    diagnostic.expectedWarnings = lines.filter((line) => /^\s*Warning:\s*OPENCODE_SERVER_PASSWORD\b/i.test(line));
-    const snapshotWarnings: string[] = [];
-    const normalizeSnapshotLine = (line: string) =>
-      line.replace(/\b(?:timestamp|time|pid|attempt|requestID)=[^\s]+/gi, "").trim();
-    for (let index = 0; index < lines.length; index++) {
-      const line = lines[index]!;
-      if (/service=snapshot\b.*\bexitCode=(?!0\b)\d+/i.test(line)) {
-        snapshotWarnings.push(normalizeSnapshotLine(line));
-        if (/failed to add snapshot files/i.test(lines[index + 1] ?? "")) index++;
-      } else if (/failed to add snapshot files/i.test(line)) {
-        snapshotWarnings.push(normalizeSnapshotLine(line));
-      }
-    }
-    diagnostic.snapshotWarnings = snapshotWarnings;
-    diagnostic.unexplainedHostErrors = diagnostic.hostErrors;
-    const allRows = diagnostic.retainedRows;
-    const errorRows = diagnostic.stmErrors;
-    const timestampValue = (value: unknown) =>
-      typeof value === "number" ? value : typeof value === "string" ? Date.parse(value) : Number.NaN;
-    const recovered = errorRows.filter((row) => {
-      const operationID = row.operationID ?? row.operationId;
-      if (!operationID || !row.sessionID) return false;
-      const rowIndex = allRows.indexOf(row);
-      const timestamp = timestampValue(row.timestamp ?? row.time);
-      return allRows.slice(rowIndex + 1).some((next) => {
-        const nextTimestamp = timestampValue(next.timestamp ?? next.time);
-        return (
-          next.sessionID === row.sessionID &&
-          (next.operationID ?? next.operationId) === operationID &&
-          Number.isFinite(timestamp) &&
-          Number.isFinite(nextTimestamp) &&
-          nextTimestamp > timestamp &&
-          (next.event === "stm_retry_recovered" ||
-            next.event === "memory_update_done" ||
-            next.event === "side_session_summarize_done")
-        );
-      });
-    });
-    diagnostic.recoveredStmErrors = recovered;
-    diagnostic.stmErrors = diagnostic.stmErrors.filter((row) => !recovered.includes(row));
+    const classified = classifyDiagnosticRows(diagnostic.retainedRows, serveLog);
+    diagnostic.hostErrors = classified.hostErrors;
+    diagnostic.expectedWarnings = classified.expectedWarnings;
+    diagnostic.snapshotWarnings = classified.snapshotWarnings;
+    diagnostic.unexplainedHostErrors = classified.hostErrors;
+    diagnostic.recoveredStmErrors = classified.recoveredStmErrors;
+    diagnostic.stmErrors = classified.stmErrors;
   };
   const loadedDeadline = Date.now() + remaining(15_000);
   while (
@@ -1817,11 +1812,15 @@ workflow: try {
   const diagnosticCoverage: { complete: boolean; phases: Partial<Record<DiagnosticPhase, DiagnosticSnapshot>> } = {
     complete:
       !diagnostic.incomplete &&
+      diagnostic.diagnosticParseIssues.length === 0 &&
+      diagnostic.finalTail === undefined &&
       diagnostic.snapshots.startup?.complete === true &&
       Object.values(diagnostic.snapshots).every((snapshot) => snapshot.complete),
     phases: diagnostic.snapshots,
   };
   evidence.diagnosticCoverage = diagnosticCoverage;
+  evidence.diagnosticParseIssues = diagnostic.diagnosticParseIssues;
+  evidence.diagnosticFinalTail = diagnostic.finalTail ?? null;
   evidence.diagnosticClassification = {
     expectedWarnings: diagnostic.expectedWarnings,
     hostErrors: diagnostic.hostErrors,

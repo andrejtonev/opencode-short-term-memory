@@ -1,5 +1,34 @@
 # V1 Manual Acceptance
 
+## Addendum — fail-closed diagnostic policy (2026-10-10)
+
+The bounded native V1 run `v1-74XMSf` completed in `65.734s` against the same
+unpublished product hash `fa539f3684d0edeb91c1a50aab0cce3c4a63689d4ca4df5f27267cb1d16b39f8`.
+Evidence is retained at
+`/home/dev/workspace/stm-published-rc-e2e/v1-74XMSf/evidence.json`. No product
+bytes changed and no new release or publication claim is made. The run
+retained `421` valid rows with `parseIssues: []` and `finalTail: null`; host,
+STM, and snapshot error counts were zero, and the three expected unsecured
+warnings remained the only residue. The native actual-task child path passed,
+and all observed child PIDs (`161773`, `161907`, and `162257`) were absent after
+SIGINT.
+
+### Current diagnostic-policy summary
+
+| Component/Logic Block    | Current Findings/Hypothesis                                                                                                                                                                                              | Implications                                                                                                                          | Verification Status                                                                                        |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| Complete diagnostic rows | Malformed, nonobject, and invalid-known-field complete records now fail closed. Public issues retain phase, line, length, and hash metadata without raw source text.                                                     | A malformed complete record cannot disappear while the run is declared clean, and reports do not echo potentially sensitive payloads. | PASS in 25 focused policy cases and the native run; `parseIssues` was empty for the clean evidence stream. |
+| Unterminated tails       | A final unterminated tail fails closed, while an interim tail may be settled by a later complete identical-prefix record.                                                                                                | Snapshot timing does not create a permanent false failure, but final incomplete evidence remains a failure condition.                 | PASS in the focused policy cases; native evidence ended with `finalTail: null`.                            |
+| Error and warning policy | Collector and host-error handling, snapshot pairing, explicit identity recovery, and false-positive filters are covered by the pure policy tests. Recovery is not inferred from an unrelated later success.              | Verdicts remain conservative and scoped to the same explicit operation/session identity.                                              | PASS in 25 focused cases; source wiring and collector behavior exercised by the bounded run.               |
+| Offline validation       | The TypeScript suite passed `933` tests with `4,209` assertions in `31.59s`; type and format checks passed.                                                                                                              | The policy change is independently tested without claiming a new product build.                                                       | PASS; no build was run for this documentation-only update.                                                 |
+| Coverage boundary        | DCP no-reply metadata, literal keyboard interaction, and real-model semantic quality remain open. The corruption fixtures validate pure policy and source wiring, not a deliberately mutated native end-to-end artifact. | This record closes the parser/privacy/verdict-policy gap only; it does not broaden interaction or model-quality claims.               | Explicitly open and not claimed as native coverage.                                                        |
+
+The diagnostic-policy gap is therefore closed for the documented parser,
+privacy, and conservative-verdict behavior. The historical records below are
+preserved, including older dated statements that described malformed rows as a
+gap at the time they were written; those statements are not retroactively
+rewritten.
+
 ## Addendum — native task-tool gap closure (2026-10-10)
 
 The current bounded native V1 run `v1-ZC68GX` completed in `49.545s` with the
