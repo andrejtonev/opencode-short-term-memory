@@ -110,12 +110,17 @@ export const SessionMemoryPlugin = async (
 
   // Sub-agent tracking
   const sessionParents = new Map<string, string>(); // childID → parentID
+  // Summarizer sessions are intentionally tracked only for the lifetime of
+  // the session.  Unlike a terminal lifecycle tombstone, this lets deletion
+  // still run its normal cleanup path.
+  const internalSessionIDs = new Set<string>();
   // I2 – Reverse mapping for cleanup
   const parentToChildren = new Map<string, Set<string>>(); // parentID → set of childIDs
   const childDeliveryMetadata = new Map<
     string,
     { startupSnapshot: string; startupInjectionPending: boolean; dcpInjectionPending: boolean }
   >();
+  const pendingChildInitializations = new Map<string, { generation: number; promise: Promise<void> }>();
 
   // I3 / I11 – Idle waiters per session
   const idleWaiters = new Map<string, IdleWaiter>();
@@ -170,6 +175,24 @@ export const SessionMemoryPlugin = async (
 
   function isSessionTerminal(sessionID: string): boolean {
     return lifecycleFor(sessionID).terminal;
+  }
+
+  async function awaitChildInitialization(sessionID: string): Promise<void> {
+    const pending = pendingChildInitializations.get(sessionID);
+    if (!pending || !isCurrentGeneration(sessionID, pending.generation)) return;
+    await pending.promise;
+  }
+
+  async function ensureMemoryFileForGeneration(
+    sessionID: string,
+    generation: number,
+    currentConfig: SessionMemoryConfig,
+  ): Promise<boolean> {
+    return withPersistenceLock(sessionID, async () => {
+      if (!isCurrentGeneration(sessionID, generation)) return false;
+      await ensureMemoryFile(sessionID, currentConfig);
+      return isCurrentGeneration(sessionID, generation);
+    });
   }
 
   // ── Context wrappers for session-state module ──────────
@@ -550,6 +573,10 @@ export const SessionMemoryPlugin = async (
   };
   const tools = createTools(toolCtx);
 
+  function isInternalSession(sessionID: string): boolean {
+    return internalSessionIDs.has(sessionID);
+  }
+
   // Diagnostic: emit a single stderr line with the factory wall-clock
   // duration. The e2e harness greps for the [STM-STARTUP] marker; for
   // interactive users the line is harmless. The env gate keeps it opt-in
@@ -560,7 +587,7 @@ export const SessionMemoryPlugin = async (
   }
 
   // ── Return the plugin object ─────────────────────────────
-  return {
+  const plugin = {
     config: async (opencodeConfig: OpencodeConfig) => {
       opencodeConfig.command ??= {};
       opencodeConfig.command.stm ??= {
@@ -569,10 +596,71 @@ export const SessionMemoryPlugin = async (
       };
     },
 
-    event: async (input: EventInput) => {
-      await reloadConfigLocal();
+    event: async (input: EventInput): Promise<void> => {
       const evt = (input?.event || {}) as Record<string, unknown>;
       const name = evt?.type || evt?.name || evt?.event || evt?.kind || "unknown_event";
+      const properties = evt.properties as Record<string, unknown> | undefined;
+      const info = properties?.info as Record<string, unknown> | undefined;
+      const nativeSessionID =
+        (typeof info?.id === "string" && info.id) ||
+        (typeof info?.sessionID === "string" && info.sessionID) ||
+        (typeof info?.sessionId === "string" && info.sessionId) ||
+        getSessionID(evt) ||
+        getSessionID(input);
+      const messageSessionID =
+        (typeof info?.sessionID === "string" && info.sessionID) ||
+        (typeof info?.sessionId === "string" && info.sessionId) ||
+        (typeof properties?.sessionID === "string" && properties.sessionID) ||
+        (typeof properties?.sessionId === "string" && properties.sessionId) ||
+        getSessionID(evt) ||
+        getSessionID(input);
+
+      // The native dispatcher emits lifecycle events through the generic
+      // event hook. Route them to the concrete hooks so existing direct-hook
+      // consumers and tests retain exactly the same behavior. In particular,
+      // dispatch deletion before any config await so its generation is
+      // invalidated before outstanding work can commit.
+      if (name === "session.created") {
+        // Native session IDs are never reused. Keep the direct hook's legacy
+        // recreation behavior, but never use it for a generic native event.
+        if (nativeSessionID && isSessionTerminal(nativeSessionID)) return;
+        await plugin["session.created"]({
+          sessionID: nativeSessionID,
+          event: {
+            properties: {
+              info: {
+                parentID: typeof info?.parentID === "string" ? info.parentID : undefined,
+                title: info?.title,
+              },
+            },
+          },
+        } as SessionCreatedInput);
+        return;
+      }
+      if (name === "session.updated") {
+        if (nativeSessionID && info?.title === SIDE_SESSION_TITLE) internalSessionIDs.add(nativeSessionID);
+        await plugin["session.updated"]({
+          sessionID: nativeSessionID,
+          event: { properties: { info } },
+        } as SessionUpdatedInput & { event: { properties: { info?: Record<string, unknown> } } });
+        return;
+      }
+      if (name === "session.deleted") {
+        await plugin["session.deleted"]({ sessionID: nativeSessionID });
+        return;
+      }
+      if (name === "message.updated") {
+        await plugin["message.updated"]({
+          sessionID: messageSessionID,
+          message: info as MessageUpdatedInput["message"],
+          parts: Array.isArray((info as Record<string, unknown> | undefined)?.parts)
+            ? ((info as Record<string, unknown>).parts as unknown[])
+            : undefined,
+        });
+        return;
+      }
+
+      await reloadConfigLocal();
       // ── DCP compress tool detection ────────────────────────
       if (config.enabled && name === "message.part.updated") {
         const props = evt?.properties as Record<string, unknown> | undefined;
@@ -582,6 +670,7 @@ export const SessionMemoryPlugin = async (
           const sessionID =
             props?.sessionID && typeof props.sessionID === "string" ? props.sessionID : getSessionID(input);
           if (sessionID) {
+            if (isInternalSession(sessionID)) return;
             if (isSessionTerminal(sessionID)) return;
             if (sessionParents.has(sessionID)) {
               const metadata = childDeliveryMetadata.get(sessionID);
@@ -616,10 +705,12 @@ export const SessionMemoryPlugin = async (
       if (config.enabled && name === "session.idle") {
         const sessionID = getSessionID(evt) || getSessionID(input);
         if (sessionID) {
+          if (isInternalSession(sessionID)) return;
           if (isSessionTerminal(sessionID)) return;
+          if (pendingChildInitializations.has(sessionID)) return;
           if (sessionParents.has(sessionID)) return;
           const schedulingGeneration = lifecycleFor(sessionID).generation;
-          await ensureMemoryFile(sessionID, config);
+          if (!(await ensureMemoryFileForGeneration(sessionID, schedulingGeneration, config))) return;
           scheduleMemoryUpdate(client, sessionID, "session_idle", config, schedulingGeneration);
         }
       }
@@ -664,7 +755,6 @@ export const SessionMemoryPlugin = async (
     },
 
     "session.created": async (input: SessionCreatedInput) => {
-      await reloadConfigLocal();
       const sessionID = getSessionID(input);
       if (!sessionID) return;
 
@@ -672,44 +762,83 @@ export const SessionMemoryPlugin = async (
       const parentID = info?.parentID;
 
       const lifecycle = lifecycleFor(sessionID);
-      if (lifecycle.terminal) {
+      const generationBeforeReload = lifecycle.generation;
+      const wasTerminal = lifecycle.terminal;
+      const isInternal = (info as { title?: unknown } | undefined)?.title === SIDE_SESSION_TITLE;
+      if (isInternal) internalSessionIDs.add(sessionID);
+
+      // Direct-hook consumers may recreate a terminal session. Advance that
+      // generation synchronously so the barrier is attached to the new life.
+      if (wasTerminal) {
         lifecycle.generation += 1;
         lifecycle.terminal = false;
       }
-      globalState.lastActiveSessionID = sessionID;
-      await ensureMemoryFile(sessionID, config);
-
-      if (parentID) {
-        // Sub-agent session
+      const childGeneration = lifecycle.generation;
+      let resolveChildInitialization: (() => void) | undefined;
+      let childInitialization: Promise<void> | undefined;
+      if (parentID && !isInternal) {
+        // Install child identity and the barrier before the first await. Native
+        // hooks can run concurrently with session.created.
+        childInitialization = new Promise<void>((resolve) => {
+          resolveChildInitialization = resolve;
+        });
         sessionParents.set(sessionID, parentID);
-        // I2 – Track child in reverse mapping
         let children = parentToChildren.get(parentID);
         if (!children) {
           children = new Set();
           parentToChildren.set(parentID, children);
         }
         children.add(sessionID);
-
-        const metadata = {
+        childDeliveryMetadata.set(sessionID, {
           startupSnapshot: "",
           startupInjectionPending: false,
           dcpInjectionPending: false,
-        };
-        childDeliveryMetadata.set(sessionID, metadata);
-        if (config.injectInSubagents) {
-          const parentMemory = await readText(memoryPathFor(parentID, config.memoryDir), "");
-          metadata.startupSnapshot = parentMemory;
-          metadata.startupInjectionPending = Boolean(parentMemory.trim());
-          await logEvent(config, "subagent_created_with_memory", { sessionID, parentID });
-        } else {
-          await logEvent(config, "subagent_created_skipped_injection", { sessionID, parentID });
-        }
-        return;
+        });
+        pendingChildInitializations.set(sessionID, { generation: childGeneration, promise: childInitialization });
       }
 
-      // Main session
-      await logEvent(config, "session_created", { sessionID });
-      await maybeBootstrapSessionHistory(sessionID, "session_created_bootstrap", config, client, scheduleMemoryUpdate);
+      try {
+        await reloadConfigLocal();
+        // A native create event can arrive after deletion has started. Do not
+        // revive that generation merely because config reload yielded.
+        if (lifecycle.generation !== generationBeforeReload + (wasTerminal ? 1 : 0)) return;
+        if (!isCurrentGeneration(sessionID, childGeneration)) return;
+        if (isInternal) return;
+        globalState.lastActiveSessionID = sessionID;
+        if (!(await ensureMemoryFileForGeneration(sessionID, childGeneration, config))) return;
+
+        if (parentID) {
+          const metadata = childDeliveryMetadata.get(sessionID);
+          if (!metadata || !isCurrentGeneration(sessionID, childGeneration)) return;
+          if (config.injectInSubagents) {
+            const parentMemory = await readText(memoryPathFor(parentID, config.memoryDir), "");
+            if (!isCurrentGeneration(sessionID, childGeneration)) return;
+            metadata.startupSnapshot = parentMemory;
+            metadata.startupInjectionPending = Boolean(parentMemory.trim());
+            await logEvent(config, "subagent_created_with_memory", { sessionID, parentID });
+          } else {
+            await logEvent(config, "subagent_created_skipped_injection", { sessionID, parentID });
+          }
+          return;
+        }
+
+        // Main session
+        await logEvent(config, "session_created", { sessionID });
+        await maybeBootstrapSessionHistory(
+          sessionID,
+          "session_created_bootstrap",
+          config,
+          client,
+          scheduleMemoryUpdate,
+        );
+      } finally {
+        if (parentID && !isInternal) {
+          if (childInitialization && pendingChildInitializations.get(sessionID)?.promise === childInitialization) {
+            pendingChildInitializations.delete(sessionID);
+          }
+          resolveChildInitialization?.();
+        }
+      }
     },
 
     "session.updated": async (input: SessionUpdatedInput) => {
@@ -717,8 +846,14 @@ export const SessionMemoryPlugin = async (
       const sessionID = getSessionID(input);
       if (!sessionID) return;
       if (isSessionTerminal(sessionID)) return;
+      if (pendingChildInitializations.has(sessionID)) return;
+      const generation = lifecycleFor(sessionID).generation;
+      const title = (input as SessionUpdatedInput & { event?: { properties?: { info?: { title?: unknown } } } }).event
+        ?.properties?.info?.title;
+      if (title === SIDE_SESSION_TITLE) internalSessionIDs.add(sessionID);
+      if (isInternalSession(sessionID)) return;
       globalState.lastActiveSessionID = sessionID;
-      await ensureMemoryFile(sessionID, config);
+      if (!(await ensureMemoryFileForGeneration(sessionID, generation, config))) return;
       await logEvent(config, "session_updated", { sessionID });
       if (sessionParents.has(sessionID)) return;
       await maybeBootstrapSessionHistory(sessionID, "session_updated_bootstrap", config, client, scheduleMemoryUpdate);
@@ -727,6 +862,7 @@ export const SessionMemoryPlugin = async (
     "session.deleted": async (input: SessionDeletedInput) => {
       const sessionID = getSessionID(input);
       if (!sessionID) return;
+      internalSessionIDs.delete(sessionID);
       invalidateSession(sessionID, true);
       const children = parentToChildren.get(sessionID);
       if (children) {
@@ -787,8 +923,10 @@ export const SessionMemoryPlugin = async (
       const sessionID = getSessionID(input);
       if (!sessionID) return;
       if (isSessionTerminal(sessionID)) return;
+      if (isInternalSession(sessionID)) return;
+      const generation = lifecycleFor(sessionID).generation;
       globalState.lastActiveSessionID = sessionID;
-      await ensureMemoryFile(sessionID, config);
+      if (!(await ensureMemoryFileForGeneration(sessionID, generation, config))) return;
 
       const role = getMessageRole(input.message || input);
       const text = getMessageText(input);
@@ -803,14 +941,17 @@ export const SessionMemoryPlugin = async (
 
       const sessionID = input.sessionID || globalState.lastActiveSessionID;
       if (!sessionID) return;
+      if (isInternalSession(sessionID)) return;
+      await awaitChildInitialization(sessionID);
       if (isSessionTerminal(sessionID)) return;
       if (sessionParents.has(sessionID)) return;
+      const generation = lifecycleFor(sessionID).generation;
 
       const role = getMessageRole(output?.message) ?? getMessageRole(input.message || input);
       if (role !== "user") return;
 
       globalState.lastActiveSessionID = sessionID;
-      await ensureMemoryFile(sessionID, config);
+      if (!(await ensureMemoryFileForGeneration(sessionID, generation, config))) return;
 
       const text = getMessageText(input) || getMessageText({ message: output?.message, parts: output?.parts });
       if (!text || isSelfInjection(text)) return;
@@ -875,6 +1016,8 @@ export const SessionMemoryPlugin = async (
         await logEvent(config, "memory_inject_skipped", { reason: "missing_session_id" });
         return;
       }
+      await awaitChildInitialization(sessionID);
+      if (isInternalSession(sessionID)) return;
       if (isSessionTerminal(sessionID)) return;
       if (sessionParents.has(sessionID)) {
         if (!config.injectInSubagents) return;
@@ -908,9 +1051,12 @@ export const SessionMemoryPlugin = async (
       await reloadConfigLocal();
       const sessionID = getSessionID(input) || globalState.lastActiveSessionID;
       if (!sessionID || !config.enabled) return;
+      await awaitChildInitialization(sessionID);
+      if (isInternalSession(sessionID)) return;
       if (isSessionTerminal(sessionID)) return;
       globalState.compactCount += 1;
-      await ensureMemoryFile(sessionID, config);
+      const generation = lifecycleFor(sessionID).generation;
+      if (!(await ensureMemoryFileForGeneration(sessionID, generation, config))) return;
 
       const parentID = sessionParents.get(sessionID);
       if (parentID) {
@@ -957,6 +1103,7 @@ export const SessionMemoryPlugin = async (
       await logEvent(config, "compaction_context_pushed", { sessionID, bytes: memory.length });
     },
   };
+  return plugin;
 };
 
 export default SessionMemoryPlugin;

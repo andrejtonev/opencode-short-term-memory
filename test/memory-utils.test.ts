@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir, homedir } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import {
   DEFAULT_CONFIG,
   INJECTION_PREFIX,
@@ -18,6 +18,7 @@ import {
   logEvent,
   memoryPathFor,
   parseModel,
+  prepareRawFile,
   readConfig,
   readText,
   safeSessionID,
@@ -28,6 +29,20 @@ import {
   writeTextAtomic,
   resolveGlobalOpencodeDir,
 } from "../src/memory-utils";
+
+async function runGit(cwd: string, args: string[]) {
+  const child = Bun.spawn(["git", ...args], { cwd, stderr: "pipe", stdout: "pipe" });
+  const [exitCode, stdout, stderr] = await Promise.all([
+    child.exited,
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+  ]);
+  return { exitCode, stdout, stderr };
+}
+
+async function temporaryEntries(directory: string) {
+  return (await readdir(directory)).filter((entry) => entry !== ".gitignore");
+}
 
 describe("memory-utils general behavior", () => {
   const originalCwd = process.cwd();
@@ -259,6 +274,82 @@ describe("memory-utils general behavior", () => {
     const final = await readText(target, "");
     const acceptable = new Set(chunks.map((text) => text).concat(chunks.map((text) => `${text}\n`)));
     expect(acceptable.has(final)).toBe(true);
+  });
+
+  test("atomic temporary files cannot enter an exact Git snapshot", async () => {
+    expect((await runGit(testDir, ["init", "--quiet"])).exitCode).toBe(0);
+    const memoryDir = join(testDir, ".opencode", "memory");
+    const persistedPath = join(memoryDir, "session.md");
+    await writeText(persistedPath, "persisted\n");
+
+    const prepared = await prepareRawFile(join(memoryDir, "pending.md"), Buffer.from("pending\n"));
+    const temporaryDirectory = join(memoryDir, ".stm-tmp");
+    const [temporaryName] = await temporaryEntries(temporaryDirectory);
+    const temporaryPath = join(temporaryDirectory, temporaryName);
+    const ignored = await runGit(testDir, ["check-ignore", "--no-index", "--", relative(testDir, temporaryPath)]);
+    const persisted = await runGit(testDir, ["check-ignore", "--no-index", "--", relative(testDir, persistedPath)]);
+    expect(ignored.exitCode).toBe(0);
+    expect(persisted.exitCode).not.toBe(0);
+
+    const listed = await runGit(testDir, ["ls-files", "--others", "--exclude-standard", "-z"]);
+    expect(listed.exitCode).toBe(0);
+    const candidates = listed.stdout.split("\0").filter(Boolean);
+    expect(candidates.some((candidate) => candidate.endsWith("session.md"))).toBe(true);
+    expect(candidates.some((candidate) => candidate.includes(".stm-tmp") && !candidate.endsWith(".gitignore"))).toBe(
+      false,
+    );
+
+    await prepared.discard();
+    const staged = await runGit(testDir, ["add", "--", ...candidates]);
+    expect(staged.exitCode).toBe(0);
+    expect(staged.stderr).toBe("");
+    expect((await runGit(testDir, ["diff", "--cached", "--name-only"])).stdout).toContain(
+      ".opencode/memory/session.md",
+    );
+  });
+
+  test("successful atomic writes leave no transient files beyond metadata", async () => {
+    const target = join(testDir, ".opencode", "memory", "session.md");
+
+    await writeTextAtomic(target, "persisted\n");
+
+    expect(await readFile(target, "utf8")).toBe("persisted\n");
+    expect(await temporaryEntries(join(testDir, ".opencode", "memory", ".stm-tmp"))).toEqual([]);
+  });
+
+  test("discard removes its prepared file but preserves unrelated ignored files", async () => {
+    const target = join(testDir, ".opencode", "memory", "session.md");
+    const prepared = await prepareRawFile(target, Buffer.from("pending\n"));
+    const temporaryDirectory = join(testDir, ".opencode", "memory", ".stm-tmp");
+    const beforeDiscard = await temporaryEntries(temporaryDirectory);
+    const sentinel = "unrelated-sentinel.tmp";
+    await writeFile(join(temporaryDirectory, sentinel), "preserve me\n");
+
+    await prepared.discard();
+
+    expect(await temporaryEntries(temporaryDirectory)).toEqual([sentinel]);
+    expect(await readFile(join(temporaryDirectory, sentinel), "utf8")).toBe("preserve me\n");
+    expect(beforeDiscard).toHaveLength(1);
+  });
+
+  test("rejects conflicting metadata and symlink temporary directories safely", async () => {
+    const memoryDir = join(testDir, ".opencode", "memory");
+    const temporaryDirectory = join(memoryDir, ".stm-tmp");
+    const ignorePath = join(temporaryDirectory, ".gitignore");
+    await writeText(ignorePath, "user-owned rules\n");
+    await expect(writeTextAtomic(join(memoryDir, "conflict.md"), "no write\n")).rejects.toThrow(
+      "conflicting atomic temporary ignore file",
+    );
+    expect(await readFile(ignorePath, "utf8")).toBe("user-owned rules\n");
+
+    await rm(temporaryDirectory, { recursive: true, force: true });
+    const outsideDirectory = join(testDir, "outside");
+    await writeText(join(outsideDirectory, "sentinel.txt"), "outside\n");
+    await symlink(outsideDirectory, temporaryDirectory, "dir");
+    await expect(writeTextAtomic(join(memoryDir, "symlink.md"), "no outside write\n")).rejects.toThrow(
+      "unsafe atomic temporary directory",
+    );
+    expect(await readdir(outsideDirectory)).toEqual(["sentinel.txt"]);
   });
 
   test("compareAndReplaceTextAtomic compares and replaces under one path lock", async () => {

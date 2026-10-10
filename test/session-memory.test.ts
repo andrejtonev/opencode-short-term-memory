@@ -1676,4 +1676,197 @@ describe("SessionMemoryPlugin general functionality", () => {
     expect(promptText).toContain("ASSISTANT:\nassistant chunk three");
     expect(promptText).toContain("ASSISTANT:\nfinal assistant reply");
   });
+
+  test("generic lifecycle events ignore the native session-memory summarizer", async () => {
+    const sessionID = `side-summarizer-${Date.now()}`;
+    const fakeClient = createFakeClient({ messagesRows: [] });
+    const { plugin, client } = await createPlugin(
+      { summarizerMode: "clean", debounceMs: 100, debug: false },
+      fakeClient,
+    );
+
+    await plugin.event({
+      event: {
+        type: "session.created",
+        properties: { info: { id: sessionID, title: "Session Memory Summarizer" } },
+      },
+    } as never);
+    await plugin.event({
+      event: { type: "session.idle", properties: { sessionID } },
+    } as never);
+
+    await new Promise((resolve) => setTimeout(resolve, 350));
+
+    expect(client.calls.messages).toHaveLength(0);
+    expect(client.calls.summarizerPrompts).toHaveLength(0);
+    expect(client.calls.create).toHaveLength(0);
+    expect(client.calls.prompt).toHaveLength(0);
+    expect(await readText(memoryPathFor(sessionID), "missing")).toBe("missing");
+    expect(await readText(checkpointPathFor(sessionID), "missing")).toBe("missing");
+  });
+
+  test("generic main-session deletion cancels a scheduled idle update", async () => {
+    const sessionID = `deleted-main-${Date.now()}`;
+    const historyRows: unknown[] = [];
+    const fakeClient = createFakeClient({ messagesRows: historyRows });
+    const { plugin, client } = await createPlugin(
+      { summarizerMode: "active", debounceMs: 100, debug: false },
+      fakeClient,
+    );
+
+    await plugin.event({
+      event: {
+        type: "session.created",
+        properties: { info: { id: sessionID, title: "Main session" } },
+      },
+    } as never);
+    const historyReadsBeforeIdle = client.calls.messages.length;
+    historyRows.push(
+      { id: "user-1", role: "user", content: "mutable history after creation" },
+      { id: "assistant-1", role: "assistant", content: "should never be summarized" },
+    );
+
+    await plugin.event({
+      event: { type: "session.idle", properties: { sessionID } },
+    } as never);
+    await plugin.event({
+      event: {
+        type: "session.deleted",
+        properties: { info: { id: sessionID } },
+      },
+    } as never);
+
+    await new Promise((resolve) => setTimeout(resolve, 350));
+
+    expect(await readText(memoryPathFor(sessionID), "missing")).toBe("missing");
+    expect(await readText(checkpointPathFor(sessionID), "missing")).toBe("missing");
+    expect(client.calls.messages.length).toBe(historyReadsBeforeIdle);
+    expect(client.calls.prompt).toHaveLength(0);
+
+    await plugin.event({
+      event: { type: "session.idle", properties: { sessionID } },
+    } as never);
+    await new Promise((resolve) => setTimeout(resolve, 350));
+    expect(client.calls.messages.length).toBe(historyReadsBeforeIdle);
+    expect(await readText(memoryPathFor(sessionID), "missing")).toBe("missing");
+    expect(await readText(checkpointPathFor(sessionID), "missing")).toBe("missing");
+  });
+
+  test("generic child lifecycle events inject the parent snapshot without child activity", async () => {
+    const parentID = `generic-parent-${Date.now()}`;
+    const childID = `generic-child-${Date.now()}`;
+    const parentMemory = [
+      "## Session Memory",
+      "",
+      "### User Instructions",
+      "- Preserve the parent contract",
+      "",
+      "### Long Horizon Context",
+      "- PARENT_SENTINEL_CONTEXT",
+      "",
+      "### Decisions",
+      "- PARENT_SENTINEL_DECISION",
+      "",
+      "### Open Questions",
+      "- PARENT_SENTINEL_QUESTION",
+      "",
+      "### Recent Progress",
+      "- PARENT_SENTINEL_PROGRESS",
+      "",
+    ].join("\n");
+    const fakeClient = createFakeClient({
+      messagesRows: [{ id: "child-history", role: "user", content: "must not be collected" }],
+    });
+    const { plugin, client } = await createPlugin({ injectInSubagents: true, debug: false }, fakeClient);
+
+    await writeText(memoryPathFor(parentID), parentMemory);
+    await plugin.event({
+      event: {
+        type: "session.created",
+        properties: { info: { id: parentID, title: "Parent task" } },
+      },
+    } as any);
+
+    const childOutput = { system: [] as string[] };
+    const childCreation = plugin.event({
+      event: {
+        type: "session.created",
+        properties: { info: { id: childID, parentID, title: "Child task" } },
+      },
+    } as any);
+    const childTransform = plugin["experimental.chat.system.transform"](
+      { sessionID: childID, messageID: "child-transform-race" },
+      childOutput,
+    );
+    await Promise.all([childCreation, childTransform]);
+
+    expect(childOutput.system).toHaveLength(1);
+    expect(childOutput.system[0]).toContain(INJECTION_PREFIX);
+    expect(childOutput.system[0]).toContain("PARENT_SENTINEL_DECISION");
+    expect(childOutput.system[0]).toContain("PARENT_SENTINEL_CONTEXT");
+    expect(childOutput.system[0]).not.toContain("None captured yet");
+    expect(await readText(memoryPathFor(childID), "missing")).toContain("## Session Memory");
+
+    await plugin.event({
+      event: {
+        type: "message.updated",
+        properties: {
+          info: {
+            id: "msg-child-native",
+            sessionID: childID,
+            role: "user",
+            content: "child message must not become parent activity",
+          },
+        },
+      },
+    } as any);
+    await plugin.event({ event: { type: "session.idle", properties: { sessionID: childID } } } as any);
+    await plugin.tool.short_term_memory.execute({ action: "update" }, { sessionID: childID });
+
+    expect(client.calls.messages).toHaveLength(0);
+    expect(client.calls.summarizerPrompts).toHaveLength(0);
+    expect(await readText(memoryPathFor(parentID), "")).toBe(parentMemory);
+  });
+
+  test("generic child events honor disabled injection and stale creation cannot revive deletion", async () => {
+    const parentID = `generic-disabled-parent-${Date.now()}`;
+    const childID = `generic-disabled-child-${Date.now()}`;
+    const parentMemory = "## Session Memory\n\n### Decisions\n- DISABLED_PARENT_SENTINEL\n";
+    const { plugin, client } = await createPlugin({ injectInSubagents: false, debug: false }, createFakeClient());
+
+    await writeText(memoryPathFor(parentID), parentMemory);
+    await plugin.event({
+      event: {
+        type: "session.created",
+        properties: { info: { id: parentID, title: "Disabled parent" } },
+      },
+    } as any);
+    await plugin.event({
+      event: {
+        type: "session.created",
+        properties: { info: { id: childID, parentID, title: "Disabled child" } },
+      },
+    } as any);
+
+    const output = { system: [] as string[] };
+    await plugin["experimental.chat.system.transform"]({ sessionID: childID, messageID: "disabled-child" }, output);
+    expect(output.system).toHaveLength(0);
+    expect(await readText(memoryPathFor(childID), "missing")).toContain("## Session Memory");
+    expect(await readText(memoryPathFor(parentID), "")).toBe(parentMemory);
+
+    await plugin.event({
+      event: { type: "session.deleted", properties: { info: { id: childID, title: "Disabled child" } } },
+    } as any);
+    expect(await readText(memoryPathFor(childID), "missing")).toBe("missing");
+
+    await plugin.event({
+      event: {
+        type: "session.created",
+        properties: { info: { id: childID, parentID, title: "Stale child create" } },
+      },
+    } as any);
+    expect(await readText(memoryPathFor(childID), "missing")).toBe("missing");
+    expect(client.calls.messages).toHaveLength(0);
+    expect(client.calls.summarizerPrompts).toHaveLength(0);
+  });
 });

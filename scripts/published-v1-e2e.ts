@@ -106,6 +106,71 @@ let current: Stage = "install";
 let server: ReturnType<typeof Bun.serve> | undefined;
 let serveLog = "";
 let base = "";
+let diagnosticLogPath = "";
+let diagnosticRoots: string[] = [];
+let retainedDiagnosticLines = new Set<string>();
+type DiagnosticPhase =
+  | "startup"
+  | "setup"
+  | "beforeRestart"
+  | "afterRestart"
+  | "child"
+  | "beforeManualRestart"
+  | "afterManualRestart"
+  | "final";
+interface DiagnosticRow {
+  readonly [key: string]: unknown;
+  readonly event?: string;
+  readonly error?: string;
+  readonly level?: string;
+  readonly sessionID?: string;
+  readonly operationID?: string;
+  readonly operationId?: string;
+  readonly attempt?: number;
+  readonly timestamp?: number;
+  readonly time?: number;
+}
+interface DiagnosticSnapshot {
+  readonly capturedLines: number;
+  readonly configuredMaxLines: number;
+  readonly complete: boolean;
+}
+interface DiagnosticState {
+  readonly configuredMaxLines: Record<DiagnosticPhase, number>;
+  readonly snapshots: Partial<Record<DiagnosticPhase, DiagnosticSnapshot>>;
+  retainedRows: DiagnosticRow[];
+  hostErrors: string[];
+  expectedWarnings: string[];
+  snapshotWarnings: string[];
+  stmErrors: DiagnosticRow[];
+  recoveredStmErrors: DiagnosticRow[];
+  unexplainedHostErrors: string[];
+  incomplete: boolean;
+}
+const newDiagnosticState = (): DiagnosticState => ({
+  configuredMaxLines: {
+    startup: 300,
+    setup: 300,
+    beforeRestart: 300,
+    afterRestart: 20_000,
+    child: 20_000,
+    beforeManualRestart: 20_000,
+    afterManualRestart: 20_000,
+    final: 20_000,
+  },
+  snapshots: {},
+  retainedRows: [],
+  hostErrors: [],
+  expectedWarnings: [],
+  snapshotWarnings: [],
+  stmErrors: [],
+  recoveredStmErrors: [],
+  unexplainedHostErrors: [],
+  incomplete: false,
+});
+let diagnostic: DiagnosticState = newDiagnosticState();
+let snapshotDiagnostics: (phase: DiagnosticPhase) => void = () => {};
+let classifyDiagnostics: () => void = () => {};
 function redact(text: string) {
   return text.replace(/(authorization|api[_-]?key|access[_-]?token)(["\s:=]+)[^\s",}]+/gi, "$1$2[REDACTED]");
 }
@@ -120,6 +185,45 @@ function kill(child: ChildProcess) {
   } catch {
     child.kill("SIGKILL");
   }
+}
+async function waitForExit(child: ChildProcess, timeoutMs: number) {
+  if (child.exitCode !== null || child.signalCode !== null) return true;
+  return await new Promise<boolean>((resolve) => {
+    const timer = setTimeout(() => resolve(false), timeoutMs);
+    child.once("close", () => {
+      clearTimeout(timer);
+      resolve(true);
+    });
+  });
+}
+async function shutdown(child: ChildProcess, reason: string) {
+  const result = { reason, signal: "SIGINT", forced: false, exited: false };
+  if (child.exitCode !== null || child.signalCode !== null) {
+    result.exited = true;
+    return result;
+  }
+  try {
+    process.kill(-(child.pid ?? 0), "SIGINT");
+  } catch {
+    child.kill("SIGINT");
+  }
+  result.exited = await waitForExit(child, 1_500);
+  if (!result.exited) {
+    result.signal = "SIGTERM";
+    try {
+      process.kill(-(child.pid ?? 0), "SIGTERM");
+    } catch {
+      child.kill("SIGTERM");
+    }
+    result.exited = await waitForExit(child, 1_500);
+  }
+  if (!result.exited) {
+    result.signal = "SIGKILL";
+    result.forced = true;
+    kill(child);
+    result.exited = await waitForExit(child, 2_000);
+  }
+  return result;
 }
 const overall = setTimeout(() => {
   for (const child of children) kill(child);
@@ -150,8 +254,8 @@ async function command(args: string[], cwd: string, max = 60_000) {
     children.delete(child);
   }
 }
-async function api(path: string, body?: unknown, timeoutMs = 45_000) {
-  const method = body === undefined ? "GET" : "POST";
+async function api(path: string, body?: unknown, timeoutMs = 45_000, requestedMethod?: "GET" | "POST" | "DELETE") {
+  const method = requestedMethod ?? (body === undefined ? "GET" : "POST");
   const response = await fetch(`${base}${path}?directory=${encodeURIComponent(project)}`, {
     method,
     headers: { "content-type": "application/json", "x-opencode-directory": project },
@@ -161,7 +265,7 @@ async function api(path: string, body?: unknown, timeoutMs = 45_000) {
   const text = redact(await response.text());
   requests.push({ path, method, body, status: response.status, response: text });
   assert.ok(response.ok, `${method} ${path}: ${response.status}: ${text}`);
-  return JSON.parse(text);
+  return text.length === 0 ? undefined : JSON.parse(text);
 }
 async function files(dir: string): Promise<string[]> {
   const result: string[] = [];
@@ -170,6 +274,41 @@ async function files(dir: string): Promise<string[]> {
     // Never follow symlinks into the checkout or the user's directories.
     if (entry.isDirectory()) result.push(...(await files(path)));
     else if (entry.isFile()) result.push(path);
+  }
+  return result;
+}
+async function residue(roots: readonly string[]): Promise<string[]> {
+  const result: string[] = [];
+  const scanMetadata = async (directory: string): Promise<void> => {
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      const path = join(directory, entry.name);
+      if (entry.isSymbolicLink()) {
+        result.push(path);
+      } else if (entry.isDirectory()) {
+        await scanMetadata(path);
+      } else if (entry.name !== ".gitignore") {
+        result.push(path);
+      } else if (readFileSync(path, "utf8") !== "*\n!.gitignore\n") {
+        result.push(path);
+      }
+    }
+  };
+  for (const root of roots) {
+    if (!existsSync(root)) continue;
+    for (const entry of await readdir(root, { withFileTypes: true })) {
+      const path = join(root, entry.name);
+      if (entry.name === ".stm-tmp") {
+        if (entry.isSymbolicLink() || !entry.isDirectory()) result.push(path);
+        else await scanMetadata(path);
+        continue;
+      }
+      if (
+        (entry.isFile() || entry.isSymbolicLink()) &&
+        (/^pending(?:[-_.]|$)/i.test(entry.name) || /^\.tmp-/i.test(entry.name) || /^old.*\.tmp-/i.test(entry.name))
+      )
+        result.push(path);
+      else if (entry.isDirectory() && entry.name !== ".git") result.push(...(await residue([path])));
+    }
   }
   return result;
 }
@@ -465,6 +604,8 @@ workflow: try {
   evidence.installedCommandAPI = { sdkRoot, version: (await Bun.file(sdkManifest).json()).version, commandTypes };
   const memoryDir = join(project, ".opencode", "memory");
   const logPath = join(memoryDir, "session-memory.log");
+  diagnosticLogPath = logPath;
+  diagnosticRoots = [memoryDir];
   const completeLogLines = () => {
     const contents = readFileSync(logPath, "utf8");
     const completeEnd = contents.lastIndexOf("\n");
@@ -474,6 +615,89 @@ workflow: try {
     completeLogLines()
       .filter((line) => !before.has(line))
       .map((line) => JSON.parse(line));
+  retainedDiagnosticLines = new Set<string>();
+  diagnostic = newDiagnosticState();
+  evidence.diagnostics = diagnostic;
+  snapshotDiagnostics = (phase: DiagnosticPhase) => {
+    if (!diagnosticLogPath) return;
+    const lines = completeLogLines();
+    for (const line of lines) retainedDiagnosticLines.add(line);
+    const rows = lines.flatMap((line) => {
+      try {
+        const row: unknown = JSON.parse(line);
+        return row !== null && typeof row === "object" ? [row as DiagnosticRow] : [];
+      } catch {
+        return [];
+      }
+    });
+    const maxLines = diagnostic.configuredMaxLines[phase];
+    diagnostic.snapshots[phase] = {
+      capturedLines: lines.length,
+      configuredMaxLines: maxLines,
+      complete: lines.length < maxLines,
+    };
+    diagnostic.incomplete ||= lines.length >= maxLines;
+    diagnostic.retainedRows = [...retainedDiagnosticLines].flatMap((line): DiagnosticRow[] => {
+      try {
+        const row: unknown = JSON.parse(line);
+        return row !== null && typeof row === "object" ? [row as DiagnosticRow] : [];
+      } catch {
+        return [];
+      }
+    });
+    // Every retained row comes from the STM-owned diagnostic log; do not narrow
+    // classification by event name, so collection/orphan *_error rows cannot
+    // be silently excluded from the diagnostic gate.
+    diagnostic.stmErrors = diagnostic.retainedRows.filter(
+      (row) =>
+        (typeof row.error === "string" && row.error.trim().length > 0) ||
+        /error/i.test(typeof row.level === "string" ? row.level : ""),
+    );
+  };
+  classifyDiagnostics = () => {
+    const lines = serveLog.split(/\r?\n/).filter(Boolean);
+    diagnostic.hostErrors = lines.filter((line) => /^\s*ERROR\b/.test(line) || /\blevel=ERROR\b/.test(line));
+    diagnostic.expectedWarnings = lines.filter((line) => /^\s*Warning:\s*OPENCODE_SERVER_PASSWORD\b/i.test(line));
+    const snapshotWarnings: string[] = [];
+    const normalizeSnapshotLine = (line: string) =>
+      line.replace(/\b(?:timestamp|time|pid|attempt|requestID)=[^\s]+/gi, "").trim();
+    for (let index = 0; index < lines.length; index++) {
+      const line = lines[index]!;
+      if (/service=snapshot\b.*\bexitCode=(?!0\b)\d+/i.test(line)) {
+        snapshotWarnings.push(normalizeSnapshotLine(line));
+        if (/failed to add snapshot files/i.test(lines[index + 1] ?? "")) index++;
+      } else if (/failed to add snapshot files/i.test(line)) {
+        snapshotWarnings.push(normalizeSnapshotLine(line));
+      }
+    }
+    diagnostic.snapshotWarnings = snapshotWarnings;
+    diagnostic.unexplainedHostErrors = diagnostic.hostErrors;
+    const allRows = diagnostic.retainedRows;
+    const errorRows = diagnostic.stmErrors;
+    const timestampValue = (value: unknown) =>
+      typeof value === "number" ? value : typeof value === "string" ? Date.parse(value) : Number.NaN;
+    const recovered = errorRows.filter((row) => {
+      const operationID = row.operationID ?? row.operationId;
+      if (!operationID || !row.sessionID) return false;
+      const rowIndex = allRows.indexOf(row);
+      const timestamp = timestampValue(row.timestamp ?? row.time);
+      return allRows.slice(rowIndex + 1).some((next) => {
+        const nextTimestamp = timestampValue(next.timestamp ?? next.time);
+        return (
+          next.sessionID === row.sessionID &&
+          (next.operationID ?? next.operationId) === operationID &&
+          Number.isFinite(timestamp) &&
+          Number.isFinite(nextTimestamp) &&
+          nextTimestamp > timestamp &&
+          (next.event === "stm_retry_recovered" ||
+            next.event === "memory_update_done" ||
+            next.event === "side_session_summarize_done")
+        );
+      });
+    });
+    diagnostic.recoveredStmErrors = recovered;
+    diagnostic.stmErrors = diagnostic.stmErrors.filter((row) => !recovered.includes(row));
+  };
   const loadedDeadline = Date.now() + remaining(15_000);
   while (
     Date.now() < loadedDeadline &&
@@ -490,6 +714,7 @@ workflow: try {
     Array.isArray(availableCommands) && availableCommands.some((entry) => entry.name === "stm"),
     "Native stm command not registered",
   );
+  snapshotDiagnostics("startup");
   stages.load = {
     verdict: "PASS",
     evidence: `${candidateArg ? "Installed unpublished candidate" : "Installed registry package"} provenance plus production plugin_loaded log and native stm command`,
@@ -578,6 +803,7 @@ workflow: try {
       "Exact production JSON refusal/setup results persisted as synthetic input and delivered to model; refusal did not write; confirmation created config. Model ACK is not proof." +
       " Repeated confirmed setup returned exact no-overwrite refusal and preserved config bytes.",
   };
+  snapshotDiagnostics("setup");
   if (setupOnly) break workflow;
   current = "run";
   // Only after native setup succeeds, adjust the test-owned config for this bounded mock run.
@@ -594,29 +820,22 @@ workflow: try {
       sideSessionRetries: 0,
       includeAgentsMdOnFirstUpdate: false,
       debug: true,
+      logMaxLines: 20_000,
     }),
   );
+  snapshotDiagnostics("beforeRestart");
   // Restart the real host to reload config through the production startup path.
-  const stopped = new Promise<void>((resolve) => child.once("close", () => resolve()));
-  kill(child);
-  let stopTimer: ReturnType<typeof setTimeout> | undefined;
-  try {
-    await Promise.race([
-      stopped,
-      new Promise<never>((_, reject) => {
-        stopTimer = setTimeout(() => reject(new Error("Original host did not exit before restart")), remaining(5_000));
-      }),
-    ]);
-  } finally {
-    clearTimeout(stopTimer);
-  }
+  const restartShutdown = await shutdown(child, "functional-restart");
+  assert.ok(restartShutdown.exited, "Original host did not exit before restart");
   evidence.restart = {
     originalPID: child.pid,
     originalExited: true,
     originalSignal: child.signalCode,
+    shutdown: restartShutdown,
     previousURL: base,
   };
   const restarted = await startHost();
+  snapshotDiagnostics("afterRestart");
   assert.ok(
     Array.isArray(restarted.availableCommands) && restarted.availableCommands.some((entry) => entry.name === "stm"),
     "STM command missing after host restart",
@@ -641,6 +860,7 @@ workflow: try {
     sideSessionRetries: 0,
     includeAgentsMdOnFirstUpdate: false,
     debug: true,
+    logMaxLines: 20_000,
   })) {
     assert.equal(activeConfig[key], value, `Production setting ${key} was not activated`);
   }
@@ -754,6 +974,7 @@ workflow: try {
       }),
     };
   }
+  const coreLogBefore = new Set(completeLogLines());
   let requestStart = mockRequests.length;
   let previousPrompt: { submittedAt: number; completedAt?: number } | undefined;
   let automaticMemoryObservedAt: number | undefined;
@@ -889,10 +1110,96 @@ workflow: try {
     evidence:
       "Unpaced shared core exact automatic summaries, persisted memory/checkpoints and explicit no-reply user context injection; supplemental clean side-session lifecycle; rapid-turn candidate passed",
   };
+  const childTitle = "Published V1 native child injection";
+  const childPrompt = "STM_CHILD_NATIVE: Respond normally with the child fixture sentinel.";
+  const childSession = await api("/session", { parentID: conversation.id, title: childTitle });
+  const childID = childSession.id as string;
+  assert.equal(childSession.parentID, conversation.id, "Native child session metadata lost its parentID");
+  assert.equal(childSession.title, childTitle, "Native child session metadata lost its title");
+  const childMemoryPath = join(memoryDir, `session_${childID}.md`);
+  const childCheckpointPath = join(memoryDir, "checkpoints", `${childID}.last-message-id.txt`);
+  const parentMemoryBeforeChild = readFileSync(memoryPath);
+  const parentCheckpointBeforeChild = readFileSync(checkpoint);
+  const childRequestStart = mockRequests.length;
+  let childDeleted = false;
+  try {
+    const childResponse = await api(`/session/${childID}/message`, {
+      model: { providerID: "isolated", modelID: "deterministic" },
+      parts: [{ type: "text", text: childPrompt }],
+    });
+    const childHistory = (await api(`/session/${childID}/message`)) as {
+      info: { id: string; role: string; parentID?: string; summary?: boolean; synthetic?: boolean; internal?: boolean };
+      parts: { type: string; text?: string; synthetic?: boolean; ignored?: boolean }[];
+    }[];
+    assert.equal(childHistory.at(-2)?.info.role, "user", "Native child user message missing from durable history");
+    assert.equal(
+      childResponse.info.parentID,
+      childHistory.at(-2)?.info.id,
+      "Native child response is not attached to its durable child user message",
+    );
+    assert.equal(childHistory.at(-2)?.parts.find((part) => part.type === "text")?.text, childPrompt);
+    assert.equal(childHistory.at(-1)?.info.role, "assistant", "Native child assistant missing from durable history");
+    assert.equal(
+      childHistory.at(-1)?.parts.find((part) => part.type === "text")?.text,
+      sharedCoreScenario.assistantText,
+      "Native child did not receive the ordinary deterministic fixture response",
+    );
+    const childRequests = mockRequests.slice(childRequestStart).map(normalizeRequest);
+    assert.ok(childRequests.length > 0, "Native child produced no provider request evidence");
+    assert.ok(
+      childRequests.every(
+        (request) => !request.messages.some((message) => message.text.includes("<conversation_update>\n")),
+      ),
+      "Native child unexpectedly invoked a summary provider request",
+    );
+    assert.ok(
+      childRequests[0]?.messages.some(
+        (message) =>
+          message.role === "system" &&
+          message.text.includes("STM_PROBE_MEMORY_SENTINEL:shared-core-parity") &&
+          message.text.includes("- Use port 7319."),
+      ),
+      "Native child first provider request lacks exact parentmemory system-role sentinel and decision",
+    );
+    await Bun.sleep(500);
+    assert.ok(!existsSync(childCheckpointPath), "Native child created a checkpoint without a child summary");
+    assert.deepEqual(readFileSync(memoryPath), parentMemoryBeforeChild, "Native child changed parent memory");
+    assert.deepEqual(readFileSync(checkpoint), parentCheckpointBeforeChild, "Native child changed parent checkpoint");
+    const childLogRows = logRowsSince(coreLogBefore);
+    snapshotDiagnostics("child");
+    const forbiddenErrorEvents = new Set([
+      "collect_recent_messages_error",
+      "memory_update_clean_failed_no_fallback",
+      "memory_update_error",
+    ]);
+    const errorRows = childLogRows.filter((row) => forbiddenErrorEvents.has(row.event));
+    assert.deepEqual(errorRows, [], "Shared-core/native-child lifecycle recorded a forbidden production error");
+    evidence.childInjection = {
+      verdict: "PASS",
+      sessionID: childID,
+      parentID: childSession.parentID,
+      title: childSession.title,
+      prompt: childPrompt,
+      childRequestRange: [childRequestStart, mockRequests.length],
+      childRequests,
+      childHistory,
+      childMemoryPath,
+      childCheckpointPath,
+      childCheckpointCreated: false,
+      parentMemoryUnchanged: true,
+      parentCheckpointUnchanged: true,
+      forbiddenErrorEvents: [...forbiddenErrorEvents],
+      errorRows,
+    };
+  } finally {
+    await api(`/session/${childID}`, undefined, 5_000, "DELETE");
+    childDeleted = true;
+  }
+  assert.equal(childDeleted, true, "Native child cleanup did not use the DELETE session endpoint");
   // Keep manual command turns outside the fresh shared-core request/history assertions.
   current = "run";
   manualUsage.verdict = "PENDING";
-  const manualConfig = { ...activeConfig, debounceMs: 120_000 };
+  const manualConfig = { ...activeConfig, debounceMs: 120_000, logMaxLines: 20_000 };
   await Bun.write(setupPath, JSON.stringify(manualConfig));
   const drainDeadline = Date.now() + remaining(15_000);
   while (Date.now() < drainDeadline) {
@@ -916,26 +1223,14 @@ workflow: try {
     .map((line) => JSON.parse(line))
     .filter((row) => typeof row.error === "string" && row.error.length > 0);
   const manualHistory = await api(`/session/${conversation.id}/message`);
-  const manualStopped = new Promise<void>((resolve) => restarted.child.once("close", () => resolve()));
   const previousURL = base;
-  kill(restarted.child);
-  let manualStopTimer: ReturnType<typeof setTimeout> | undefined;
-  try {
-    await Promise.race([
-      manualStopped,
-      new Promise<never>((_, reject) => {
-        manualStopTimer = setTimeout(
-          () => reject(new Error("Automatic host did not exit before manual restart")),
-          remaining(5_000),
-        );
-      }),
-    ]);
-  } finally {
-    clearTimeout(manualStopTimer);
-  }
+  snapshotDiagnostics("beforeManualRestart");
+  const manualShutdown = await shutdown(restarted.child, "manual-restart");
+  assert.ok(manualShutdown.exited, "Automatic host did not exit before manual restart");
   const manualDeadline = Date.now() + remaining(90_000);
   const manualLogBefore = new Set(completeLogLines());
   const manualHost = await startHost();
+  snapshotDiagnostics("afterManualRestart");
   assert.deepEqual(
     manualHost.availableCommands,
     restarted.availableCommands,
@@ -953,6 +1248,7 @@ workflow: try {
     originalPID: restarted.child.pid,
     originalExited: true,
     originalSignal: restarted.child.signalCode,
+    shutdown: manualShutdown,
     previousURL,
     pid: manualHost.child.pid,
     url: base,
@@ -1161,7 +1457,8 @@ workflow: try {
 } finally {
   clearTimeout(overall);
   server?.stop(true);
-  for (const child of children) kill(child);
+  const shutdowns: unknown[] = [];
+  for (const child of children) shutdowns.push(await shutdown(child, "final-cleanup"));
   await Promise.all(
     [...children].map(
       (child) =>
@@ -1175,6 +1472,28 @@ workflow: try {
         }),
     ),
   );
+  await Bun.sleep(250);
+  snapshotDiagnostics("final");
+  classifyDiagnostics();
+  const residuePaths = await residue(diagnosticRoots);
+  evidence.shutdowns = shutdowns;
+  const diagnosticCoverage: { complete: boolean; phases: Partial<Record<DiagnosticPhase, DiagnosticSnapshot>> } = {
+    complete:
+      !diagnostic.incomplete &&
+      diagnostic.snapshots.startup?.complete === true &&
+      Object.values(diagnostic.snapshots).every((snapshot) => snapshot.complete),
+    phases: diagnostic.snapshots,
+  };
+  evidence.diagnosticCoverage = diagnosticCoverage;
+  evidence.diagnosticClassification = {
+    expectedWarnings: diagnostic.expectedWarnings,
+    hostErrors: diagnostic.hostErrors,
+    unexplainedHostErrors: diagnostic.unexplainedHostErrors,
+    snapshotWarnings: diagnostic.snapshotWarnings,
+    unrecoveredStmErrors: diagnostic.stmErrors,
+    recoveredStmErrors: diagnostic.recoveredStmErrors,
+  };
+  evidence.tempResidue = { paths: residuePaths, owned: residuePaths.length > 0 };
   const cleanup = [...children].map((child) => ({
     pid: child.pid,
     exitCode: child.exitCode,
@@ -1192,14 +1511,24 @@ workflow: try {
   const productLog = join(project, ".opencode", "memory", "session-memory.log");
   if (existsSync(productLog)) await Bun.write(join(root, "stm.log"), redact(readFileSync(productLog, "utf8")));
   evidence.elapsedMs = Date.now() - started;
-  evidence.verdict =
-    cleanupSucceeded &&
-    (setupOnly || manualUsage.verdict === "PASS") &&
+  const stageSuccess =
     (setupOnly ? [stages.install, stages.load, stages.setup] : Object.values(stages)).every(
       (stage) => stage.verdict === "PASS",
-    )
-      ? "PASS"
-      : "FAIL";
+    ) &&
+    (setupOnly || manualUsage.verdict === "PASS");
+  const diagnosticsPassed =
+    diagnosticCoverage.complete &&
+    diagnostic.unexplainedHostErrors.length === 0 &&
+    diagnostic.snapshotWarnings.length === 0 &&
+    diagnostic.stmErrors.length === 0;
+  const cleanupPassed = cleanupSucceeded && residuePaths.length === 0;
+  const overallPassed = stageSuccess && diagnosticsPassed && cleanupPassed;
+  evidence.functionalVerdict = stageSuccess ? "PASS" : "FAIL";
+  evidence.diagnosticVerdict = diagnosticsPassed ? "PASS" : "FAIL";
+  evidence.cleanVerdict = diagnosticsPassed && cleanupPassed ? "PASS" : "FAIL";
+  evidence.diagnosticGate = { passed: diagnosticsPassed, failed: !diagnosticsPassed };
+  evidence.verdict = overallPassed ? "PASS" : "FAIL";
+  if (!overallPassed) process.exitCode = 1;
   await Bun.write(join(root, "evidence.json"), JSON.stringify(evidence, null, 2));
   console.log(
     JSON.stringify(
@@ -1207,6 +1536,20 @@ workflow: try {
         runID: evidence.runID,
         evidence: join(root, "evidence.json"),
         stages,
+        functionalVerdict: evidence.functionalVerdict,
+        diagnosticVerdict: evidence.diagnosticVerdict,
+        cleanVerdict: evidence.cleanVerdict,
+        verdict: evidence.verdict,
+        diagnosticCounts: {
+          retainedRows: diagnostic.retainedRows.length,
+          hostErrors: diagnostic.hostErrors.length,
+          unexplainedHostErrors: diagnostic.unexplainedHostErrors.length,
+          snapshotWarnings: diagnostic.snapshotWarnings.length,
+          unrecoveredStmErrors: diagnostic.stmErrors.length,
+          recoveredStmErrors: diagnostic.recoveredStmErrors.length,
+          residuePaths: residuePaths.length,
+          coverageComplete: diagnosticCoverage.complete,
+        },
         elapsedMs: evidence.elapsedMs,
         costConsumed: 0,
         globalBudgetChanged: false,

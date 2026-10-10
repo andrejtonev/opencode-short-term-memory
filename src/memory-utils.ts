@@ -1,5 +1,5 @@
-import { mkdir, readFile, writeFile, appendFile, rm, stat, rename, open } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { mkdir, readFile, writeFile, appendFile, rm, stat, lstat, rename, open } from "node:fs/promises";
+import { basename, dirname, join } from "node:path";
 import { homedir } from "node:os";
 import { parse } from "jsonc-parser";
 import type { Client } from "./types";
@@ -99,6 +99,63 @@ async function waitForPathWrites(path: string) {
   }
 }
 
+const STM_TEMP_DIR = ".stm-tmp";
+const STM_TEMP_IGNORE = "*\n!.gitignore\n";
+
+async function tempPathFor(path: string) {
+  const tempDir = join(dirname(path), STM_TEMP_DIR);
+  try {
+    const info = await lstat(tempDir);
+    if (!info.isDirectory() || info.isSymbolicLink()) {
+      throw new Error(`Refusing unsafe atomic temporary directory: ${tempDir}`);
+    }
+  } catch (error: unknown) {
+    if ((error as { code?: string })?.code !== "ENOENT") throw error;
+    try {
+      await mkdir(tempDir);
+    } catch (mkdirError: unknown) {
+      if ((mkdirError as { code?: string })?.code !== "EEXIST") throw mkdirError;
+    }
+    const info = await lstat(tempDir);
+    if (!info.isDirectory() || info.isSymbolicLink()) {
+      throw new Error(`Refusing unsafe atomic temporary directory: ${tempDir}`);
+    }
+  }
+
+  const ignorePath = join(tempDir, ".gitignore");
+  await withPathWriteLock(ignorePath, async () => {
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      try {
+        const info = await lstat(ignorePath);
+        if (info.isSymbolicLink() || !info.isFile()) {
+          throw new Error(`Refusing unsafe atomic temporary ignore file: ${ignorePath}`);
+        }
+        if ((await readFile(ignorePath, "utf8")) === STM_TEMP_IGNORE) return;
+      } catch (error: unknown) {
+        if ((error as { code?: string })?.code !== "ENOENT") throw error;
+        let owner = false;
+        try {
+          const ignoreHandle = await open(ignorePath, "wx");
+          owner = true;
+          try {
+            await ignoreHandle.writeFile(STM_TEMP_IGNORE, "utf8");
+          } finally {
+            await ignoreHandle.close();
+          }
+          return;
+        } catch (createError: unknown) {
+          if (owner) await rm(ignorePath, { force: true }).catch(() => {});
+          if ((createError as { code?: string })?.code !== "EEXIST") throw createError;
+        }
+      }
+      if (attempt < 9) await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    throw new Error(`Refusing to overwrite conflicting atomic temporary ignore file: ${ignorePath}`);
+  });
+
+  return join(tempDir, `${basename(path)}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}`);
+}
+
 export async function ensureDir(path: string) {
   try {
     await mkdir(path, { recursive: true });
@@ -125,40 +182,44 @@ export async function writeText(path: string, text: string) {
 
 async function writeTextAtomicUnlocked(path: string, text: string) {
   await ensureDir(dirname(path));
-  const tmpPath = `${path}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const tmpPath = await tempPathFor(path);
 
-  const tmpHandle = await open(tmpPath, "w");
+  const tmpHandle = await open(tmpPath, "wx");
+  let renamed = false;
+  let closed = false;
   try {
     await tmpHandle.writeFile(text, "utf8");
     await tmpHandle.sync();
-  } finally {
     await tmpHandle.close();
-  }
-
-  let lastError: unknown;
-  for (let attempt = 0; attempt < 5; attempt += 1) {
-    try {
-      await rename(tmpPath, path);
-      return;
-    } catch (err: unknown) {
-      lastError = err;
-      const errCode = (err as { code?: string }).code;
-      if (process.platform === "win32" && (errCode === "EPERM" || errCode === "EBUSY")) {
-        try {
-          await rm(path, { force: true });
-        } catch {}
-        try {
-          await rename(tmpPath, path);
-          return;
-        } catch {}
+    closed = true;
+    let lastError: unknown;
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      try {
+        await rename(tmpPath, path);
+        renamed = true;
+        return;
+      } catch (err: unknown) {
+        lastError = err;
+        const errCode = (err as { code?: string }).code;
+        if (process.platform === "win32" && (errCode === "EPERM" || errCode === "EBUSY")) {
+          try {
+            await rm(path, { force: true });
+          } catch {}
+          try {
+            await rename(tmpPath, path);
+            renamed = true;
+            return;
+          } catch {}
+        }
+        const waitMs = 10 * (attempt + 1);
+        await new Promise((resolve) => setTimeout(resolve, waitMs));
       }
-      const waitMs = 10 * (attempt + 1);
-      await new Promise((resolve) => setTimeout(resolve, waitMs));
     }
+    throw lastError instanceof Error ? lastError : new Error(String(lastError ?? "atomic rename failed"));
+  } finally {
+    if (!closed) await tmpHandle.close().catch(() => {});
+    if (!renamed) await rm(tmpPath, { force: true }).catch(() => {});
   }
-
-  await rm(tmpPath, { force: true }).catch(() => {});
-  throw lastError instanceof Error ? lastError : new Error(String(lastError ?? "atomic rename failed"));
 }
 
 export type RawFileSnapshot = Buffer | null;
@@ -182,7 +243,7 @@ export async function readRawFile(path: string): Promise<RawFileSnapshot> {
 
 export async function prepareRawFile(path: string, data: Buffer): Promise<PreparedRawFile> {
   await ensureDir(dirname(path));
-  const tempPath = `${path}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const tempPath = await tempPathFor(path);
   const handle = await open(tempPath, "wx");
   try {
     await handle.writeFile(data);
@@ -213,9 +274,14 @@ export async function prepareRawFile(path: string, data: Buffer): Promise<Prepar
         }
         const matches = current === null ? expected === null : expected !== null && current.equals(expected);
         if (!matches || consumed) return false;
-        await rename(tempPath, path);
-        consumed = true;
-        return true;
+        try {
+          await rename(tempPath, path);
+          consumed = true;
+          return true;
+        } catch (error: unknown) {
+          await rm(tempPath, { force: true }).catch(() => {});
+          throw error;
+        }
       }),
     discard: async () => {
       if (consumed) return;

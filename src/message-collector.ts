@@ -20,6 +20,35 @@ import type { RuntimeContract } from "./runtime-contract";
 
 type MessageReader = Pick<RuntimeContract, "readSessionMessages">;
 
+function caughtValueMessage(error: unknown): string {
+  if (typeof error === "string") return error;
+  if (error === null || error === undefined) return "Unknown error";
+
+  if (error instanceof Error && error.message) {
+    return error.message;
+  }
+
+  if (typeof error !== "object") return String(error);
+
+  const value = error as Record<string, unknown>;
+  const data = value.data as Record<string, unknown> | undefined;
+  const message = [value.message, data?.message].find(
+    (candidate): candidate is string => typeof candidate === "string" && candidate.trim().length > 0,
+  );
+  const name = [value.name, data?.name].find(
+    (candidate): candidate is string => typeof candidate === "string" && candidate.trim().length > 0,
+  );
+
+  if (message) return name && name !== "Error" ? `${name}: ${message}` : message;
+
+  const safeDetails: Record<string, string | number> = {};
+  for (const key of ["name", "code", "status"]) {
+    const candidate = value[key];
+    if (typeof candidate === "string" || typeof candidate === "number") safeDetails[key] = candidate;
+  }
+  return Object.keys(safeDetails).length > 0 ? JSON.stringify(safeDetails) : "Unknown error";
+}
+
 export type VisibleDeltaEntry = {
   rendered: string;
   lastMessageID?: string;
@@ -180,7 +209,7 @@ export async function collectVisibleMessagesSinceCheckpoint(
       foundCheckpoint: sinceMessageID ? startIndex > 0 : false,
     };
   } catch (error) {
-    throw new Error(`Failed to collect visible messages: ${(error as Error).message}`);
+    throw new Error(`Failed to collect visible messages: ${caughtValueMessage(error)}`, { cause: error });
   }
 }
 
@@ -203,7 +232,7 @@ export async function collectRecentVisibleMessages(
     }
     return collected;
   } catch (error) {
-    globalState.lastError = `Failed to collect recent messages: ${(error as Error).message}`;
+    globalState.lastError = `Failed to collect recent messages: ${caughtValueMessage(error)}`;
     showToast(client, "Session Memory", "Failed to read conversation history — check /stm logs for details.");
     await logEvent(config, "collect_recent_messages_error", { sessionID, error: globalState.lastError });
     return {

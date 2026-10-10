@@ -18,8 +18,17 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { collectVisibleMessagesSinceCheckpoint } from "../src/message-collector";
-import { DEFAULT_CONFIG, writeText, memoryPathFor, checkpointPathFor } from "../src/memory-utils";
+import { collectRecentVisibleMessages, collectVisibleMessagesSinceCheckpoint } from "../src/message-collector";
+import {
+  DEFAULT_CONFIG,
+  createRuntimeState,
+  checkpointPathFor,
+  logPath,
+  memoryPathFor,
+  readText,
+  writeText,
+} from "../src/memory-utils";
+import type { Client } from "../src/types";
 
 type MessageReader = {
   readSessionMessages(sessionID: string, options?: { limit?: number }): Promise<readonly unknown[]>;
@@ -222,5 +231,75 @@ describe("collectVisibleMessagesSinceCheckpoint", () => {
     expect(rendered).toContain("real user input");
     expect(rendered).toContain("real assistant reply");
     expect(rendered).not.toContain("thinking:");
+  });
+
+  test("structured SDK read errors preserve safe name/message details", async () => {
+    const sessionID = "structured-read-error";
+    const memoryDir = join(testDir, ".opencode", "memory");
+    await writeText(memoryPathFor(sessionID, memoryDir), "");
+    const toasts: unknown[] = [];
+    const client = {
+      tui: {
+        showToast: async (input: unknown) => {
+          toasts.push(input);
+        },
+      },
+    } as unknown as Client;
+    const globalState = createRuntimeState();
+    const runtime: MessageReader = {
+      readSessionMessages: async () => {
+        throw {
+          name: "NotFoundError",
+          data: { message: "Session not found" },
+          request: { headers: { authorization: "secret sentinel" } },
+        };
+      },
+    };
+
+    await collectRecentVisibleMessages(runtime, client, sessionID, { ...DEFAULT_CONFIG, memoryDir }, globalState);
+
+    expect(globalState.lastError).toContain("NotFoundError");
+    expect(globalState.lastError).toContain("Session not found");
+    expect(globalState.lastError).not.toContain("undefined");
+    expect(globalState.lastError).not.toContain("secret sentinel");
+    expect(toasts).toEqual([
+      {
+        body: {
+          title: "Session Memory",
+          message: "Failed to read conversation history — check /stm logs for details.",
+          variant: "error",
+          duration: 8000,
+        },
+      },
+    ]);
+
+    const log = await readText(logPath(memoryDir));
+    expect(log).toContain("NotFoundError: Session not found");
+    expect(log).not.toContain("request");
+    expect(log).not.toContain("secret sentinel");
+  });
+
+  test("regular Error messages work and empty error objects remain unknown", async () => {
+    const memoryDir = join(testDir, ".opencode", "memory");
+    const client = { tui: { showToast: async () => {} } } as unknown as Client;
+
+    for (const [sessionID, failure, expected] of [
+      ["regular-read-error", new Error("connection refused"), "connection refused"],
+      ["empty-read-error", {}, "Unknown error"],
+    ] as const) {
+      await writeText(memoryPathFor(sessionID, memoryDir), "");
+      const globalState = createRuntimeState();
+      const runtime: MessageReader = {
+        readSessionMessages: async () => {
+          throw failure;
+        },
+      };
+
+      await collectRecentVisibleMessages(runtime, client, sessionID, { ...DEFAULT_CONFIG, memoryDir }, globalState);
+
+      expect(globalState.lastError).toContain(expected);
+      expect(globalState.lastError).not.toContain("undefined");
+      expect(globalState.lastError).not.toContain("[object Object]");
+    }
   });
 });

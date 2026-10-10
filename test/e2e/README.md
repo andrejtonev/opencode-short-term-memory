@@ -72,14 +72,14 @@ still has to be free for the run.
 
 ## Six-suite inventory
 
-| Suite                       | Scope                                                                                                             | Model calls?                                                                                    |
-| --------------------------- | ----------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
-| `stm-e2e.test.ts`           | Live serve/plugin status, memory-producing chat, clean side-session tracking, orphan cleanup, and startup timing. | **Yes** for chat and summarization; serve/status checks do not require a successful completion. |
-| `events.test.ts`            | Live plugin load plus synthetic event dispatch and filesystem/log assertions.                                     | **No**; uses a fake client for direct hook work.                                                |
-| `hooks.test.ts`             | Direct hook contracts, including command/chat hooks, deduplication, counters, and path safety.                    | **No**; synthetic payloads and a fake client.                                                   |
-| `wireup.test.ts`            | Live plugin hook surface and input/output wiring.                                                                 | **No**; handlers are exercised with a fake client.                                              |
-| `commands.test.ts`          | `/stm` command actions through the live server; command hook short-circuits the agent.                            | **No model completion** for command results.                                                    |
-| `include-agents-md.test.ts` | Project `AGENTS.md` inclusion in the first summarizer prompt.                                                     | **No real model**; captures the prompt with a fake client.                                      |
+| Suite                       | Scope                                                                                                             | Model calls?                                                                                                    |
+| --------------------------- | ----------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| `stm-e2e.test.ts`           | Live serve/plugin status, memory-producing chat, clean side-session tracking, orphan cleanup, and startup timing. | **Yes** for chat and summarization; serve/status checks do not require a successful completion.                 |
+| `events.test.ts`            | Live plugin load plus synthetic event dispatch and filesystem/log assertions.                                     | **No**; uses a fake client for direct hook work.                                                                |
+| `hooks.test.ts`             | Direct hook contracts, including command/chat hooks, deduplication, counters, and path safety.                    | **No**; synthetic payloads and a fake client.                                                                   |
+| `wireup.test.ts`            | Live plugin hook surface and input/output wiring.                                                                 | **No**; handlers are exercised with a fake client.                                                              |
+| `commands.test.ts`          | `/stm` command actions through the live server; command hook short-circuits the agent.                            | **Model-mediated** command runs may consume inference; the action result is verified, not its semantic quality. |
+| `include-agents-md.test.ts` | Project `AGENTS.md` inclusion in the first summarizer prompt.                                                     | **No real model**; captures the prompt with a fake client.                                                      |
 
 All six suites require `OPENCODE_E2E=1` and an `opencode` binary, even when
 their assertions use fake clients. The live serve proves host/plugin loading;
@@ -116,6 +116,12 @@ isolated native V1/V2 tarball runners (`scripts/published-v1-e2e.ts` and
 `--setup-only` mode prepares the isolated runner without executing the runtime
 journey; it is not equivalent to a completed acceptance run. The checkout
 suite and the tarball runners therefore answer different questions.
+
+For the V1 release acceptance procedure, see
+[`docs/V1-MANUAL-ACCEPTANCE.md`](../../docs/V1-MANUAL-ACCEPTANCE.md). A runner
+`PASS` is not an error-free guarantee: inspect the full host logs, the finite
+STM log tail, native-child evidence, provider requests, checkpoints, and
+cleanup results before treating the run as accepted.
 
 ## Troubleshooting and scope of guarantees
 
