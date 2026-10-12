@@ -1,5 +1,47 @@
 # V1 Manual Acceptance
 
+# Addendum — strict V2 diagnostic requalification (2026-10-12)
+
+The V2 diagnostic policy was tested against 47 focused cases in the pure
+`scripts/v2-diagnostic-policy.ts`/runner strict-gate path. The cases cover
+malformed rows, unknown errors, duplicate expected failures, exact four-field
+session fixtures, narrow host-exception timing, and the distinction between a
+functional PASS and an acceptance-clean diagnostic verdict. This addendum
+records the diagnostic result; it does not claim a new product build, release,
+publication, or product fix.
+
+Two bounded runs against the unchanged unpublished RC4 candidate were
+recorded. `v2-Wyj3Bi` failed after `72.729s` because the settings ordering was
+wrong; after that harness correction, the transport disconnection observed
+`7ms` after cleanup matched the exact post-cleanup allowance. `v2-6fe3jJ`
+completed in `71.652s`: the functional gate and full stage passed, but the
+strict diagnostic gate failed. It retained 37 valid rows and four expected
+failures, with zero missing, zero unknown STM rows, one unknown host entry, and
+no duplicate. The later `474` span (`1307` after cleanup) and the local
+candidate-update warning matched their exact allowed classifications; those
+observations do not authorize unrelated interruptions.
+
+### Strict-gate summary
+
+| Component/Logic Block         | Current Findings/Hypothesis                                                                                                                                                                                                                                                                                                                                                              | Implications                                                                                                                                                                                                                                                                                                          | Verification Status                                                               |
+| ----------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
+| Focused policy suite          | 47 focused cases exercise malformed rows, unknown errors, duplicate expected failures, exact four-field/session matching, and narrow host-exception timing.                                                                                                                                                                                                                              | Expected failures must match their phase, session, event, and declared fields; malformed or unrelated diagnostics remain failures.                                                                                                                                                                                    | PASS for the 47 focused cases; no fabricated overall-suite count is claimed.      |
+| `v2-6fe3jJ` verdict           | The functional and full-stage gates passed, but strict diagnostics found 37 valid rows, four expected failures, zero missing, zero unknown STM rows, one unknown host entry, and no duplicate.                                                                                                                                                                                           | Functional PASS does not overrule an uncorrelated host diagnostic. The run remains diagnostic FAIL.                                                                                                                                                                                                                   | FAIL, intentionally retained as the current strict-gate result after `71.652s`.   |
+| Pre-cleanup host interruption | `host-0.log:372` contains an INFO `InterruptError` on `GET /api/event` at `03:54:33.728Z`; cleanup began at `03:54:36.049Z`.                                                                                                                                                                                                                                                             | The event is before cleanup and is not the exact allowed post-cleanup shutdown interruption. It is not confirmed as a product bug, but it cannot be suppressed by a blanket interruption rule.                                                                                                                        | Strict FAIL is justified; root cause remains unconfirmed.                         |
+| Timestamp invariant           | `scripts/v1-diagnostic-policy.ts:138-147` requires a recovered event to have the same session/operation and a strictly later timestamp (`nextTimestamp > timestamp`). `scripts/v2-diagnostic-policy.ts:243-273` allows the exact shutdown interrupt or transport disconnect only when its timestamp is nondecreasing from the cleanup boundary (`timestamp(entry) >= cleanupStartedAt`). | The accepted boundary is the recorded cleanup start, not wall-clock substitution or a fabricated event timestamp. The pre-cleanup `03:54:33.728Z` event cannot be reclassified; a post-cleanup event such as the observed `03:54:36.049Z`-plus span can satisfy the narrow boundary only when all other fields match. | Source inspection confirms the ordering rules; no timestamp replacement was made. |
+| Dispatch/transition ordering  | `src/session-memory.ts:691-695` states that native deletion is dispatched before any config await so the generation is invalidated before outstanding work can commit.                                                                                                                                                                                                                   | Diagnostic timing must preserve lifecycle ordering rather than infer recovery from a later unrelated success.                                                                                                                                                                                                         | Source-bounded; no product transition change was made.                            |
+| Candidate and scope           | Candidate `b4a4cf...` and the existing artifact inventory are unchanged; the actual inventory remains 72 artifact files and 11 manual passes.                                                                                                                                                                                                                                            | Results remain bounded to the same unpublished bytes and do not constitute a release qualification.                                                                                                                                                                                                                   | Retained unchanged; no new product fix or release claim.                          |
+
+The unresolved line is therefore retained as evidence of the stricter gate,
+not rewritten as a clean result. A future correction must add request/closure
+correlation for the specific host stream; it must not allow all
+`InterruptError` entries. The existing V2 PASS history remains historical
+evidence and is not lost, but its scope is now explicitly narrower because the
+strict gate exposes this residual diagnostic case.
+
+Investigation artifact:
+`/home/dev/workspace/opencode-work/stm-readiness-improvements/2026-10-10--v2-diagnostic-policy.html`
+
 # Addendum — V2 same-artifact requalification (2026-10-10)
 
 The exact DCP-fixed candidate was requalified by the bounded native V2 run

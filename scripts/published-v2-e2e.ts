@@ -7,6 +7,8 @@ import { dirname, isAbsolute, join, relative } from "node:path";
 import { OpenCode } from "../fixtures/v2-generation-probe/node_modules/@opencode/client/dist/promise/index.js";
 import { dialogRows, tuiReadiness } from "../fixtures/v2-generation-probe/tui-output/production-acceptance.js";
 import { redactDiagnostic, serializeFailure } from "../fixtures/v2-generation-probe/diagnostic-redaction.js";
+import { parseDiagnosticLog } from "./v1-diagnostic-policy";
+import { classifyV2Diagnostics, type ExpectedV2Failure, type V2HostLog } from "./v2-diagnostic-policy";
 import {
   PROBE_COMPACTION_SUMMARY,
   PROBE_MEMORY_MODEL_ID,
@@ -171,6 +173,12 @@ let current: Stage = "install";
 let binary = "";
 let serveLog = "";
 let tuiStarted = false;
+let cleanupStartedAt = 0;
+let setupDiagnosticText = "";
+let setupParsed = parseDiagnosticLog("");
+let setupCompleteLines = 0;
+const productionLogPath = join(env.PROBE_MEMORY_DIR!, "session-memory.log");
+let advancedUpdatesForDiagnostics: { phases: object[] } | undefined;
 const redact = (text: string) => redactDiagnostic(text.replace(/(server password )\S+/g, "$1[redacted]"), secrets);
 const inside = (path: string) => {
   const suffix = relative(root, path);
@@ -731,6 +739,21 @@ workflow: try {
   );
   evidence.setupTelemetryBoundary = { startRow: 0, endRow: setupTelemetry.length, setupInvocations };
   assert.deepEqual(setupInvocations, [], "Native setup commands invoked the provider");
+  const setupDiagnosticPath = join(env.PROBE_MEMORY_DIR!, "session-memory.log");
+  setupDiagnosticText = existsSync(setupDiagnosticPath) ? readFileSync(setupDiagnosticPath, "utf8") : "";
+  setupParsed = parseDiagnosticLog(setupDiagnosticText);
+  const setupRawLines = setupDiagnosticText.split("\n");
+  setupCompleteLines = setupRawLines
+    .slice(0, setupDiagnosticText.endsWith("\n") ? setupRawLines.length - 1 : Math.max(0, setupRawLines.length - 1))
+    .filter((line) => line.trim().length > 0).length;
+  evidence.setupDiagnosticCapture = {
+    path: setupDiagnosticPath,
+    configuredMaxLines: 300,
+    capturedLines: setupDiagnosticText.split(/\r?\n/).filter(Boolean).length,
+    completeLines: setupCompleteLines,
+    parseIssues: setupParsed.issues,
+    incompleteTail: setupParsed.incompleteTail ?? null,
+  };
   stages.setup = {
     verdict: "PASS",
     evidence:
@@ -764,6 +787,7 @@ workflow: try {
     memoryDir: env.PROBE_MEMORY_DIR,
     maxDeltaMessages: 200,
     maxUpdateInputLength: 20_000,
+    logMaxLines: 20_000,
     remindEveryN: 1,
     debounceMs: 100,
     injectInSubagents: true,
@@ -779,8 +803,8 @@ workflow: try {
     phases: [] as object[],
     restoredSettings: false,
   };
+  advancedUpdatesForDiagnostics = advancedUpdates;
   evidence.advancedNativeUpdates = advancedUpdates;
-  const productionLogPath = join(env.PROBE_MEMORY_DIR!, "session-memory.log");
   const productionRows = () =>
     existsSync(productionLogPath)
       ? readFileSync(productionLogPath, "utf8")
@@ -1938,6 +1962,7 @@ workflow: try {
     '"resolvedConfig":',
     '"memoryModel": ""',
     `"summarizerMode": "${settings.summarizerMode}"`,
+    '"logMaxLines": 20000',
     `"memoryDir": "${settings.memoryDir.replaceAll("\\", "\\\\")}"`,
     '"effective":',
     '"memoryModel": null',
@@ -1953,6 +1978,7 @@ workflow: try {
       memoryModelSelection: "inherited-current-session",
       summarizerMode: settings.summarizerMode,
       memoryDir: settings.memoryDir,
+      logMaxLines: settings.logMaxLines,
     },
   };
   const exactSkip = manualLogRows.find(
@@ -2670,6 +2696,8 @@ workflow: try {
   evidence.error = failure;
   process.exitCode = 1;
 } finally {
+  cleanupStartedAt = Date.now();
+  evidence.cleanupStartedAt = new Date(cleanupStartedAt).toISOString();
   let tmuxPID: number | undefined;
   if (tuiStarted) {
     const identity = await terminal(["display-message", "-p", "#{pid}"], true, true).catch(() => undefined);
@@ -2738,9 +2766,204 @@ workflow: try {
     evidence.tmuxCleanupError ??= { message: "Test-owned tmux socket remains; server death not proven" };
   await save("serve.log", serveLog);
   const logs = await files(root).catch(() => []);
-  evidence.hostLogPaths = logs.filter((path) => path.endsWith("/opencode.log"));
-  for (const [index, path] of (evidence.hostLogPaths as string[]).entries())
-    await save(`host-${index}.log`, readFileSync(path, "utf8"));
+  const opencodeLogPaths = logs.filter((path) => path.endsWith("/opencode.log"));
+  const hostLogs: V2HostLog[] = [];
+  const contentOwners = new Map<string, string>();
+  for (const path of opencodeLogPaths) {
+    const text = redact(readFileSync(path, "utf8"));
+    const owner = contentOwners.get(text);
+    if (owner) continue;
+    contentOwners.set(text, path);
+    hostLogs.push({ file: path, lines: text.split(/\r?\n/).filter((line) => line.length > 0) });
+  }
+  evidence.hostLogPaths = opencodeLogPaths;
+  evidence.hostLogUniquePaths = hostLogs.map((log) => log.file);
+  for (const [index, log] of hostLogs.entries()) await save(`host-${index}.log`, log.lines.join("\n"));
+
+  const finalStmExists = existsSync(productionLogPath);
+  const finalStmText = finalStmExists ? readFileSync(productionLogPath, "utf8") : "";
+  const retainedSTMJSONText = finalStmExists ? finalStmText : setupDiagnosticText;
+  const setupCompletePrefix = setupDiagnosticText.endsWith("\n")
+    ? setupDiagnosticText
+    : setupDiagnosticText.slice(0, setupDiagnosticText.lastIndexOf("\n") + 1);
+  const finalRawLines = finalStmText.split("\n");
+  const finalCompleteLines = finalStmText.endsWith("\n") ? finalRawLines.length - 1 : finalRawLines.length - 1;
+  const finalNonblankCompleteLines = finalRawLines
+    .slice(0, finalCompleteLines)
+    .filter((line) => line.trim().length > 0).length;
+  const functionalCompleted = !setupOnly && stages.run.verdict === "PASS" && stages.memory.verdict === "PASS";
+  type FailurePhaseSource = {
+    name?: string;
+    verdict?: string;
+    sessionID?: string;
+    attempts?: { attempt?: number; mode?: string; providerID?: string; modelID?: string }[];
+    cancellationOutcomes?: {
+      attempt?: number;
+      failureKind?: string;
+      mode?: string;
+      providerID?: string;
+      modelID?: string;
+      outcome?: string;
+    }[];
+    cancellationErrors?: { reason?: string; detail?: string }[];
+  };
+  const phase = (name: string) =>
+    (advancedUpdatesForDiagnostics?.phases as FailurePhaseSource[] | undefined)?.find((entry) => entry.name === name);
+  const expectedFailures: ExpectedV2Failure[] = [];
+  const oracleErrors: string[] = [];
+  const fallback = phase("active-fallback");
+  const fallbackAttempt = fallback?.attempts?.find((attempt) => attempt.attempt === 1);
+  if (fallback?.verdict === "PASS" && fallback.sessionID && fallbackAttempt) {
+    const valid =
+      fallbackAttempt.mode === "clean" &&
+      fallbackAttempt.providerID === "stm-probe" &&
+      fallbackAttempt.modelID === "deterministic";
+    if (!valid) oracleErrors.push("Active-fallback phase source does not prove its expected failure tuple");
+    expectedFailures.push({
+      phaseName: "active-fallback",
+      phasePassed: true,
+      sessionID: fallback.sessionID,
+      event: "v2_generation_attempt_outcome",
+      fields: {
+        outcome: "failure",
+        failureKind: "V2MalformedGenerationError",
+        mode: "clean",
+        providerID: "stm-probe",
+        modelID: "deterministic",
+        attempt: 1,
+      },
+    });
+  }
+  const retry = phase("clean-retry");
+  const retryAttempt = retry?.attempts?.find((attempt) => attempt.attempt === 1);
+  if (retry?.verdict === "PASS" && retry.sessionID && retryAttempt) {
+    const valid =
+      retryAttempt.mode === "clean" &&
+      retryAttempt.providerID === "stm-probe" &&
+      retryAttempt.modelID === PROBE_MEMORY_MODEL_ID;
+    if (!valid) oracleErrors.push("Clean-retry phase source does not prove its expected failure tuple");
+    expectedFailures.push({
+      phaseName: "clean-retry",
+      phasePassed: true,
+      sessionID: retry.sessionID,
+      event: "v2_generation_attempt_outcome",
+      fields: {
+        outcome: "failure",
+        failureKind: "V2MalformedGenerationError",
+        mode: "clean",
+        providerID: "stm-probe",
+        modelID: PROBE_MEMORY_MODEL_ID,
+        attempt: 1,
+      },
+    });
+  }
+  const cancellation = phase("deletion-cancellation");
+  const cancellationOutcome = cancellation?.cancellationOutcomes?.find((outcome) => outcome.attempt === 1);
+  const cancellationError = cancellation?.cancellationErrors?.find((error) => error.detail === "summarizer_cancelled");
+  if (cancellation?.verdict === "PASS" && cancellation.sessionID && cancellationOutcome && cancellationError) {
+    if (cancellationOutcome.failureKind !== "V2GenerationCancelledError")
+      oracleErrors.push("Cancellation failure kind mismatch");
+    if (cancellationOutcome.mode !== "clean") oracleErrors.push("Cancellation mode mismatch");
+    if (cancellationOutcome.providerID !== "stm-probe") oracleErrors.push("Cancellation provider mismatch");
+    if (cancellationOutcome.modelID !== PROBE_MEMORY_MODEL_ID) oracleErrors.push("Cancellation model mismatch");
+    if (cancellationOutcome.outcome !== "failure") oracleErrors.push("Cancellation outcome mismatch");
+    if (cancellationError.reason !== "operational_failure") oracleErrors.push("Cancellation error reason mismatch");
+    expectedFailures.push({
+      phaseName: "deletion-cancellation",
+      phasePassed: true,
+      sessionID: cancellation.sessionID,
+      event: "v2_generation_attempt_outcome",
+      fields: {
+        outcome: "failure",
+        failureKind: "V2GenerationCancelledError",
+        mode: "clean",
+        providerID: "stm-probe",
+        modelID: PROBE_MEMORY_MODEL_ID,
+        attempt: 1,
+      },
+    });
+    expectedFailures.push({
+      phaseName: "deletion-cancellation",
+      phasePassed: true,
+      sessionID: cancellation.sessionID,
+      event: "v2_memory_update_error",
+      fields: { reason: "operational_failure", detail: "summarizer_cancelled" },
+    });
+  }
+  if (functionalCompleted && expectedFailures.length !== 4)
+    oracleErrors.push(`Functional V2 run provided ${expectedFailures.length} oracle failure tuples; expected 4`);
+  const hostLogsWithServeLog: V2HostLog[] = [
+    ...hostLogs,
+    { file: join(root, "serve.log"), lines: serveLog.split(/\r?\n/).filter((line) => line.length > 0) },
+  ];
+  const v2Classification = classifyV2Diagnostics({
+    candidateTarget: configuredTarget,
+    cleanupStartedAt,
+    expectedFailures: setupOnly ? [] : expectedFailures,
+    stmLog: retainedSTMJSONText,
+    hostLogs: hostLogsWithServeLog,
+  });
+  const configuredDiagnosticCap = setupOnly ? 300 : 20_000;
+  const diagnosticCoverage = {
+    functionalCompleted,
+    hostLogsPresent: hostLogs.length > 0 || serveLog.length > 0,
+    setup: {
+      configuredMaxLines: 300,
+      completeLines: setupCompleteLines,
+      parseIssues: setupParsed.issues,
+      tail: setupParsed.incompleteTail ?? null,
+      complete: setupParsed.issues.length === 0 && setupParsed.incompleteTail === undefined && setupCompleteLines < 300,
+    },
+    logPresent: retainedSTMJSONText.length > 0,
+    configuredMaxLines: configuredDiagnosticCap,
+    setupPrefixPreserved: !setupCompletePrefix || finalStmText.startsWith(setupCompletePrefix),
+    parsedRows: v2Classification.parsedRows.length,
+    parseIssues: v2Classification.parsedIssues,
+    tail: v2Classification.tail ?? null,
+    rawCompleteLines: finalNonblankCompleteLines,
+    capped: finalNonblankCompleteLines >= configuredDiagnosticCap,
+    complete:
+      (!functionalCompleted && setupOnly) ||
+      (retainedSTMJSONText.length > 0 &&
+        (!setupCompletePrefix || finalStmText.startsWith(setupCompletePrefix)) &&
+        v2Classification.parsedIssues.length === 0 &&
+        v2Classification.tail === undefined &&
+        finalNonblankCompleteLines < configuredDiagnosticCap),
+  };
+  const diagnosticPassed =
+    diagnosticCoverage.complete &&
+    diagnosticCoverage.setup.complete &&
+    (!functionalCompleted || diagnosticCoverage.hostLogsPresent) &&
+    v2Classification.missing.length === 0 &&
+    v2Classification.unexpectedStm.length === 0 &&
+    v2Classification.unexpectedHost.length === 0 &&
+    v2Classification.duplicate.length === 0 &&
+    oracleErrors.length === 0;
+  evidence.oracleErrors = oracleErrors;
+  evidence.diagnosticCoverage = diagnosticCoverage;
+  evidence.expectedFailures = expectedFailures;
+  evidence.diagnosticClassification = v2Classification;
+  evidence.warningLedger = {
+    expectedRows: v2Classification.expectedMatched.map((row) => ({
+      phaseName: row.phaseName,
+      sessionID: row.sessionID,
+      event: row.event,
+    })),
+    actualFields: v2Classification.parsedRows.map((row) => ({
+      event: row.event,
+      sessionID: row.sessionID,
+      outcome: row.outcome,
+      failureKind: row.failureKind,
+      mode: row.mode,
+      providerID: row.providerID,
+      modelID: row.modelID,
+      attempt: row.attempt,
+      reason: row.reason,
+      detail: row.detail,
+    })),
+    unknownCount: v2Classification.unexpectedStm.length + v2Classification.unexpectedHost.length,
+    duplicateWarnings: v2Classification.duplicate.length,
+  };
   evidence.elapsedMs = Date.now() - started;
   const requiredStages: Stage[] = setupOnly
     ? ["install", "load", "setup"]
@@ -2748,10 +2971,11 @@ workflow: try {
   const cleanupPassed =
     !(evidence.tmuxSocketExistsAfterCleanup || evidence.tmuxCleanupError || evidence.serviceCleanupError) &&
     (evidence.childCleanup as { exited: boolean }[]).every((child) => child.exited);
-  evidence.verdict =
-    !evidence.error && cleanupPassed && requiredStages.every((stage) => stages[stage].verdict === "PASS")
-      ? "PASS"
-      : "FAIL";
+  const functionalPassed = !evidence.error && requiredStages.every((stage) => stages[stage].verdict === "PASS");
+  evidence.functionalVerdict = functionalPassed ? "PASS" : "FAIL";
+  evidence.diagnosticVerdict = diagnosticPassed ? "PASS" : "FAIL";
+  evidence.cleanVerdict = diagnosticPassed && cleanupPassed ? "PASS" : "FAIL";
+  evidence.verdict = functionalPassed && diagnosticPassed && cleanupPassed ? "PASS" : "FAIL";
   if (evidence.verdict !== "PASS") process.exitCode = 1;
   clearTimeout(watchdog);
   await save("evidence.json", evidence);
@@ -2764,7 +2988,18 @@ workflow: try {
         version: productVersion,
         setupOnly,
         stages,
+        functionalVerdict: evidence.functionalVerdict,
+        diagnosticVerdict: evidence.diagnosticVerdict,
+        cleanVerdict: evidence.cleanVerdict,
         elapsedMs: evidence.elapsedMs,
+        diagnosticCounts: {
+          parsedRows: v2Classification.parsedRows.length,
+          parseIssues: v2Classification.parsedIssues.length,
+          missingExpected: v2Classification.missing.length,
+          unexpectedStm: v2Classification.unexpectedStm.length,
+          unexpectedHost: v2Classification.unexpectedHost.length,
+          duplicateWarnings: v2Classification.duplicate.length,
+        },
         costConsumed: 0,
         globalBudgetChanged: false,
         remaining:
