@@ -1,5 +1,50 @@
 # V1 Manual Acceptance
 
+# Addendum — V2 same-run lifecycle and keyboard requalification (2026-10-12)
+
+The bounded native V2 run `v2-MP3rIR` completed in `50.135s` against the
+unchanged candidate SHA256
+`b4a4cf7ec856b9030f276a1f97a62c172754c624f656ad8f509ee3d1d9c2d9e1`.
+Its actual evidence is retained at
+`/home/dev/workspace/opencode-work/stm-published-rc-e2e/v2-MP3rIR/evidence.json`.
+All 72 packaged artifact files matched. The functional and strict diagnostic
+gates passed with 37 valid STM rows, four expected STM failures, and zero
+unknown, missing, or duplicate STM rows. The two expected host entries were
+the local-file update-check warning and the final-shutdown interrupt only.
+No product, policy, host-runtime, or publication bytes changed for this
+qualification.
+
+The run also exercised the actual keyboard route boundary without an
+intermediate respawn. `Escape` was sent after a 200 ms settling interval;
+`Ctrl-P` was sent ten times; the observed command was session switching, the
+Sessions dialog opened, and the exact reset-boundary title route was reached.
+The pane PID remained `261200` before and after the route, so this is evidence
+of one wrapper/TUI run and not proof of an inner CLI identity. Host logs show
+one same-run TUI lifecycle with no intermediate startup. The pre-existing
+`/stm` command API gap remains, so this record does not claim full keyboard
+acceptance. The failed attempts `EUtHH`, `twBhCx`, and the passing
+`MP3rIR` record remain preserved; the `Ctrl-P` failure in `twBhCx` is retained
+as an ambiguity/failure record rather than rewritten.
+
+### Same-run lifecycle summary
+
+| Component/Logic Block             | Current Findings/Hypothesis                                                                                                                                                                                | Implications                                                                                                                                                                                                                | Verification Status                                                                                                                   |
+| --------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| Strict diagnostics                | `v2-MP3rIR` retained 37 valid rows and four expected failures; all STM completeness and uniqueness counts were clean. Only the local-file warning and final-shutdown interrupt were expected host entries. | The strict diagnostic policy remains fail-closed; no broad interruption allowance was added.                                                                                                                                | PASS in the retained evidence; run duration `50.135s`.                                                                                |
+| Keyboard route and reset boundary | Escape settling followed by ten raw `Ctrl-P` inputs reached the session switch command, Sessions dialog, and exact reset-boundary title route without an intermediate respawn.                             | The observed route is bounded evidence for one native TUI run, not a universal keyboard or inner-process identity claim.                                                                                                    | PASS for the exercised route; full keyboard acceptance remains open because `/stm` commands are still an API gap.                     |
+| Dispatch and transition ordering  | The dispatcher source says deletion is dispatched before any config await so generation invalidation precedes outstanding work.                                                                            | Lifecycle evidence must follow the transition boundary; nearby wall-clock values or `http.span` values are not ownership identifiers and were not used as such.                                                             | Source inspection: `src/session-memory.ts:691-695`; no runtime transition change.                                                     |
+| Timestamp invariant               | V1 recovery requires `nextTimestamp > timestamp`; V2 shutdown and stream-disconnect exceptions require `timestamp(entry) >= cleanupStartedAt`.                                                             | The accepted value is the recorded cleanup boundary (or a later event), never a fabricated wall-clock replacement; the intermediate interruption remains outside the final-shutdown allowance unless explicitly correlated. | Source inspection: `scripts/v1-diagnostic-policy.ts:138-147` and `scripts/v2-diagnostic-policy.ts:243-273`; no timestamp replacement. |
+| Cleanup and scope                 | Host PIDs `261169` and the socket were gone after shutdown. Cost was `0`; the product hash and all 72 artifact hashes remained unchanged.                                                                  | Cleanup evidence supports this bounded run only and does not establish universal host cleanup.                                                                                                                              | PASS for the retained run; no build/live command run for this documentation-only update.                                              |
+
+The run therefore closes the specific intermediate-respawn/lifecycle ambiguity
+for the exercised route without weakening strict diagnostics. It does not
+establish a full literal-keyboard acceptance claim, an inner-CLI identity
+claim, or an `/stm` API implementation. The evidence path and prior failed
+attempts are retained as historical records.
+
+Investigation artifact:
+`/home/dev/workspace/opencode-work/stm-readiness-improvements/2026-10-12--v2-stream-lifecycle.html`
+
 # Addendum — strict V2 diagnostic requalification (2026-10-12)
 
 The V2 diagnostic policy was tested against 47 focused cases in the pure

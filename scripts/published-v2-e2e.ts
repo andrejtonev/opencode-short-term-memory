@@ -2445,28 +2445,89 @@ workflow: try {
   await waitForUpdate(resetSession.id, resetSeed.assistantID);
   const resetMemoryPath = join(env.PROBE_MEMORY_DIR!, `session_${resetSession.id}.md`);
   const resetCheckpointPath = join(env.PROBE_MEMORY_DIR!, "checkpoints", `${resetSession.id}.last-message-id.txt`);
-  const resetTuiCommand = [
-    "/usr/bin/timeout",
-    "--kill-after=2s",
-    `${Math.floor(remaining(60_000) / 1000)}s`,
-    binary,
-    "--server",
-    endpoint,
-    "--session",
-    resetSession.id,
-  ]
-    .map(quote)
-    .join(" ");
-  await terminal(["respawn-pane", "-k", "-t", "published:0.0", "-c", project, resetTuiCommand]);
+  const resetTuiNavigationScreens: string[] = [];
+  const captureResetTuiScreen = async (name: string) => {
+    const screen = (await terminal(["capture-pane", "-p", "-t", "published:0.0"])).stdout;
+    await save(name, screen);
+    resetTuiNavigationScreens.push(join(root, name));
+    return screen;
+  };
+  const panePIDBefore = Number(
+    (await terminal(["display-message", "-p", "-t", "published:0.0", "#{pane_pid}"])).stdout.trim(),
+  );
+  assert.ok(Number.isInteger(panePIDBefore) && panePIDBefore > 0, "Unable to capture reset TUI pane PID");
+  try {
+    process.kill(panePIDBefore, 0);
+  } catch {
+    assert.fail(`Reset TUI pane process ${panePIDBefore} does not exist before navigation`);
+  }
+  // Native command dialogs are dismissed by nativeCommand; this single Escape is harmless
+  // if the compaction status dialog has already closed and prevents stale dialog focus.
+  await terminal(["send-keys", "-t", "published:0.0", "Escape"]);
+  await Bun.sleep(200);
+  await captureResetTuiScreen("reset-before-command-palette-screen.txt");
+  // Send Ctrl-P as the raw 0x10 byte so the keyboard parser can settle Escape
+  // before deciding whether this is a meta/control chord.
+  await terminal(["send-keys", "-t", "published:0.0", "-H", "10"]);
   await wait(
     20_000,
     async () => {
-      const screen = (await terminal(["capture-pane", "-p", "-t", "published:0.0"])).stdout;
-      await save("reset-route-screen.txt", screen);
-      return screen.includes(resetSession.title!);
+      const screen = await captureResetTuiScreen("reset-command-palette-screen.txt");
+      return screen.includes("Commands") && screen.includes("Switch session");
     },
-    "Actual tmux TUI did not show fresh reset session route",
+    "Actual tmux TUI did not show the native command palette with Switch session",
   );
+  await terminal(["send-keys", "-t", "published:0.0", "-l", "Switch session"]);
+  await wait(
+    20_000,
+    async () => {
+      const screen = await captureResetTuiScreen("reset-command-selection-screen.txt");
+      return screen.includes("Commands") && screen.includes("Switch session");
+    },
+    "Native command palette did not show the Switch session option",
+  );
+  await terminal(["send-keys", "-t", "published:0.0", "Enter"]);
+  await wait(
+    20_000,
+    async () => (await captureResetTuiScreen("reset-session-picker-screen.txt")).includes("Sessions"),
+    "Actual tmux TUI did not show the native Sessions dialog",
+  );
+  await terminal(["send-keys", "-t", "published:0.0", "-l", resetSession.title!]);
+  await wait(
+    20_000,
+    async () => {
+      const screen = await captureResetTuiScreen("reset-session-selection-screen.txt");
+      return screen.includes("Sessions") && screen.includes(resetSession.title!);
+    },
+    "Native Sessions dialog did not show the exact reset session title",
+  );
+  await terminal(["send-keys", "-t", "published:0.0", "Enter"]);
+  await wait(
+    20_000,
+    async () => {
+      const screen = await captureResetTuiScreen("reset-route-screen.txt");
+      return screen.includes(resetSession.title!) && !screen.includes("Sessions");
+    },
+    "Actual tmux TUI did not show fresh reset session route after dismissing picker",
+  );
+  const panePIDAfter = Number(
+    (await terminal(["display-message", "-p", "-t", "published:0.0", "#{pane_pid}"])).stdout.trim(),
+  );
+  assert.equal(panePIDAfter, panePIDBefore, "Reset session navigation restarted the TUI pane");
+  try {
+    process.kill(panePIDAfter, 0);
+  } catch {
+    assert.fail(`Reset TUI pane process ${panePIDAfter} does not exist after navigation`);
+  }
+  evidence.resetTuiNavigation = {
+    method: "keyboard-command-palette",
+    escapeSettlementMs: 200,
+    beforePID: panePIDBefore,
+    afterPID: panePIDAfter,
+    screens: resetTuiNavigationScreens,
+    sessionID: resetSession.id,
+    title: resetSession.title,
+  };
   const resetEvidence = {
     verdict: "FAIL",
     sessionID: resetSession.id,
