@@ -655,6 +655,7 @@ workflow: try {
   evidence.dialogs = dialogs;
   const keyboardUsage: object[] = [];
   evidence.keyboardUsage = keyboardUsage;
+  const finalRequiredKeyboardLiterals = ["/stm status", "/stm show", "/stm ", "/stm settings", "/stm logs"] as const;
   type DialogSpec = { text: string; title: string; lines: string[]; screenName: string; sessionID: string };
   async function verifyDialog({ text, title, lines, screenName }: DialogSpec) {
     let renderedScreen = "";
@@ -2133,12 +2134,25 @@ workflow: try {
     unchanged: true,
     manualLogRows,
   };
-  await nativeCommand("show", "STM show", [
-    "## Session Memory",
-    "### User Instructions",
-    "STM_PROBE_MEMORY_SENTINEL:shared-core-parity",
-  ]);
-  manualUsage.results.show = { verdict: "PASS", sessionID: session.id, persisted: true };
+  await keyboardCommand(
+    "/stm show",
+    "STM show",
+    [
+      "## Session Memory",
+      "### User Instructions",
+      "- Preserve the user decision to use port 7319 for project cobalt.",
+      "### Long Horizon Context",
+      "- Project cobalt uses port 7319.",
+      "### Decisions",
+      "- Use port 7319.",
+      "### Conclusions",
+      "- STM_PROBE_MEMORY_SENTINEL:shared-core-parity",
+      "### Active References",
+      "- Project cobalt.",
+    ],
+    "keyboard-show",
+  );
+  manualUsage.results.show = { verdict: "PASS", sessionID: session.id, persisted: true, method: "keyboard" };
   await keyboardCommand(
     "/stm ",
     "STM status",
@@ -2194,7 +2208,12 @@ workflow: try {
   assert.ok(exactSkip, "Manual update did not produce an exact session-scoped skip row for logs");
   const renderedLogs = await (async () => {
     const before = readFileSync(productionLogPath, "utf8").split(/\r?\n/).filter(Boolean).length;
-    const screen = await nativeCommand("logs", "STM logs", ["event", JSON.stringify(exactSkip)], "logs");
+    const screen = await keyboardCommand(
+      "/stm logs",
+      "STM logs",
+      ["event", JSON.stringify(exactSkip)],
+      "keyboard-logs",
+    );
     return { before, rows: readFileSync(productionLogPath, "utf8").split(/\r?\n/).filter(Boolean), screen };
   })();
   manualUsage.results.logs = {
@@ -2202,6 +2221,7 @@ workflow: try {
     exactSessionSkip: exactSkip,
     persistedRows: renderedLogs.rows.length,
     renderedScreen: renderedLogs.screen,
+    method: "keyboard",
   };
   const followupInvocations = sharedCore.rawTelemetry.followup.rawRequests.filter(
     (row) => !isSummary(normalizeRequest(row)),
@@ -2925,6 +2945,23 @@ workflow: try {
       "PASS",
       `Missing or failed manual usage command: ${key}`,
     );
+  assert.equal(
+    keyboardUsage.length,
+    finalRequiredKeyboardLiterals.length,
+    "Unexpected number of keyboard command records",
+  );
+  for (const literal of finalRequiredKeyboardLiterals) {
+    assert.equal(
+      keyboardUsage.filter((record) => (record as { literalSent?: unknown }).literalSent === literal).length,
+      1,
+      `Keyboard command literal was not represented exactly once: ${JSON.stringify(literal)}`,
+    );
+  }
+  evidence.finalKeyboardUsage = {
+    expectedKeyboardUsageCount: finalRequiredKeyboardLiterals.length,
+    requiredLiterals: finalRequiredKeyboardLiterals,
+    actualKeyboardUsageCount: keyboardUsage.length,
+  };
   manualUsage.verdict = "PASS";
   advancedUpdates.phases.push({ name: "reset-boundary", ...resetEvidence });
   advancedUpdates.verdict = "PASS";

@@ -1,5 +1,53 @@
 # V1 Manual Acceptance
 
+# Addendum — native V2 `/stm show` and `/stm logs` keyboard qualification (2026-10-13)
+
+The bounded native V2 run `v2-A3XI0Q` completed in `55.829s`. Its retained
+evidence is `/home/dev/workspace/stm-published-rc-e2e/v2-A3XI0Q/evidence.json`.
+The run exercised all five literal keyboard routes now covered by this
+iteration: `/stm status`, `/stm show`, `/stm ` (the trailing-space default
+route), `/stm settings`, and `/stm logs`. The candidate, product version, and
+release surface were unchanged; this record is an acceptance addendum, not a
+publication or release claim.
+
+The status, show, default, settings, and logs literals each rendered exactly
+one expected result. The composer and prompt-history evidence preserved the
+literal input and empty attachment arrays. The immediate pre-Enter and
+baseline-dialog assertions were absent, and each route required one `Enter`.
+No model calls, new session user text, or durable user transcript text were
+created. Existing memory/checkpoint bytes were preserved.
+
+The show result included the complete ordered sections, port, sentinel, and
+the existing-memory-only condition. This evidence does not qualify show
+behavior when memory is absent. The logs result was validated from the actual
+rendered screen: it contained the production skip JSON event with the matching
+session ID. A disk-only log-file observation was not accepted as rendered-log
+evidence.
+
+The retained run reports a clean strict diagnostic result: 37 valid STM rows,
+four expected errors, and zero unexpected, missing, duplicate, or parse issues.
+The process ID and socket were cleaned up, and cost was zero. The associated
+offline report records 985 tests and 4,301 assertions, with type, format, and
+gitleaks scanning clear; a parent-repository gitleaks report is not claimed by
+this addendum.
+
+### V2 show and logs qualification summary
+
+| Component/Logic Block                 | Current Findings/Hypothesis                                                                                                                                                                   | Implications                                                                                                                             | Verification Status                                                |
+| ------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
+| Five literal keyboard routes          | Status, show, trailing-space default, settings, and logs each rendered one expected result after literal input and one `Enter`; prompt history retained exact text and `pasted: []`.          | The evidence covers five bounded native routes, not blanket command-surface coverage.                                                    | PASS in `v2-A3XI0Q`; duration `55.829s`.                           |
+| Show rendering and state preservation | Show rendered all ordered sections, the port, and sentinel against existing memory; checkpoint/memory bytes were unchanged.                                                                   | Existing-memory show is qualified without claiming absent-memory behavior or mutation semantics.                                         | PASS for existing memory only; absent-memory scope remains open.   |
+| Logs rendering                        | The rendered screen contained the production skip JSON event and matching session ID; a log file alone was explicitly insufficient.                                                           | Logs acceptance proves visible session-scoped rendering rather than disk-only emission.                                                  | PASS in retained evidence.                                         |
+| Prompt, dialog, and provider guards   | Baseline and immediate pre-Enter dialog checks were absent; each route used one Enter, with no model calls or new session user text.                                                          | The result is tied to settled native keyboard input and read-only behavior.                                                              | PASS; evidence retained at the path above.                         |
+| Strict diagnostics and cleanup        | Evidence retained 37 valid rows, four expected errors, zero unexpected/missing/duplicate/parse issues, and clean PID/socket teardown.                                                         | The five-route result did not weaken strict diagnostics or cleanup expectations.                                                         | PASS; cost `0`.                                                    |
+| Offline checks and remaining scope    | `985` tests and `4,301` assertions passed with type, format, and gitleaks scanning; setup, reset, update, absent-memory show, pending-delta compaction, and semantic quality remain separate. | This closes only the exercised five-route keyboard scope and does not claim parent-repository gitleaks or the remaining functional gaps. | PASS for reported offline checks; remaining scope explicitly open. |
+
+The actual evidence record is retained at
+`/home/dev/workspace/stm-published-rc-e2e/v2-A3XI0Q/evidence.json`. The
+investigation artifact is
+`/home/dev/workspace/opencode-work/stm-readiness-improvements/2026-10-13--v2-keyboard-show-logs.html`.
+No build, live tester, or commit was run for this documentation-only update.
+
 # Addendum — native V2 literal keyboard command requalification (2026-10-13)
 
 The latest bounded native V2 run `v2-MFJkkP` completed in `63.292s`. Its
