@@ -1,5 +1,54 @@
 # V1 Manual Acceptance
 
+# Addendum — native V2 literal keyboard command requalification (2026-10-13)
+
+The latest bounded native V2 run `v2-MFJkkP` completed in `63.292s`. Its
+retained evidence is `/home/dev/workspace/stm-published-rc-e2e/v2-MFJkkP/evidence.json`.
+The run used the unchanged candidate and preserved the existing product and
+policy surface. The strict functional diagnostic was clean: 37 valid STM rows,
+four expected failures, and zero unknown, missing, or duplicate rows. This
+record reports the actual five-run history for this iteration; it does not
+claim a larger total run count. An earlier code-first attempt failed during
+compilation and produced no execution result.
+
+The run exercised literal tmux input followed by one `Enter` for `/stm status`,
+`/stm ` (the trailing-space default route), and `/stm settings`. Each command
+rendered the expected native dialog or status output. The captured composer
+text and exact prompt-history JSON record confirm the submitted literals,
+including the default route's trailing space; each accepted command added one
+history entry with an empty `pasted` array. The immediate pre-Enter screen
+assertion found no stale STM dialog, and the baseline dialog assertion also
+passed. No provider/model calls occurred, no durable user transcript text was
+created, and memory and checkpoint bytes were unchanged.
+
+This closes only the three exercised literal keyboard routes. The existing
+keyboard gap for `/stm show` and `/stm logs` remains open, and `setup`/`reset`
+remain unconfirmed through the literal keyboard route. The existing API-based
+coverage for `show`, `logs`, `update`, `setup`, and `reset` is not rewritten as
+keyboard acceptance. Pending-delta compaction after the confirmed route and
+semantic-quality evaluation remain separate gaps. The product and policy
+surface remain unchanged.
+
+### Literal keyboard requalification summary
+
+| Component/Logic Block                | Current Findings/Hypothesis                                                                                                                                                                                                                                                                                            | Implications                                                                                                                                              | Verification Status                                                     |
+| ------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
+| Native literal routes                | `/stm status`, `/stm `, and `/stm settings` were typed through the native tmux composer and submitted with `Enter`; the expected status/settings output rendered.                                                                                                                                                      | These three routes have bounded literal-input evidence, not blanket command-surface coverage.                                                             | PASS in `v2-MFJkkP`; duration `63.292s`.                                |
+| Prompt and stale-dialog guards       | The composer captured the exact command text, including the default route's trailing space; each route added one exact prompt-history record with `pasted: []`. Baseline and immediate pre-Enter dialog checks were absent/false.                                                                                      | The acceptance result is tied to real prompt input and a settled composer, rather than API command submission or a stale dialog.                          | PASS; evidence retained at the path above.                              |
+| Durable state and provider isolation | Every accepted keyboard command produced an empty user-history delta, empty attachment data, no model/provider invocation, and unchanged memory/checkpoint bytes.                                                                                                                                                      | Read-only keyboard commands did not create durable user text, invoke inference, or mutate the memory checkpoint.                                          | PASS for the three exercised routes.                                    |
+| Strict diagnostics                   | The run retained 37 valid STM rows, four expected failures, and zero unknown, missing, or duplicate rows.                                                                                                                                                                                                              | The literal-input result did not require weakening the strict diagnostic policy.                                                                          | PASS; no unrelated host allowance was added.                            |
+| Dispatch and timestamp ordering      | Native lifecycle dispatch still invalidates deletion generation before awaiting configuration (`src/session-memory.ts:691-695`). The V2 shutdown and stream-disconnect exceptions require event timestamps `>= cleanupStartedAt` (`scripts/v2-diagnostic-policy.ts:243-273`); no replacement timestamp was introduced. | This documentation record preserves transition ordering and the recorded cleanup boundary rather than inferring ownership from wall-clock or span values. | Source inspection confirms the invariant; no product transition change. |
+| Remaining keyboard scope             | `/stm show` and `/stm logs` were not literal-keyboard qualified; `setup` and `reset` remain unconfirmed through that route. Existing API coverage remains separately documented.                                                                                                                                       | Full keyboard acceptance is still open, as are pending-delta compaction and semantic-quality checks.                                                      | OPEN; intentionally not claimed.                                        |
+
+The retained failed attempts are `iA8bsm` (whole-screen baseline false),
+`omC8VM` (prompt schema used `input` instead of `text`), `HX9aUC` (incorrect
+default ordered lines), and `DRvYwv` (passed before the stale-dialog guard was
+added). `MFJkkP` is the final passing record. No live or build command was run
+for this documentation-only update.
+
+Investigation artifact:
+`/home/dev/workspace/opencode-work/stm-readiness-improvements/2026-10-12--v2-keyboard-commands.html`
+
 # Addendum — V2 same-run lifecycle and keyboard requalification (2026-10-12)
 
 The bounded native V2 run `v2-MP3rIR` completed in `50.135s` against the

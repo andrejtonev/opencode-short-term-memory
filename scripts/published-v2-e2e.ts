@@ -653,20 +653,11 @@ workflow: try {
   );
   const dialogs: object[] = [];
   evidence.dialogs = dialogs;
-  async function nativeCommand(
-    text: string,
-    title: string,
-    lines: string[],
-    screenName = text.replaceAll(" ", "-"),
-    sessionID = session.id,
-  ) {
+  const keyboardUsage: object[] = [];
+  evidence.keyboardUsage = keyboardUsage;
+  type DialogSpec = { text: string; title: string; lines: string[]; screenName: string; sessionID: string };
+  async function verifyDialog({ text, title, lines, screenName }: DialogSpec) {
     let renderedScreen = "";
-    await call(
-      "session.command",
-      { sessionID, name: "stm", text },
-      (signal) => client.session.command({ sessionID, name: "stm", text }, { signal }),
-      45_000,
-    );
     await wait(
       8_000,
       async () => {
@@ -682,8 +673,207 @@ workflow: try {
       `Actual ${title} dialog missing expected rendered output`,
     );
     dialogs.push({ text, title, lines, screen: join(root, `${screenName}-screen.txt`), rendered: true });
+    return renderedScreen;
+  }
+  async function nativeCommand(
+    text: string,
+    title: string,
+    lines: string[],
+    screenName = text.replaceAll(" ", "-"),
+    sessionID = session.id,
+  ) {
+    let renderedScreen = "";
+    await call(
+      "session.command",
+      { sessionID, name: "stm", text },
+      (signal) => client.session.command({ sessionID, name: "stm", text }, { signal }),
+      45_000,
+    );
+    renderedScreen = await verifyDialog({ text, title, lines, screenName, sessionID });
     await terminal(["send-keys", "-t", "published:0.0", "Escape"]);
     await Bun.sleep(200);
+    return renderedScreen;
+  }
+  function composerBlockRows(screen: string) {
+    const rows = screen.split(/\r?\n/);
+    const border = rows.findLastIndex((row) => /^\s*╹/.test(row));
+    assert.ok(border >= 0, "Native composer bottom border was not present in the captured screen");
+    const composerRows: string[] = [];
+    for (let index = border - 1; index >= 0 && /^\s*┃/.test(rows[index]!); index--) {
+      composerRows.push(rows[index]!);
+    }
+    composerRows.reverse();
+    if (composerRows.at(-1)?.match(/\bBuild\s*[·•]/)) composerRows.pop();
+    return composerRows;
+  }
+  function composerText(screen: string) {
+    const composerRows = composerBlockRows(screen);
+    return composerRows
+      .map((row) => row.replace(/^\s*┃\s?/, "").trimEnd())
+      .join("\n")
+      .trim();
+  }
+  async function promptHistoryEntries(allowPartialTail = false) {
+    const paths = (await files(env.XDG_STATE_HOME!)).filter((path) => path.endsWith("prompt-history.jsonl")).sort();
+    const entries: { text: string; pasted: unknown[] }[] = [];
+    for (const path of paths) {
+      const lines = (await Bun.file(path).text()).split(/\r?\n/);
+      for (const [index, line] of lines.entries()) {
+        if (!line) continue;
+        let entry: unknown;
+        try {
+          entry = JSON.parse(line);
+        } catch (error) {
+          if (allowPartialTail && index === lines.length - 1) continue;
+          throw error;
+        }
+        if (
+          entry &&
+          typeof entry === "object" &&
+          "text" in entry &&
+          typeof entry.text === "string" &&
+          "pasted" in entry &&
+          Array.isArray(entry.pasted)
+        ) {
+          entries.push(entry as { text: string; pasted: unknown[] });
+        }
+      }
+    }
+    return { paths, entries };
+  }
+  async function keyboardCommand(
+    text: string,
+    title: string,
+    lines: string[],
+    screenName = text.replaceAll(" ", "-").replace(/-+$/, "-default"),
+    sessionID = session.id,
+  ) {
+    await terminal(["send-keys", "-t", "published:0.0", "Escape"]);
+    await Bun.sleep(200);
+    const activeSTMDialog = (screen: string) =>
+      screen
+        .split(/\r?\n/)
+        .some((row) => /^\s*STM (?:status|settings|show|logs|setup|update|reset)[ \t]+esc\s*$/i.test(row));
+    let baselineScreen = "";
+    await wait(
+      3_000,
+      async () => {
+        baselineScreen = (await terminal(["capture-pane", "-p", "-t", "published:0.0"])).stdout;
+        await save(`${screenName}-baseline-screen.txt`, baselineScreen);
+        return !activeSTMDialog(baselineScreen) && composerText(baselineScreen) === "";
+      },
+      "Native STM dialog did not settle away to an empty composer",
+    );
+    assert.equal(activeSTMDialog(baselineScreen), false, "Keyboard baseline retained an active STM dialog");
+    assert.equal(composerText(baselineScreen), "", "Keyboard command baseline was not an empty composer");
+    await terminal(["send-keys", "-t", "published:0.0", "-l", text]);
+    let typedScreen = "";
+    let typedComposer = "";
+    await wait(
+      8_000,
+      async () => {
+        typedScreen = (await terminal(["capture-pane", "-p", "-t", "published:0.0"])).stdout;
+        typedComposer = composerText(typedScreen);
+        return typedComposer === (text.endsWith(" ") ? text.trimEnd() : text);
+      },
+      `Native composer did not show the expected command buffer for ${JSON.stringify(text)}`,
+    );
+    const composerRows = composerBlockRows(typedScreen);
+    const autocompleteVisible = composerRows.some((line) =>
+      /autocomplete|suggestions?|No matching commands/i.test(line),
+    );
+    assert.equal(autocompleteVisible, false, `Autocomplete remained visible for ${JSON.stringify(text)}`);
+    const telemetryBefore = readTelemetry();
+    const historyBefore = await call("session.context", { sessionID }, (signal) =>
+      client.session.context({ sessionID }, { signal }),
+    );
+    const memoryBefore = readFileSync(memoryPath);
+    const checkpointBefore = readFileSync(checkpointPath);
+    const promptHistoryBefore = await promptHistoryEntries(true);
+    const preEnterScreen = (await terminal(["capture-pane", "-p", "-t", "published:0.0"])).stdout;
+    assert.equal(activeSTMDialog(preEnterScreen), false, "Keyboard command had an active STM dialog before Enter");
+    assert.equal(
+      composerText(preEnterScreen),
+      text.endsWith(" ") ? text.trimEnd() : text,
+      "Keyboard composer changed before Enter",
+    );
+    await terminal(["send-keys", "-t", "published:0.0", "Enter"]);
+    const renderedScreen = await verifyDialog({ text, title, lines, screenName, sessionID });
+    const telemetryAfter = readTelemetry();
+    const historyAfter = await call("session.context", { sessionID }, (signal) =>
+      client.session.context({ sessionID }, { signal }),
+    );
+    const historyBeforeIDs = new Set(historyBefore.map((message) => message.id));
+    const userHistoryDelta = historyAfter.filter(
+      (message) => message.type === "user" && !historyBeforeIDs.has(message.id),
+    );
+    let promptHistoryAfter = await promptHistoryEntries(true);
+    await wait(
+      3_000,
+      async () => {
+        promptHistoryAfter = await promptHistoryEntries(true);
+        const matching = promptHistoryAfter.entries.filter((entry) => entry.text === text);
+        const prior = promptHistoryBefore.entries.filter((entry) => entry.text === text);
+        return matching.length > prior.length;
+      },
+      `Prompt history did not persist the exact submitted literal ${JSON.stringify(text)}`,
+    );
+    promptHistoryAfter = await promptHistoryEntries(false);
+    assert.ok(promptHistoryAfter.paths.length > 0, "Native TUI prompt-history.jsonl was not created");
+    const matchingPromptHistory = promptHistoryAfter.entries.filter((entry) => entry.text === text);
+    const priorMatchingPromptHistory = promptHistoryBefore.entries.filter((entry) => entry.text === text);
+    const promptHistoryGrowth = matchingPromptHistory.length - priorMatchingPromptHistory.length;
+    assert.ok(
+      promptHistoryGrowth > 0 && promptHistoryGrowth <= 50,
+      "Prompt history growth exceeded the bounded allowance",
+    );
+    const promptHistoryEntry = matchingPromptHistory.at(-1)!;
+    assert.deepEqual(
+      promptHistoryEntry.pasted,
+      [],
+      "Accepted prompt-history record was not a deterministic command entry",
+    );
+    assert.deepEqual(
+      userHistoryDelta,
+      [],
+      `Keyboard command persisted user transcript text for ${JSON.stringify(text)}`,
+    );
+    assert.deepEqual(
+      readFileSync(memoryPath),
+      memoryBefore,
+      `Keyboard command changed memory bytes for ${JSON.stringify(text)}`,
+    );
+    assert.deepEqual(
+      readFileSync(checkpointPath),
+      checkpointBefore,
+      `Keyboard command changed checkpoint bytes for ${JSON.stringify(text)}`,
+    );
+    const invocations = telemetryAfter
+      .slice(telemetryBefore.length)
+      .filter((row) => row.event === "model.invocation" || row.event === "model.request");
+    assert.deepEqual(invocations, [], `Keyboard command invoked the provider for ${JSON.stringify(text)}`);
+    await terminal(["send-keys", "-t", "published:0.0", "Escape"]);
+    await Bun.sleep(200);
+    keyboardUsage.push({
+      method: "tmux-literal-type-enter",
+      literal: text,
+      literalSent: text,
+      composerBuffer: typedComposer,
+      baselineScreen,
+      baselineDialogAbsent: true,
+      preSubmitScreen: typedScreen,
+      screen: join(root, `${screenName}-screen.txt`),
+      autocompleteVisible,
+      postSubmitModelDelta: invocations,
+      historyUserDelta: userHistoryDelta,
+      promptHistoryPathsBefore: promptHistoryBefore.paths,
+      promptHistoryPathsAfter: promptHistoryAfter.paths,
+      promptHistoryGrowth,
+      promptHistoryRecord: { text: promptHistoryEntry.text, pasted: promptHistoryEntry.pasted },
+      memoryBytesUnchanged: true,
+      checkpointBytesUnchanged: true,
+      sessionID,
+    });
     return renderedScreen;
   }
   stages.load = {
@@ -1889,8 +2079,8 @@ workflow: try {
     .filter((row) => row.event === "v2_memory_update_committed" && row.sessionID === session.id);
   assert.ok(commits.some((row) => row.checkpointID === checkpoint));
   const logRowsBeforeManual = log.split(/\r?\n/).filter(Boolean).length;
-  await nativeCommand(
-    "",
+  await keyboardCommand(
+    "/stm status",
     "STM status",
     [
       "generation: v2",
@@ -1908,9 +2098,9 @@ workflow: try {
       `checkpoint: ${checkpoint}`,
       "updaterBusy: false",
     ],
-    "default",
+    "keyboard-status",
   );
-  manualUsage.results.default = { verdict: "PASS", arguments: "", sessionID: session.id };
+  manualUsage.results.status = { verdict: "PASS", sessionID: session.id, checkpoint, method: "keyboard" };
   await nativeCommand("update", "STM update", [
     "generation: v2",
     `sessionID: ${session.id}`,
@@ -1949,27 +2139,44 @@ workflow: try {
     "STM_PROBE_MEMORY_SENTINEL:shared-core-parity",
   ]);
   manualUsage.results.show = { verdict: "PASS", sessionID: session.id, persisted: true };
-  await nativeCommand("status", "STM status", [
-    "generation: v2",
-    `sessionID: ${session.id}`,
-    `memoryPath: ${memoryPath}`,
-    `checkpoint: ${checkpoint}`,
-    "updaterBusy: false",
-  ]);
-  manualUsage.results.status = { verdict: "PASS", sessionID: session.id, checkpoint };
-  await nativeCommand("settings", "STM settings", [
-    '"generation": "v2"',
-    '"resolvedConfig":',
-    '"memoryModel": ""',
-    `"summarizerMode": "${settings.summarizerMode}"`,
-    '"logMaxLines": 20000',
-    `"memoryDir": "${settings.memoryDir.replaceAll("\\", "\\\\")}"`,
-    '"effective":',
-    '"memoryModel": null',
-    '"memoryModelSelection": "inherited-current-session"',
-    `"summarizerMode": "${settings.summarizerMode}"`,
-    '"activeWithExplicitMemoryModel": "unsupported"',
-  ]);
+  await keyboardCommand(
+    "/stm ",
+    "STM status",
+    [
+      "generation: v2",
+      `enabled: ${settings.enabled}`,
+      `authoritative sessionID: ${session.id}`,
+      `memoryPath: ${memoryPath}`,
+      `checkpoint: ${checkpoint}`,
+      "updaterBusy: false",
+    ],
+    "keyboard-default",
+  );
+  manualUsage.results.default = {
+    verdict: "PASS",
+    arguments: "",
+    literal: "/stm ",
+    sessionID: session.id,
+    method: "keyboard",
+  };
+  await keyboardCommand(
+    "/stm settings",
+    "STM settings",
+    [
+      '"generation": "v2"',
+      '"resolvedConfig":',
+      '"memoryModel": ""',
+      `"summarizerMode": "${settings.summarizerMode}"`,
+      '"logMaxLines": 20000',
+      `"memoryDir": "${settings.memoryDir.replaceAll("\\", "\\\\")}"`,
+      '"effective":',
+      '"memoryModel": null',
+      '"memoryModelSelection": "inherited-current-session"',
+      `"summarizerMode": "${settings.summarizerMode}"`,
+      '"activeWithExplicitMemoryModel": "unsupported"',
+    ],
+    "keyboard-settings",
+  );
   manualUsage.results.settings = {
     verdict: "PASS",
     resolvedConfig: settings,
