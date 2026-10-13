@@ -154,7 +154,8 @@ const evidence: Record<string, unknown> = {
   runID,
   root,
   started: new Date(started).toISOString(),
-  investigationArtifact: "/home/dev/workspace/opencode-work/stm-readiness-improvements/2026-10-08--rc3-end-to-end.html",
+  investigationArtifact:
+    "/home/dev/workspace/opencode-work/stm-readiness-improvements/2026-10-13--full-stm-acceptance.html",
   limits: { outerMs: 350_000, internalMs: 320_000, cleanupReserveMs: 15_000 },
   spec,
   stages,
@@ -621,6 +622,15 @@ workflow: try {
       ),
   );
   evidence.sessionID = session.id;
+  const memoryPath = join(env.PROBE_MEMORY_DIR!, `session_${session.id}.md`);
+  const checkpointPath = join(env.PROBE_MEMORY_DIR!, "checkpoints", `${session.id}.last-message-id.txt`);
+  const readTelemetry = () =>
+    existsSync(env.PROBE_TELEMETRY_PATH!)
+      ? readFileSync(env.PROBE_TELEMETRY_PATH!, "utf8")
+          .split(/\r?\n/)
+          .filter(Boolean)
+          .map((line) => JSON.parse(line))
+      : [];
   const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
   const tuiCommand = [
     "/usr/bin/timeout",
@@ -655,7 +665,20 @@ workflow: try {
   evidence.dialogs = dialogs;
   const keyboardUsage: object[] = [];
   evidence.keyboardUsage = keyboardUsage;
-  const finalRequiredKeyboardLiterals = ["/stm status", "/stm show", "/stm ", "/stm settings", "/stm logs"] as const;
+  const finalRequiredKeyboardCases = [
+    { caseID: "setup", literal: "/stm setup" },
+    { caseID: "setup-confirm-true", literal: "/stm setup confirm true" },
+    { caseID: "setup-confirm-true-no-overwrite", literal: "/stm setup confirm true" },
+    { caseID: "keyboard-status", literal: "/stm status" },
+    { caseID: "keyboard-update", literal: "/stm update" },
+    { caseID: "keyboard-update-committed", literal: "/stm update" },
+    { caseID: "keyboard-show", literal: "/stm show" },
+    { caseID: "keyboard-default", literal: "/stm " },
+    { caseID: "keyboard-settings", literal: "/stm settings" },
+    { caseID: "keyboard-logs", literal: "/stm logs" },
+    { caseID: "reset-refusal", literal: "/stm reset" },
+    { caseID: "reset-confirmed", literal: "/stm reset confirm true" },
+  ] as const;
   type DialogSpec = { text: string; title: string; lines: string[]; screenName: string; sessionID: string };
   async function verifyDialog({ text, title, lines, screenName }: DialogSpec) {
     let renderedScreen = "";
@@ -748,6 +771,18 @@ workflow: try {
     lines: string[],
     screenName = text.replaceAll(" ", "-").replace(/-+$/, "-default"),
     sessionID = session.id,
+    options: {
+      memoryPath?: string;
+      checkpointPath?: string;
+      expectedPersistence?: "unchanged" | "caller-asserted";
+      verifyPersistence?: (
+        before: { memory: Buffer | null; checkpoint: Buffer | null },
+        after: { memory: Buffer | null; checkpoint: Buffer | null },
+      ) => void;
+      allowPromptHistoryDedup?: boolean;
+      allowSummary?: boolean;
+      expectedTelemetry?: (rows: ReturnType<typeof readTelemetry>) => void;
+    } = {},
   ) {
     await terminal(["send-keys", "-t", "published:0.0", "Escape"]);
     await Bun.sleep(200);
@@ -788,8 +823,12 @@ workflow: try {
     const historyBefore = await call("session.context", { sessionID }, (signal) =>
       client.session.context({ sessionID }, { signal }),
     );
-    const memoryBefore = readFileSync(memoryPath);
-    const checkpointBefore = readFileSync(checkpointPath);
+    const persistenceMemoryPath = options.memoryPath ?? join(env.PROBE_MEMORY_DIR!, `session_${sessionID}.md`);
+    const persistenceCheckpointPath =
+      options.checkpointPath ?? join(env.PROBE_MEMORY_DIR!, "checkpoints", `${sessionID}.last-message-id.txt`);
+    const snapshot = (path: string) => (existsSync(path) ? readFileSync(path) : null);
+    const memoryBefore = snapshot(persistenceMemoryPath);
+    const checkpointBefore = snapshot(persistenceCheckpointPath);
     const promptHistoryBefore = await promptHistoryEntries(true);
     const preEnterScreen = (await terminal(["capture-pane", "-p", "-t", "published:0.0"])).stdout;
     assert.equal(activeSTMDialog(preEnterScreen), false, "Keyboard command had an active STM dialog before Enter");
@@ -809,23 +848,35 @@ workflow: try {
       (message) => message.type === "user" && !historyBeforeIDs.has(message.id),
     );
     let promptHistoryAfter = await promptHistoryEntries(true);
-    await wait(
-      3_000,
-      async () => {
-        promptHistoryAfter = await promptHistoryEntries(true);
-        const matching = promptHistoryAfter.entries.filter((entry) => entry.text === text);
-        const prior = promptHistoryBefore.entries.filter((entry) => entry.text === text);
-        return matching.length > prior.length;
-      },
-      `Prompt history did not persist the exact submitted literal ${JSON.stringify(text)}`,
-    );
+    if (options.allowPromptHistoryDedup) {
+      await wait(
+        3_000,
+        async () => {
+          promptHistoryAfter = await promptHistoryEntries(true);
+          const matching = promptHistoryAfter.entries.filter((entry) => entry.text === text);
+          return matching.at(-1)?.text === text;
+        },
+        `Prompt history did not retain the exact submitted literal ${JSON.stringify(text)}`,
+      );
+    } else {
+      await wait(
+        3_000,
+        async () => {
+          promptHistoryAfter = await promptHistoryEntries(true);
+          const matching = promptHistoryAfter.entries.filter((entry) => entry.text === text);
+          const prior = promptHistoryBefore.entries.filter((entry) => entry.text === text);
+          return matching.length > prior.length;
+        },
+        `Prompt history did not persist the exact submitted literal ${JSON.stringify(text)}`,
+      );
+    }
     promptHistoryAfter = await promptHistoryEntries(false);
     assert.ok(promptHistoryAfter.paths.length > 0, "Native TUI prompt-history.jsonl was not created");
     const matchingPromptHistory = promptHistoryAfter.entries.filter((entry) => entry.text === text);
     const priorMatchingPromptHistory = promptHistoryBefore.entries.filter((entry) => entry.text === text);
     const promptHistoryGrowth = matchingPromptHistory.length - priorMatchingPromptHistory.length;
     assert.ok(
-      promptHistoryGrowth > 0 && promptHistoryGrowth <= 50,
+      promptHistoryGrowth >= 0 && promptHistoryGrowth <= 50,
       "Prompt history growth exceeded the bounded allowance",
     );
     const promptHistoryEntry = matchingPromptHistory.at(-1)!;
@@ -839,23 +890,37 @@ workflow: try {
       [],
       `Keyboard command persisted user transcript text for ${JSON.stringify(text)}`,
     );
-    assert.deepEqual(
-      readFileSync(memoryPath),
-      memoryBefore,
-      `Keyboard command changed memory bytes for ${JSON.stringify(text)}`,
-    );
-    assert.deepEqual(
-      readFileSync(checkpointPath),
-      checkpointBefore,
-      `Keyboard command changed checkpoint bytes for ${JSON.stringify(text)}`,
-    );
+    const memoryAfter = snapshot(persistenceMemoryPath);
+    const checkpointAfter = snapshot(persistenceCheckpointPath);
+    const expectedPersistence = options.expectedPersistence ?? "unchanged";
+    if (expectedPersistence === "unchanged") {
+      assert.deepEqual(memoryAfter, memoryBefore, `Keyboard command changed memory bytes for ${JSON.stringify(text)}`);
+      assert.deepEqual(
+        checkpointAfter,
+        checkpointBefore,
+        `Keyboard command changed checkpoint bytes for ${JSON.stringify(text)}`,
+      );
+    } else {
+      const verifyPersistence = options.verifyPersistence;
+      if (!verifyPersistence) throw new Error("Mutating keyboard action needs a persistence verifier");
+      verifyPersistence(
+        { memory: memoryBefore, checkpoint: checkpointBefore },
+        { memory: memoryAfter, checkpoint: checkpointAfter },
+      );
+    }
     const invocations = telemetryAfter
       .slice(telemetryBefore.length)
       .filter((row) => row.event === "model.invocation" || row.event === "model.request");
-    assert.deepEqual(invocations, [], `Keyboard command invoked the provider for ${JSON.stringify(text)}`);
+    if (options.expectedTelemetry) {
+      assert.equal(options.allowSummary, true, "Provider telemetry requires explicit summary allowance");
+      options.expectedTelemetry(invocations);
+    } else {
+      assert.deepEqual(invocations, [], `Keyboard command invoked the provider for ${JSON.stringify(text)}`);
+    }
     await terminal(["send-keys", "-t", "published:0.0", "Escape"]);
     await Bun.sleep(200);
     keyboardUsage.push({
+      caseID: screenName,
       method: "tmux-literal-type-enter",
       literal: text,
       literalSent: text,
@@ -871,11 +936,76 @@ workflow: try {
       promptHistoryPathsAfter: promptHistoryAfter.paths,
       promptHistoryGrowth,
       promptHistoryRecord: { text: promptHistoryEntry.text, pasted: promptHistoryEntry.pasted },
-      memoryBytesUnchanged: true,
-      checkpointBytesUnchanged: true,
+      memoryBytesUnchanged: expectedPersistence === "unchanged",
+      checkpointBytesUnchanged: expectedPersistence === "unchanged",
+      promptHistoryDeduplicated: promptHistoryGrowth === 0,
       sessionID,
     });
     return renderedScreen;
+  }
+  async function navigateTui(targetSession: { id: string; title?: string | null }, screenPrefix: string) {
+    const screens: string[] = [];
+    const capture = async (name: string) => {
+      const screen = (await terminal(["capture-pane", "-p", "-t", "published:0.0"])).stdout;
+      await save(`${screenPrefix}-${name}`, screen);
+      screens.push(join(root, `${screenPrefix}-${name}`));
+      return screen;
+    };
+    const beforePID = Number(
+      (await terminal(["display-message", "-p", "-t", "published:0.0", "#{pane_pid}"])).stdout.trim(),
+    );
+    assert.ok(Number.isInteger(beforePID) && beforePID > 0, "Unable to capture TUI pane PID");
+    process.kill(beforePID, 0);
+    await terminal(["send-keys", "-t", "published:0.0", "Escape"]);
+    await Bun.sleep(200);
+    await terminal(["send-keys", "-t", "published:0.0", "-H", "10"]);
+    await wait(
+      20_000,
+      async () => {
+        const screen = await capture("command-palette-screen.txt");
+        return screen.includes("Commands") && screen.includes("Switch session");
+      },
+      "Actual tmux TUI did not show the native command palette with Switch session",
+    );
+    await terminal(["send-keys", "-t", "published:0.0", "-l", "Switch session"]);
+    await wait(
+      20_000,
+      async () => {
+        const screen = await capture("command-selection-screen.txt");
+        return screen.includes("Commands") && screen.includes("Switch session");
+      },
+      "Native command palette did not show the Switch session option",
+    );
+    await terminal(["send-keys", "-t", "published:0.0", "Enter"]);
+    await wait(
+      20_000,
+      async () => (await capture("session-picker-screen.txt")).includes("Sessions"),
+      "Native Sessions dialog missing",
+    );
+    await terminal(["send-keys", "-t", "published:0.0", "-l", targetSession.title!]);
+    await wait(
+      20_000,
+      async () => {
+        const screen = await capture("session-selection-screen.txt");
+        return screen.includes("Sessions") && screen.includes(targetSession.title!);
+      },
+      "Native Sessions dialog did not show the exact target session title",
+    );
+    await terminal(["send-keys", "-t", "published:0.0", "Enter"]);
+    await wait(
+      20_000,
+      async () => {
+        const screen = await capture("route-screen.txt");
+        return screen.includes(targetSession.title!) && !screen.includes("Sessions");
+      },
+      "Native TUI did not show the target session route",
+    );
+    const afterPID = Number(
+      (await terminal(["display-message", "-p", "-t", "published:0.0", "#{pane_pid}"])).stdout.trim(),
+    );
+    assert.equal(afterPID, beforePID, "Session navigation restarted the TUI pane");
+    process.kill(afterPID, 0);
+    return { beforePID, afterPID, screens };
   }
   stages.load = {
     verdict: "PASS",
@@ -887,23 +1017,33 @@ workflow: try {
   const setupPath = join(project, ".opencode", "stm.jsonc");
   assert.ok(!existsSync(setupPath));
   evidence.setupInitialConfig = { path: setupPath, exists: false };
-  await nativeCommand("setup", "STM setup", [
-    "Refused: setup not run. Use /stm setup confirm true with exact literal confirmation.",
-  ]);
+  await keyboardCommand(
+    "/stm setup",
+    "STM setup",
+    ["Refused: setup not run. Use /stm setup confirm true with exact literal confirmation."],
+    "setup",
+  );
   assert.ok(!existsSync(setupPath), "Unconfirmed native setup wrote config");
   evidence.setupRefusal = { configExistsAfter: false };
-  await nativeCommand("setup confirm true", "STM setup", [`Created project example config at ${setupPath}.`]);
+  await keyboardCommand(
+    "/stm setup confirm true",
+    "STM setup",
+    [`Created project example config at ${setupPath}.`],
+    "setup-confirm-true",
+  );
   assert.ok(existsSync(setupPath), "Confirmed native setup created no config");
   const createdBytes = readFileSync(setupPath);
   const created = createdBytes.toString("utf8");
   const createdSha256 = createHash("sha256").update(createdBytes).digest("hex");
   evidence.setupCreatedConfig = { path: setupPath, text: created, bytes: createdBytes.length, sha256: createdSha256 };
   await save("setup-created-stm.jsonc", created);
-  await nativeCommand(
-    "setup confirm true",
+  await keyboardCommand(
+    "/stm setup confirm true",
     "STM setup",
     [`No example config created: stm.jsonc already exists in ${dirname(setupPath)}.`],
     "setup-confirm-true-no-overwrite",
+    session.id,
+    { allowPromptHistoryDedup: true },
   );
   const repeatedBytes = readFileSync(setupPath);
   const repeatedSha256 = createHash("sha256").update(repeatedBytes).digest("hex");
@@ -917,13 +1057,6 @@ workflow: try {
   manualUsage.results.setupRefusal = { verdict: "PASS", configExistsAfter: false };
   manualUsage.results.setupCreate = { verdict: "PASS", path: setupPath, sha256: createdSha256 };
   manualUsage.results.setupNoOverwrite = { verdict: "PASS", sha256: repeatedSha256, bytesUnchanged: true };
-  const readTelemetry = () =>
-    existsSync(env.PROBE_TELEMETRY_PATH!)
-      ? readFileSync(env.PROBE_TELEMETRY_PATH!, "utf8")
-          .split(/\r?\n/)
-          .filter(Boolean)
-          .map((line) => JSON.parse(line))
-      : [];
   const setupTelemetry = readTelemetry();
   const setupInvocations = setupTelemetry.filter(
     (row) => row.event === "model.invocation" || row.event === "model.request",
@@ -1004,6 +1137,16 @@ workflow: try {
           .map((line) => JSON.parse(line))
       : [];
   const telemetryRowsFor = (startRow: number) => readTelemetry().slice(startRow);
+  const strictUtcTimestamp = (fieldName: string, value: unknown, label: string): number => {
+    if (typeof value !== "string") assert.fail(`${label} lacks the required ${fieldName} timestamp`);
+    assert.match(
+      value,
+      /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/,
+      `${label}.${fieldName} is not strict absolute UTC`,
+    );
+    assert.equal(new Date(value).toISOString(), value, `${label}.${fieldName} is not canonical UTC`);
+    return Date.parse(value);
+  };
   async function waitForUpdate(sessionID: string, checkpointID: string, max = 15_000) {
     try {
       await wait(
@@ -1684,8 +1827,6 @@ workflow: try {
     result.verdict = "PASS";
     cleanIsolation.verdict = phase === "explicit-opt-in-followup" ? "PASS" : "PENDING";
   }
-  const memoryPath = join(env.PROBE_MEMORY_DIR!, `session_${session.id}.md`);
-  const checkpointPath = join(env.PROBE_MEMORY_DIR!, "checkpoints", `${session.id}.last-message-id.txt`);
   function normalizeRequest(row: ReturnType<typeof readTelemetry>[number]): ProviderRequest {
     assert.equal(typeof row.details?.prompt, "string", "Provider prompt telemetry missing");
     const messages = JSON.parse(row.details.prompt);
@@ -2102,16 +2243,21 @@ workflow: try {
     "keyboard-status",
   );
   manualUsage.results.status = { verdict: "PASS", sessionID: session.id, checkpoint, method: "keyboard" };
-  await nativeCommand("update", "STM update", [
-    "generation: v2",
-    `sessionID: ${session.id}`,
-    "update: skipped",
-    "reason: no_assistant_in_delta",
-    "source: durable-visible-text",
-    'progress: cumulative-invocation {"checkpointedChunks":0,"checkpointedMessages":0,"persistedPartialFragments":0}',
-    "rollback: not-applicable",
-    "detail: none",
-  ]);
+  await keyboardCommand(
+    "/stm update",
+    "STM update",
+    [
+      "generation: v2",
+      `sessionID: ${session.id}`,
+      "update: skipped",
+      "reason: no_assistant_in_delta",
+      "source: durable-visible-text",
+      'progress: cumulative-invocation {"checkpointedChunks":0,"checkpointedMessages":0,"persistedPartialFragments":0}',
+      "rollback: not-applicable",
+      "detail: none",
+    ],
+    "keyboard-update",
+  );
   assert.equal(readFileSync(memoryPath, "utf8"), memory, "No-delta manual update changed memory");
   assert.deepEqual(readFileSync(checkpointPath), checkpointBytes, "No-delta manual update changed checkpoint bytes");
   const manualLogRows = readFileSync(productionLogPath, "utf8")
@@ -2665,6 +2811,281 @@ workflow: try {
   assert.deepEqual(readFileSync(memoryPath), compactionMemory, "Compaction changed checkpointed memory");
   assert.deepEqual(readFileSync(checkpointPath), compactionCheckpoint, "Compaction changed checkpoint bytes");
   compactionEvidence.verdict = "PASS";
+  // These two fresh-session probes deliberately start with automatic updates disabled.  The
+  // seed is therefore a real durable turn, but it cannot manufacture a memory/checkpoint
+  // before the user-visible action under test.
+  const keyboardCommittedEvidence = { verdict: "PENDING", sessionID: "", seed: {}, action: {} } as Record<
+    string,
+    unknown
+  >;
+  const pendingDeltaCompactionEvidence = { verdict: "PENDING", sessionID: "", seed: {}, action: {} } as Record<
+    string,
+    unknown
+  >;
+  evidence.manualCommittedUpdate = keyboardCommittedEvidence;
+  evidence.pendingDeltaCompaction = pendingDeltaCompactionEvidence;
+  const gapOriginalSettings = { ...settings };
+  // Keep this oracle independent from product normalizeMemory: persistence carries the
+  // format marker, followed by the canonical fixture body and exactly one final newline.
+  const expectedGapMemory = Buffer.from(`<!-- stm:v1 -->\n${sharedCoreScenario.memoryResponse.trim()}\n`, "utf8");
+  const setGapSettings = async (enabled: boolean) => {
+    Object.assign(settings, {
+      enabled,
+      debounceMs: 120_000,
+      memoryModel: "",
+      sideSessionRetries: 0,
+      cleanFallbackToActiveSession: false,
+      debug: true,
+      injectInSubagents: true,
+      summarizerMode: "clean",
+      logMaxLines: 20_000,
+    });
+    await Bun.write(setupPath, JSON.stringify(settings, null, 2));
+  };
+  const seedGapSession = async (title: string) => {
+    await setGapSettings(false);
+    const gapSession = await createUpdateSession(title);
+    const seedPrompt = `${sharedCoreScenario.initialPrompt}\nSTM_GAP_SEED:${runID}`;
+    const telemetryBefore = readTelemetry().length;
+    const seed = await promptUpdateSession(gapSession.id, seedPrompt);
+    const seedRows = telemetryRowsFor(telemetryBefore);
+    const seedAssistant = seed.history.find((message) => message.id === seed.assistantID);
+    assert.ok(seedAssistant?.type === "assistant", "Settled seed history lacks its native assistant record");
+    const seedAssistantText = seedAssistant.content
+      .filter((part) => part.type === "text")
+      .map((part) => part.text)
+      .join("");
+    assert.equal(
+      seedAssistantText,
+      sharedCoreScenario.assistantText,
+      "Native seed assistant differs from fixture oracle",
+    );
+    const seedVisibleMessages = seed.history.filter(
+      (message) => message.type === "user" || message.type === "assistant",
+    );
+    assert.equal(seedVisibleMessages.length, 2, "Fresh seed must contain exactly one durable user/assistant turn");
+    const memoryPathForSession = join(env.PROBE_MEMORY_DIR!, `session_${gapSession.id}.md`);
+    const checkpointPathForSession = join(env.PROBE_MEMORY_DIR!, "checkpoints", `${gapSession.id}.last-message-id.txt`);
+    assert.equal(seedRows.filter(isMemoryUpdateInvocation).length, 0, "Disabled seed invoked the memory summarizer");
+    assert.equal(
+      productionRows().filter((row) => row.event === "v2_memory_update_committed" && row.sessionID === gapSession.id)
+        .length,
+      0,
+    );
+    assert.equal(existsSync(memoryPathForSession), false, "Disabled seed created a memory artifact");
+    assert.equal(existsSync(checkpointPathForSession), false, "Disabled seed created a memory checkpoint");
+    return {
+      gapSession,
+      seed,
+      seedPrompt,
+      seedAssistantText,
+      seedVisibleMessageCount: seedVisibleMessages.length,
+      telemetryBefore,
+      memoryPathForSession,
+      checkpointPathForSession,
+    };
+  };
+  const findDurableMessage = async (sessionID: string, targetID: string) => {
+    let cursor: string | undefined;
+    for (let pageIndex = 0; pageIndex < 5; pageIndex++) {
+      const input = { sessionID, limit: 200, ...(cursor === undefined ? { order: "asc" as const } : { cursor }) };
+      const page = await call("message.list", input, (signal) => client.message.list(input, { signal }));
+      const target = page.data.find((message) => message.id === targetID);
+      if (target) return target;
+      cursor = page.cursor.next ?? undefined;
+      if (!cursor || page.data.length === 0) break;
+    }
+    return undefined;
+  };
+  try {
+    const committed = await seedGapSession(`Keyboard committed V2 ${runID.slice(0, 8)}`);
+    keyboardCommittedEvidence.sessionID = committed.gapSession.id;
+    keyboardCommittedEvidence.seed = {
+      prompt: committed.seedPrompt,
+      assistantID: committed.seed.assistantID,
+      telemetryRows: telemetryRowsFor(committed.telemetryBefore).length,
+    };
+    await setGapSettings(true);
+    await navigateTui(committed.gapSession, "keyboard-committed");
+    const committedRowsBefore = readTelemetry().length;
+    const committedActionStarted = Date.now();
+    await keyboardCommand(
+      "/stm update",
+      "STM update",
+      [
+        "generation: v2",
+        `sessionID: ${committed.gapSession.id}`,
+        "update: committed",
+        "reason: delta_exhausted",
+        "source: durable-visible-text",
+        'progress: cumulative-invocation {"checkpointedChunks":1,"checkpointedMessages":2,"persistedPartialFragments":0}',
+        "rollback: not-applicable",
+        "detail: none",
+      ],
+      "keyboard-update-committed",
+      committed.gapSession.id,
+      {
+        memoryPath: committed.memoryPathForSession,
+        checkpointPath: committed.checkpointPathForSession,
+        expectedPersistence: "caller-asserted",
+        allowSummary: true,
+        verifyPersistence: (before, after) => {
+          assert.equal(before.memory, null);
+          assert.equal(before.checkpoint, null);
+          assert.deepEqual(after.memory, expectedGapMemory);
+          assert.deepEqual(after.checkpoint, Buffer.from(`${committed.seed.assistantID}\n`, "utf8"));
+        },
+        expectedTelemetry: (rows) => {
+          assert.equal(rows.filter(isMemoryUpdateInvocation).length, 1);
+          assert.equal(
+            rows.filter((row) => row.event === "model.invocation" && !isMemoryUpdateInvocation(row)).length,
+            0,
+          );
+          const summary = rows.find(isMemoryUpdateInvocation)!;
+          const request = normalizeRequest(summary);
+          const delta = `USER:\n${committed.seedPrompt}\n\n---\n\nASSISTANT:\n${committed.seedAssistantText}`;
+          const update = request.messages.find((message) => message.text.includes("<conversation_update>"));
+          assert.ok(update?.text.includes(delta), "Committed keyboard summary did not contain the exact settled delta");
+          assert.ok(!update?.text.includes("stm_memory_"), "Committed keyboard summary received native tool context");
+        },
+      },
+    );
+    const committedRows = telemetryRowsFor(committedRowsBefore);
+    assert.ok(
+      Date.now() - committedActionStarted < 90_000,
+      "Committed keyboard action exceeded the bounded debounce window",
+    );
+    const commit = productionRows().find(
+      (row) => row.event === "v2_memory_update_committed" && row.sessionID === committed.gapSession.id,
+    );
+    assert.ok(commit, "Keyboard update did not emit a production commit");
+    assert.ok(
+      commit.checkpointID === committed.seed.assistantID,
+      "Keyboard commit did not checkpoint the latest assistant",
+    );
+    keyboardCommittedEvidence.action = {
+      rows: committedRows,
+      commit,
+      memory: readFileSync(committed.memoryPathForSession, "utf8"),
+      checkpoint: readFileSync(committed.checkpointPathForSession, "utf8").trim(),
+    };
+    keyboardCommittedEvidence.verdict = "PASS";
+
+    const pending = await seedGapSession(`Pending compaction V2 ${runID.slice(0, 8)}`);
+    pendingDeltaCompactionEvidence.sessionID = pending.gapSession.id;
+    pendingDeltaCompactionEvidence.seed = {
+      prompt: pending.seedPrompt,
+      assistantID: pending.seed.assistantID,
+      assistantText: pending.seedAssistantText,
+    };
+    await setGapSettings(true);
+    const pendingStart = readTelemetry().length;
+    const pendingProductionBefore = productionRows();
+    const compactedPending = await call("session.compact", { sessionID: pending.gapSession.id }, (signal) =>
+      client.session.compact({ sessionID: pending.gapSession.id }, { signal }),
+    );
+    await call(
+      "session.wait",
+      { sessionID: pending.gapSession.id },
+      (signal) => client.session.wait({ sessionID: pending.gapSession.id }, { signal }),
+      30_000,
+    );
+    const pendingRows = telemetryRowsFor(pendingStart);
+    const pendingProductionAfter = productionRows();
+    const pendingProductionRows = pendingProductionAfter.slice(pendingProductionBefore.length);
+    const pendingSummary = pendingRows.filter(isMemoryUpdateInvocation);
+    assert.equal(pendingSummary.length, 1, "Pending compaction did not generate exactly one memory summary");
+    assert.equal(
+      pending.seed.history.filter((message) => message.type === "user" || message.type === "assistant").length,
+      2,
+    );
+    const pendingRequest = normalizeRequest(pendingSummary[0]!);
+    const pendingUpdate = pendingRequest.messages.find((message) => message.text.includes("<conversation_update>"));
+    assert.ok(
+      pendingUpdate?.text.includes(`USER:\n${pending.seedPrompt}\n\n---\n\nASSISTANT:\n${pending.seedAssistantText}`),
+      "Pending compaction summary delta was not exact",
+    );
+    assert.deepEqual(
+      readFileSync(pending.checkpointPathForSession),
+      Buffer.from(`${pending.seed.assistantID}\n`, "utf8"),
+      "Pending compaction did not checkpoint the seed assistant before compaction",
+    );
+    const pendingCompactionRows = pendingRows.filter(
+      (row) => row.event === "model.request" && row.requestKind === "compaction",
+    );
+    assert.equal(pendingCompactionRows.length, 1, "Pending compaction model request missing or repeated");
+    const pendingCommits = pendingProductionRows.filter(
+      (row) => row.event === "v2_memory_update_committed" && row.sessionID === pending.gapSession.id,
+    );
+    assert.equal(pendingCommits.length, 1, "Pending compaction must emit exactly one fresh-session production commit");
+    const pendingCommit = pendingCommits[0]!;
+    assert.equal(pendingCommit.reason, "fresh_context");
+    assert.equal(pendingCommit.checkpointID, pending.seed.assistantID);
+    const pendingCommitTimestamp = strictUtcTimestamp("ts", pendingCommit.ts, "Pending compaction commit");
+    const pendingRequestTimestamp = strictUtcTimestamp(
+      "timestamp",
+      pendingCompactionRows[0]!.timestamp,
+      "Native compaction model request",
+    );
+    assert.ok(
+      pendingCommitTimestamp <= pendingRequestTimestamp,
+      "Pending-delta commit timestamp must not follow the native compaction request",
+    );
+    assert.ok(
+      pendingSummary[0]!.seq! < pendingCompactionRows[0]!.seq!,
+      "Compaction request preceded pending-delta checkpoint",
+    );
+    const pendingCompactionInvocations = pendingRows.filter(
+      (row) =>
+        row.event === "model.invocation" &&
+        row.details?.correlation?.requestID === pendingCompactionRows[0]!.details?.correlation?.requestID,
+    );
+    assert.equal(pendingCompactionInvocations.length, 1, "Pending compaction invocation missing or repeated");
+    const pendingCompactionRequest = normalizeRequest(pendingCompactionInvocations[0]!);
+    const pendingCompactionMemory = pendingCompactionRequest.messages.filter((message) =>
+      message.text.includes("[MEMORY_SYSTEM]"),
+    );
+    assert.equal(pendingCompactionMemory.length, 1, "Pending compaction lacked unique persisted SYSTEM memory");
+    assert.equal(
+      pendingCompactionMemory[0]!.text.slice(pendingCompactionMemory[0]!.text.indexOf("[MEMORY_SYSTEM]")).trimEnd(),
+      buildTaggedMemoryForInjection(expectedGapMemory.toString("utf8"), settings.maxMemoryLength).trimEnd(),
+      "Pending compaction SYSTEM memory differed from the fresh persisted memory",
+    );
+    assert.equal(compactedPending.type, "compaction");
+    const pendingDurable = await findDurableMessage(pending.gapSession.id, compactedPending.id);
+    assert.ok(pendingDurable?.type === "compaction");
+    assert.equal(pendingDurable.status, "completed");
+    assert.equal(pendingDurable.summary, PROBE_COMPACTION_SUMMARY);
+    assert.deepEqual(readFileSync(pending.memoryPathForSession), expectedGapMemory);
+    const pendingCallbackEnter = pendingRows.filter(
+      (row) => row.event === "callback.enter" && row.operation === "compaction",
+    );
+    const pendingCallbackExit = pendingRows.filter(
+      (row) => row.event === "callback.exit" && row.operation === "compaction" && row.outcome === "success",
+    );
+    assert.equal(pendingCallbackEnter.length, 1);
+    assert.equal(pendingCallbackExit.length, 1);
+    assert.ok(pendingCallbackEnter[0]!.seq! < pendingCallbackExit[0]!.seq!);
+    assert.ok(
+      pendingCallbackExit[0]!.seq! < pendingCompactionRows[0]!.seq!,
+      "Compaction callback exit must precede its native model request",
+    );
+    pendingDeltaCompactionEvidence.action = {
+      compactedID: compactedPending.id,
+      rows: pendingRows,
+      productionRowsBefore: pendingProductionBefore,
+      productionRowsAfter: pendingProductionAfter,
+      productionCommit: pendingCommit,
+      expectedProgress: { checkpointedMessages: 2, checkpointedChunks: 1, persistedPartialFragments: 0 },
+      durable: pendingDurable,
+      memory: readFileSync(pending.memoryPathForSession, "utf8"),
+      checkpoint: readFileSync(pending.checkpointPathForSession, "utf8").trim(),
+    };
+    pendingDeltaCompactionEvidence.verdict = "PASS";
+  } finally {
+    Object.assign(settings, gapOriginalSettings);
+    await Bun.write(setupPath, JSON.stringify(settings, null, 2));
+  }
   // Keep compaction template headings out of the reset fixture's prompt classification.
   const resetSession = await createUpdateSession(`Reset boundary V2 ${runID.slice(0, 8)}`);
   const resetSeedPrompt = `${sharedCoreScenario.initialPrompt}\nSTM_RESET_SEED:${runID}`;
@@ -2786,12 +3207,13 @@ workflow: try {
     resetSeed.assistantID,
     resetSeedPrompt,
   );
-  await nativeCommand(
-    "reset",
+  await keyboardCommand(
+    "/stm reset",
     "STM reset",
     ["Refused: reset not run. Use /stm reset confirm true with exact literal confirmation."],
     "reset-refusal",
     resetSession.id,
+    { memoryPath: resetMemoryPath, checkpointPath: resetCheckpointPath },
   );
   assert.deepEqual(readFileSync(resetMemoryPath), resetMemoryBefore, "Unconfirmed reset changed memory bytes");
   assert.deepEqual(
@@ -2842,8 +3264,8 @@ workflow: try {
   assert.ok(typeof resetAnchor === "string" && resetAnchor.trim(), "Reset snapshot lacks a last durable ID");
   assert.equal(resetHistory.filter((message) => message.id === resetAnchor).length, 1, "Reset anchor is not unique");
   resetEvidence.expectedBoundaryAnchor = resetAnchor;
-  await nativeCommand(
-    "reset confirm true",
+  await keyboardCommand(
+    "/stm reset confirm true",
     "STM reset",
     [
       "reset: completed",
@@ -2853,6 +3275,17 @@ workflow: try {
     ],
     "reset-confirmed",
     resetSession.id,
+    {
+      memoryPath: resetMemoryPath,
+      checkpointPath: resetCheckpointPath,
+      expectedPersistence: "caller-asserted",
+      verifyPersistence: (before, after) => {
+        assert.deepEqual(after.memory, Buffer.from(RESET_MEMORY_TEMPLATE, "utf8"));
+        assert.deepEqual(after.checkpoint, Buffer.alloc(0));
+        assert.notDeepEqual(after.memory, before.memory);
+        assert.notDeepEqual(after.checkpoint, before.checkpoint);
+      },
+    },
   );
   const resetBoundaryPath = join(
     env.PROBE_MEMORY_DIR!,
@@ -2947,19 +3380,24 @@ workflow: try {
     );
   assert.equal(
     keyboardUsage.length,
-    finalRequiredKeyboardLiterals.length,
+    finalRequiredKeyboardCases.length,
     "Unexpected number of keyboard command records",
   );
-  for (const literal of finalRequiredKeyboardLiterals) {
+  for (const { caseID, literal } of finalRequiredKeyboardCases) {
+    assert.equal(
+      keyboardUsage.filter((record) => (record as { caseID?: unknown }).caseID === caseID).length,
+      1,
+      `Keyboard command case was not represented exactly once: ${caseID}`,
+    );
     assert.equal(
       keyboardUsage.filter((record) => (record as { literalSent?: unknown }).literalSent === literal).length,
-      1,
-      `Keyboard command literal was not represented exactly once: ${JSON.stringify(literal)}`,
+      finalRequiredKeyboardCases.filter((item) => item.literal === literal).length,
+      `Keyboard command literal cardinality mismatch: ${JSON.stringify(literal)}`,
     );
   }
   evidence.finalKeyboardUsage = {
-    expectedKeyboardUsageCount: finalRequiredKeyboardLiterals.length,
-    requiredLiterals: finalRequiredKeyboardLiterals,
+    expectedKeyboardUsageCount: finalRequiredKeyboardCases.length,
+    requiredCases: finalRequiredKeyboardCases,
     actualKeyboardUsageCount: keyboardUsage.length,
   };
   manualUsage.verdict = "PASS";
@@ -2974,7 +3412,8 @@ workflow: try {
       "PASS: pending update cancelled on session removal with V2GenerationCancelledError/summarizer_cancelled; host completion or abort observed within 5s, then no commit or recreation of all four artifacts during bounded post-settlement observation; native provider abort not guaranteed",
     reset:
       "PASS: fresh settled session isolated from compaction; slash refusal preserved bytes; exact last-durable-record reset anchor, immediate template/empty checkpoint, and exact one-turn post-reset summary delta excluding old history",
-    compaction: "PASS: completed native compaction and exact production SYSTEM injection; pending-delta refresh NOTRUN",
+    compaction:
+      "PASS: completed native compaction and exact production SYSTEM injection; pending-delta refresh qualified",
   };
   const finalSession = await call("session.get", { sessionID: session.id }, (signal) =>
     client.session.get({ sessionID: session.id }, { signal }),

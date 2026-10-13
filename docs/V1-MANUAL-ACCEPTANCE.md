@@ -1,5 +1,85 @@
 # V1 Manual Acceptance
 
+# Addendum — final paired V1/V2 STM qualification (2026-10-13)
+
+The final paired qualification used the exact candidate
+`/home/dev/workspace/opencode-work/stm-readiness-improvements/final-product-pack-2026-10-13-Le4ITRvN/atonev-opencode-short-term-memory-1.4.0-rc.4.tgz`
+with SHA256
+`b4a4cf7ec856b9030f276a1f97a62c172754c624f656ad8f509ee3d1d9c2d9e1`.
+The bytes are identical to the earlier qualified artifact. Consumer
+`7OEy1C29` completed the paired run in `49.491s`; V1 run `v1-0Hdd64`
+completed in `60.376s`; and V2 run `v2-RejHYR`
+completed in `58.765s`. All functional, diagnostic, and cleanup gates passed.
+This is a bounded qualification record for these exact bytes, not a
+publication, registry, or final-release claim.
+
+V1 used API-created setup/seed operations only where the acceptance fixture
+requires them; no manual API action was used for the twelve functional cases.
+The V1 result is model-mediated and synthetic at the result boundary, so it is
+not human-TUI proof. The native task-tool, DCP, user-agent, model, and model
+tools paths were exercised as applicable by the fixture. V2 covered all twelve
+literal cases, including two repeated setup cases and two update cases. The
+update cases verified both no-op skipping and a real committed summary.
+
+Pending-delta compaction settled the delta before refresh. Its committed
+timestamp was `commit.ts <= model-request.timestamp`, and the lifecycle
+ordering was `enter < exit < request`. The exact summary delta contained the
+actual durable seed user/assistant observed text. The summary persisted two
+messages in one chunk, and the checkpoint fixture was persisted. The `show`
+assertion remained explicitly existing-memory-only.
+
+The paired diagnostic results were V1: 565 rows, zero errors, and zero
+snapshot warnings; V2: 42 rows, four expected errors, zero unexpected errors,
+zero parse failures, and zero residue. Cleanup was verified for both runs and
+cost was zero. The offline parent result reported 985 tests and 4,301
+assertions with type, build, and scan checks passing; the current repository
+diff contains only approximately 500 lines of new runner scenarios and does
+not change runtime product code.
+
+The mutation audit was valid rather than a syntax-only or early-failure check:
+the V1 native-summary mutation removed the summary provider call and was killed
+by the persisted-memory assertion (`v1-EJWsKu`), and the V1 checkpoint no-op
+mutation was killed by the exact checkpoint wait (`v1-ej1M30`). V2's active
+`input.system.push` injection was removed and the follow-up SYSTEM assertion
+killed the mutation (`v2-Z4K8Ry`); the actual compaction callback updater was
+removed and the pending-delta/no-summary assertion killed it (`v2-0Nmclv`);
+and a V2 reset no-op was killed by the reset dialog assertion after the initial
+timestamp defect was corrected (`v2-6Nr9QB`). Three earlier wrong-site V1
+mutations that were labelled V2 are explicitly adjudicated invalid and are not
+counted as evidence or false passes. Mutation activation and native syntax
+passed without relying on a fabricated early failure.
+
+### Final paired qualification summary
+
+| Component/Logic Block                | Current Findings/Hypothesis                                                                                                                                                                                                       | Implications                                                                                                                                   | Verification Status                                        |
+| ------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------- |
+| Exact candidate and paired consumers | The final tarball path and SHA256 above are byte-identical to the earlier artifact; consumer `7OEy1C29` ran V1 `v1-0Hdd64` and V2 `v2-RejHYR` with the recorded durations.                                                        | Results apply only to the identified unpublished RC4 bytes and bounded consumers.                                                              | PASS; no publication or new RC version claimed.            |
+| V1 functional scope                  | All twelve cases passed with native task-tool/DCP and model-mediated fixture coverage; API setup/seed was allowed, but no manual API action was used for the cases.                                                               | This qualifies the bounded functional V1 path, not human-TUI interaction or unbounded model semantics.                                         | PASS; synthetic-result and human-TUI limitations explicit. |
+| V2 functional scope                  | All twelve literal cases passed, including repeated setup, repeated update, no-op skip, real committed summary, reset, and pending-delta compaction.                                                                              | The tested V2 state transitions and persistence contracts are covered without claiming every registry or host variant.                         | PASS for the twelve bounded cases.                         |
+| Compaction and timestamp ordering    | Settled pending delta refreshed and committed; summary delta used actual durable seed/observed text, persisted two messages in one chunk, and checkpoint state. `commit.ts <= model-request.timestamp`; `enter < exit < request`. | The recorded timestamp is bounded by the request and transition sequence, not replaced with wall-clock time.                                   | PASS in `v2-RejHYR`; source invariant corroborated below.  |
+| Diagnostics and cleanup              | V1 retained 565 rows, zero errors, and zero snapshot warnings. V2 retained 42 rows, four expected errors, zero unexpected errors, zero parse failures, and zero residue. Both cleanups and zero cost were verified.               | Strict diagnostics and cleanup remain part of the qualification rather than a superficial functional pass.                                     | PASS for both paired runs.                                 |
+| Mutation audit                       | Valid mutations were killed for V1 summary persistence, V1 checkpoint waiting, V2 SYSTEM injection, V2 compaction callback/update, and V2 reset. Invalid wrong-site V1/V2 labels are excluded.                                    | The assertions detect the targeted faults; syntax/native activation passes are not mistaken for behavioral evidence.                           | PASS; mutation IDs retained above.                         |
+| Scope boundary and release state     | Real-model semantic quality, registry qualification, minimum-host coverage, unbounded variants, and literal human keyboard proof remain unclaimed.                                                                                | This record closes the completed bounded functional STM scope only; final release/publishing still requires separate product and release work. | PASS for stated scope; limitations remain explicit.        |
+
+The parser and transition invariants were independently checked before choosing
+the recorded ordering. V1 recovery requires the same session and operation,
+an approved recovery event, no error, and a strictly later timestamp
+(`nextTimestamp > timestamp`) in `scripts/v1-diagnostic-policy.ts:138-147`.
+V2 shutdown and stream-disconnect exceptions require exact event fields and a
+timestamp nondecreasing from `cleanupStartedAt`
+(`scripts/v2-diagnostic-policy.ts:243-273`). Native deletion is dispatched
+before configuration awaits so lifecycle generation invalidation precedes
+outstanding work (`src/session-memory.ts:691-695`). The final record therefore
+retains the bounded commit/request and enter/exit/request ordering rather than
+inventing a replacement timestamp.
+
+The full investigation artifact is
+`/home/dev/workspace/opencode-work/stm-readiness-improvements/2026-10-13--full-stm-acceptance.html`.
+The prior top-level statements about V2 keyboard and pending-compaction gaps
+remain historical records; this addendum supersedes them for the current
+bounded table without rewriting dated failure history. No build, live tester,
+or commit was run for this documentation-only update.
+
 # Addendum — native V2 `/stm show` and `/stm logs` keyboard qualification (2026-10-13)
 
 The bounded native V2 run `v2-A3XI0Q` completed in `55.829s`. Its retained
