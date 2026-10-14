@@ -1,8 +1,51 @@
 # RC Readiness
 
-## Latest Status: 2026-10-14, RC5 Preparation Pending Qualification
+## Latest Status: 2026-10-14, RC5 Bounded Exact-Artifact Qualification
 
-**Current status: RC5 preparation is recorded, but RC5 is not yet
+**Current status: the exact unpublished `1.4.0-rc.5` artifact is
+bounded-qualified.** Source commit:
+`aef359cd4e72d72d79d5dbe76c8b3ed8dfe9906d`. The qualified tarball is
+`/home/dev/workspace/opencode-work/stm-readiness-improvements/atonev-opencode-short-term-memory-1.4.0-rc.5-aef359cd4e72-20261014-clean-build.tgz`,
+SHA256 `d34558b13c38736315593f322bc6b5d7e16471c0301382ecc6549f73a5f69682`,
+172,327 bytes, mode `0444`, 72 packaged files. Consumer, native V1 and native V2
+evidence independently identify that same path and digest, not the prior RC4
+candidate. The intended prerelease dist-tag remains `rc`, **not `latest`**;
+the candidate remains **unpublished**.
+
+| Component/Logic Block               | Current Findings/Hypothesis                                                                                                                                                                                                                                                           | Implications                                                                                                                                        | Verification Status                                                                              |
+| ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| RC5 artifact identity               | Exact path, digest and source commit recorded above; package manifest identifies `1.4.0-rc.5`.                                                                                                                                                                                        | Qualification applies only to these bytes; any replacement artifact needs its own evidence.                                                         | PASS; three evidence JSONs agree on path/digest; local hash, size/mode and Git commit inspected. |
+| Clean consumer                      | `/tmp/opencode/stm-package-acceptance-ya2ZS7/evidence.json`: PASS in 33,476 ms, failures empty; fresh production install, four runtime imports and strict public STM/TUI declarations pass.                                                                                           | Bounded consumer acceptance, not full host SDK declaration correctness or registry installation.                                                    | PASS; retained JSON inspected, not rerun here.                                                   |
+| Native V1                           | `/home/dev/workspace/opencode-work/stm-published-rc-e2e/v1-6pyGZW/evidence.json`: PASS in 60,751 ms on host `1.14.25`; native task child and DCP gates, diagnostic verdict and clean verdict PASS.                                                                                    | Exact-artifact deterministic native workflow acceptance on the pinned V1 host.                                                                      | PASS; retained JSON inspected, not rerun here.                                                   |
+| Native V2/current revision          | `/home/dev/workspace/opencode-work/stm-published-rc-e2e/v2-rwUfg9/evidence.json`: PASS in 51,869 ms on host `2.0.12`, run `d783ae83-8aa5-400f-9895-e044dd24f1af`; all 72 packaged files match, 12 keyboard cases retained, committed manual update and pending-delta compaction PASS. | Exact-artifact deterministic native workflow acceptance, including completed compaction and SYSTEM injection; not universal OpenCode compatibility. | PASS; retained JSON inspected, diagnostic and clean verdicts PASS; not rerun here.               |
+| Cost and scope                      | All three records report `costConsumed: 0`, `globalBudgetChanged: false`; deterministic bounds do not prove semantic memory quality, universal compatibility or registry installation.                                                                                                | Keep broader acceptance claims separate from this bounded qualification.                                                                            | PASS for recorded cost/budget; broader claims unverified.                                        |
+| Historical evidence and publication | Prior RC4 evidence and five mutation fault tests remain historical, not an RC5 fault-test rerun; README retains frozen prequalification pending wording.                                                                                                                              | This document is the authoritative current readiness record; publication remains a separate step using `rc`, not `latest`.                          | Historical entries preserved; no push or publication performed.                                  |
+
+The retained preparation investigation is
+`/home/dev/workspace/opencode-work/stm-readiness-improvements/2026-10-13--rc5-preparation.html`.
+It records preparation and final exact-artifact qualification; the JSONs above
+are execution evidence. Source commit
+provenance is inspected in Git; the acceptance JSONs identify packaged bytes by
+path, digest and manifest version, not by an embedded full source commit.
+
+Recorded acceptance commands, **not executed by this documentation update**,
+ran from the repository root with the absolute Bun executable against the same
+tarball (outer timeouts 190/350/350 seconds, kill-after 5 seconds):
+
+```bash
+/usr/bin/timeout --kill-after=5s 190s /home/dev/.bun/bin/bun scripts/package-acceptance.ts /home/dev/workspace/opencode-work/stm-readiness-improvements/atonev-opencode-short-term-memory-1.4.0-rc.5-aef359cd4e72-20261014-clean-build.tgz
+/usr/bin/timeout --kill-after=5s 350s /home/dev/.bun/bin/bun scripts/published-v1-e2e.ts /home/dev/workspace/opencode-work/stm-readiness-improvements/atonev-opencode-short-term-memory-1.4.0-rc.5-aef359cd4e72-20261014-clean-build.tgz
+/usr/bin/timeout --kill-after=5s 350s /home/dev/.bun/bin/bun scripts/published-v2-e2e.ts /home/dev/workspace/opencode-work/stm-readiness-improvements/atonev-opencode-short-term-memory-1.4.0-rc.5-aef359cd4e72-20261014-clean-build.tgz
+```
+
+**Next milestone:** the release owner retains this exact digest/evidence and,
+after separate publication authorization, verifies registry installation of
+these bytes under the `rc` tag. Acceptance requires actual registry/install
+evidence; semantic quality and broader host compatibility remain separate gates.
+
+## Historical Status: 2026-10-14, RC5 Preparation Pending Qualification
+
+**Historical preparation status: RC5 preparation is recorded, but RC5 is not yet
 qualified.** The current source base is
 `cbf55e300c3c7f0b62e0be3e51b7dce55feb4c4c`. The previously qualified
 runtime evidence belongs to the immutable unpublished candidate with SHA256

@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.4.0-rc.5] - 2026-10-13
 
-RC5 preparation based on exact commit `cbf55e300c3c7f0b62e0be3e51b7dce55feb4c4c`. The RC5 artifact is pending; this entry does not establish publication, registry availability, or a semantic guarantee. The prior RC4 preparation and its qualification remain historical and are not relabeled as RC5 evidence.
+RC5 preparation dated 2026-10-13, based on exact commit `cbf55e300c3c7f0b62e0be3e51b7dce55feb4c4c`. The exact artifact from source commit `aef359cd4e72d72d79d5dbe76c8b3ed8dfe9906d`, SHA-256 `d34558b13c38736315593f322bc6b5d7e16471c0301382ecc6549f73a5f69682`, is bounded-qualified but remains an unpublished prerelease, not stable. The date records preparation, not publication; this entry does not establish registry availability or semantic memory quality. See [RC Readiness](docs/RC-READINESS.md) for exact artifact evidence and limits.
 
 ### Added
 
@@ -23,8 +23,8 @@ RC5 preparation based on exact commit `cbf55e300c3c7f0b62e0be3e51b7dce55feb4c4c`
 
 ### Tested
 
-- Retained prior runtime qualification context: consumer `29.491`, V1 `60.376`, and V2 `58.765`; prior RC4 metadata also records the five-fault challenge explicitly.
-- RC5-specific artifact qualification remains pending; the `rc` tag is not latest, and no npm execution is implied.
+- Exact RC5 artifact bounded acceptance: clean consumer PASS in 33.476 seconds, native V1 PASS in 60.751 seconds, and native V2 PASS in 51.869 seconds. These are deterministic workflow results, not semantic-quality or universal host-compatibility guarantees.
+- Retained prior RC4 runtime qualification context: consumer `29.491`, V1 `60.376`, and V2 `58.765`; the prior five-fault challenges remain historical, not an RC5 rerun. The intended `rc` tag is not `latest`; no npm publication or new acceptance run is implied by this changelog update.
 
 ## [1.4.0-rc.4] - 2026-10-09
 
