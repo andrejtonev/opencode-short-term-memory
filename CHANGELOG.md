@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.0-rc.5] - 2026-10-13
+
+RC5 preparation based on exact commit `cbf55e300c3c7f0b62e0be3e51b7dce55feb4c4c`. The RC5 artifact is pending; this entry does not establish publication, registry availability, or a semantic guarantee. The prior RC4 preparation and its qualification remain historical and are not relabeled as RC5 evidence.
+
+### Added
+
+- Native V1 create/delete handling and message-bus routing with internal-side suppression.
+- Canonical original-agent/model/tool metadata, normal no-reply handling, DCP origin metadata, alias/generation/latest-user fences, and snapshot cleanup for owned staging.
+- Honest V1/V2 strict diagnostic gates, V2 keyboard coverage across all 12 actions, manual committed coverage, and pending-compaction coverage.
+
+### Fixed
+
+- Child first-snapshot race handling.
+
+### Tested
+
+- Retained prior runtime qualification context: consumer `29.491`, V1 `60.376`, and V2 `58.765`; prior RC4 metadata also records the five-fault challenge explicitly.
+- RC5-specific artifact qualification remains pending; the `rc` tag is not latest, and no npm execution is implied.
+
 ## [1.4.0-rc.4] - 2026-10-09
 
 Unpublished prerelease candidate based on local dev commit `a3c22514967b7eca567c038330fd552d1cb06209`. This candidate includes the finalized code and release text, with every suite awaiting owned Bun server shutdown before teardown. It adds no production feature or runtime-routing change relative to the latest committed dev state. The version identity is a new rc.4 candidate, not a requalification of rc.3; exact rc.4 qualification remains pending in the release notes. The `rc` tag is unchanged and this candidate is unpublished.

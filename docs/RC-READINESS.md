@@ -1,5 +1,32 @@
 # RC Readiness
 
+## Latest Status: 2026-10-14, RC5 Preparation Pending Qualification
+
+**Current status: RC5 preparation is recorded, but RC5 is not yet
+qualified.** The current source base is
+`cbf55e300c3c7f0b62e0be3e51b7dce55feb4c4c`. The previously qualified
+runtime evidence belongs to the immutable unpublished candidate with SHA256
+`b4a4cf7ec856b9030f276a1f97a62c172754c624f656ad8f509ee3d1d9c2d9e1`, whose
+manifest still identifies `1.4.0-rc.4`; it must not be relabeled as RC5
+evidence. No RC5 tarball has been identified, published, or accepted by the
+registry. Git push and npm publication are not executed by this record.
+
+| Component/Logic Block            | Current Findings/Hypothesis                                                                                                                                                                                                                                                                                                                                                     | Implications                                                                                                                                                                           | Verification Status                                         |
+| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------- |
+| RC5 source identity              | Current preparation base is commit `cbf55e300c3c7f0b62e0be3e51b7dce55feb4c4c`; the source includes the reviewed V1 fixes and the completed bounded V2 runner/documentation work.                                                                                                                                                                                                | The next tarball must be built from this exact source identity and recorded independently.                                                                                             | PASS for source inspection; RC5 artifact identity pending.  |
+| Prior runtime candidate          | The latest retained candidate is `/home/dev/workspace/opencode-work/stm-readiness-improvements/final-product-pack-2026-10-13-Le4ITRvN/atonev-opencode-short-term-memory-1.4.0-rc.4.tgz`, SHA256 `b4a4cf7ec856b9030f276a1f97a62c172754c624f656ad8f509ee3d1d9c2d9e1`.                                                                                                             | Its consumer, V1 and V2 results remain historical RC4-runtime evidence and do not qualify a newly named RC5 package.                                                                   | PASS as historical evidence; not an RC5 qualification.      |
+| Retained bounded evidence        | The prior exact candidate has clean consumer evidence `/tmp/opencode/stm-package-acceptance-7OEy1C/evidence.json` (29.491 s), V1 evidence `v1-0Hdd64` (60.376 s), and V2 evidence `/home/dev/workspace/opencode-work/stm-published-rc-e2e/v2-RejHYR25d3081f-4c75-4bfc-b4e3-d8f68f8177e1/evidence.json` (58.765 s); the retained suite result is 985 tests and 4,301 assertions. | Reuse these records only as provenance and regression context; rerun the same bounded checks against the new RC5 tarball.                                                              | PASS for prior candidate; new RC5 runs pending.             |
+| Release identity and publication | The intended prerelease dist-tag is `rc`, not `latest`; the remote currently exposes `origin/dev` at `8a7561d2aaddc6d3bda41d84aa29d57df5359cd5`.                                                                                                                                                                                                                                | After qualification, provide commands using the recorded RC5 tarball path, digest, commit and `rc` tag. Do not claim registry acceptance before an actual user-authorized publication. | Preparation recorded; no push or npm publication performed. |
+
+**Next milestone:** build one RC5 tarball from
+`cbf55e300c3c7f0b62e0be3e51b7dce55feb4c4c`, record its exact path and SHA256,
+then run the clean consumer and isolated V1/V2 qualification against that same
+artifact. Record whether each run creates its expected journal/evidence entry,
+selects its adaptive journey, and handles the current revision as specified.
+Only after those results are available should the exact fast-forward Git push
+and npm `rc` publication commands be issued for user execution; no command in
+this documentation update publishes or pushes anything.
+
 ## Latest Status: 2026-10-09, RC4 Bounded Qualification
 
 **Current status: the exact unpublished 1.4.0-rc.4 candidate is
