@@ -1,6 +1,39 @@
 # RC Readiness
 
-## Latest Status: 2026-10-14, RC5 Bounded Exact-Artifact Qualification
+## Latest Status: 2026-10-17, Local RC6 Preparation Pending Qualification
+
+**Current status: `1.4.0-rc.6` is an UNPUBLISHED local candidate, not qualified.**
+Starting preparation base: `1577d4f58fe751efb9717aeb91018206f1aece0d`.
+Package/changelog/shipped README edits are uncommitted; preparation commit,
+final source commit, RC6 tarball path, SHA256 and fresh results are **PENDING**.
+The lead's 17 October registry observation records `rc: 1.4.0-rc.5`,
+`latest: 1.3.0` and HTTP 404 for exact RC6. RC5's dated unpublished wording below
+remains historical; later publication does not change its qualified hash/evidence.
+
+| Component/Logic Block    | Current Findings/Hypothesis                                                                                                                                                                   | Implications                                                                                                                                                 | Verification Status                                                                                                                       |
+| ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| Release identity         | Local manifest is `1.4.0-rc.6`; dependencies, scripts and exports unchanged; root lock has no version field or resolution changes.                                                            | New metadata and shipped README require a new exact artifact, not relabeled RC5 bytes.                                                                       | Local preparation only; commit PENDING.                                                                                                   |
+| Runtime changes          | `da960a1` fixes V1 self-generation/idle fingerprint handling; `88c938b` rejects malformed JSONC while valid comments/trailing commas, sibling/lower-layer fallback and defaults remain valid. | No broader runtime or semantic-quality claim.                                                                                                                | Source changes retained; lead reports 1,139 tests / 5,774 assertions PASS at `1577d4f`, not a new RC6 build/typecheck/consumer result.    |
+| Historical qualification | Four keyboard journeys PASS on frozen DEV SHA256 `e5590eeb71683a1712346093fd936ed61e1c8f33fcb27fc21ef27562e64c6826`, manifest RC5, unpublished; hosts V1 `1.19.3` / V2 `2.0.32`.              | Prior runtime evidence is not RC6 qualification; see [retained acceptance evidence](RC-ACCEPTANCE-MATRIX.md#current-qualified-keyboard-journeys-2026-10-17). | Historical PASS only; RC5 exact-artifact record below preserved.                                                                          |
+| New artifact             | RC6 final source commit, path, digest, file count and execution evidence are PENDING.                                                                                                         | Freeze shipped README before packing; it must remain unchanged afterward. Nonpackaged readiness may record actual identities/results later.                  | New artifact and all fresh gates PENDING.                                                                                                 |
+| Authorization            | Local preparation only; unpushed base `origin/dev` is `2b9bb226e942e7bccbd0443a8bf9eb08419b16b9`; exact Git push remains denied by execution policy.                                          | No Git push, npm publication or permission bypass.                                                                                                           | No push/publication performed here; prior conditional push approval did not override execution policy. npm publication is not authorized. |
+
+**Next milestone (lead-owned, planned, not executed by this documentation update):**
+
+1. Commit preparation, build and freeze RC6 outside the packaged Git tree, mode
+   `0444`; record source commit, path, SHA256, manifest `1.4.0-rc.6` and verify
+   the expected same 72 packaged files. Keep shipped README frozen thereafter.
+2. Against those exact bytes, run clean-consumer acceptance and **exactly one**
+   bounded `v1-clean` keyboard case this turn; retain actual evidence and results
+   before claiming either gate passes.
+3. Leave the other three RC6 keyboard journeys, broad configuration/install
+   coverage and real-provider semantic quality **PENDING** until separately run.
+
+Investigation (preparation, not publication):
+`/home/dev/workspace/opencode-work/stm-readiness-improvements/2026-10-17--rc6-preparation.html`.
+This doc-only update runs no build, typecheck, consumer or native qualification.
+
+## Historical Status: 2026-10-14, RC5 Bounded Exact-Artifact Qualification
 
 **Current status: the exact unpublished `1.4.0-rc.5` artifact is
 bounded-qualified.** Source commit:

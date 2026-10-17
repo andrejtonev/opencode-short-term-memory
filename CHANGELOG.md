@@ -7,9 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.0-rc.6] - 2026-10-17
+
+Unpublished local candidate preparation, not published or stable, starting from source commit `1577d4f58fe751efb9717aeb91018206f1aece0d`. The final new RC6 artifact SHA-256 and exact-artifact qualification remain **pending**; see [RC Readiness](docs/RC-READINESS.md) for upcoming exact RC6 results.
+
+### Fixed
+
+- V1 excludes its own generated user/assistant messages and suppresses automatic updates on unchanged active input. Real-user busy turns wait for idle, and early temporary-session registration prevents self-triggered replays, session hijacks and internal-session history reads. These fences are process-local, not persistent across restarts, and do not ban manual retries.
+- Reject malformed JSONC files when the parser reports errors rather than accepting recovered partial objects. Valid comments and trailing commas remain accepted, with fallback to valid sibling files, lower configuration layers or defaults preserved.
+
+### Added
+
+- Testing/tooling: isolated setup/configuration matrix and three-ordinary-message keyboard journeys for V1 clean/active and V2 default-off/opt-in, with exact provider/delta, NoReply cadence and owned-cleanup validators. These are acceptance tools, not new production features; the existing memory tools were introduced earlier.
+
+### Tested
+
+- Historical source gate at `1577d4f58fe751efb9717aeb91018206f1aece0d`: 1,139 tests and 5,774 assertions passed, not new RC6 artifact qualification.
+- Four prior native keyboard PASS results on V1 `1.19.3` and V2 `2.0.32` used one frozen development archive, SHA-256 `e5590eeb71683a1712346093fd936ed61e1c8f33fcb27fc21ef27562e64c6826`, with an RC5 development manifest, not the published RC5 artifact. This is historical runtime proof, not qualification of the new RC6 tarball.
+
 ## [1.4.0-rc.5] - 2026-10-13
 
-RC5 preparation dated 2026-10-13, based on exact commit `cbf55e300c3c7f0b62e0be3e51b7dce55feb4c4c`. The exact artifact from source commit `aef359cd4e72d72d79d5dbe76c8b3ed8dfe9906d`, SHA-256 `d34558b13c38736315593f322bc6b5d7e16471c0301382ecc6549f73a5f69682`, is bounded-qualified but remains an unpublished prerelease, not stable. The date records preparation, not publication; this entry does not establish registry availability or semantic memory quality. See [RC Readiness](docs/RC-READINESS.md) for exact artifact evidence and limits.
+RC5 preparation dated 2026-10-13, based on exact commit `cbf55e300c3c7f0b62e0be3e51b7dce55feb4c4c`. The exact artifact from source commit `aef359cd4e72d72d79d5dbe76c8b3ed8dfe9906d`, SHA-256 `d34558b13c38736315593f322bc6b5d7e16471c0301382ecc6549f73a5f69682`, received bounded qualification before publication, not stable-release qualification. The date records preparation, not publication; that prepublication evidence does not establish registry availability or semantic memory quality. See [RC Readiness](docs/RC-READINESS.md) for exact artifact evidence and limits.
+
+Publication observed 2026-10-17: registry dist-tags report `rc: 1.4.0-rc.5` and `latest: 1.3.0`. RC5 is a published prerelease, not stable; this observation does not rerun or broaden its bounded qualification.
 
 ### Added
 

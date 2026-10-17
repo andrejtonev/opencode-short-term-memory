@@ -1,6 +1,6 @@
 # OpenCode Short-Term Memory Plugin
 
-Automatically summarizes conversation context into structured session memory and supports injecting it back into the system prompt — aiming to preserve user instructions, project context, decisions, and active references across long chats and compactions, without guaranteeing semantic preservation. Update and injection timing differ between OpenCode generations; in the unpublished `1.4.0-rc.5` V2 candidate, system injection is opt-in and disabled by default, independently of automatic memory updates.
+Automatically summarizes conversation context into structured session memory and supports injecting it back into the system prompt — aiming to preserve user instructions, project context, decisions, and active references across long chats and compactions, without guaranteeing semantic preservation. This preparation snapshot describes local, unpublished `1.4.0-rc.6` as of 2026-10-17. Update and injection timing differ between OpenCode generations; V2 system injection is opt-in and disabled by default, independently of automatic memory updates.
 
 > **Unofficial plugin:** This is an independent project and is not affiliated with, endorsed by, or maintained by the opencode team.
 
@@ -8,29 +8,28 @@ Automatically summarizes conversation context into structured session memory and
 
 See the [feature matrix](https://github.com/andrejtonev/opencode-short-term-memory/blob/dev/docs/FEATURE-MATRIX.md) for the repository's feature, configuration and validation comparison, including historical evidence and its version scope. This feature-matrix document is not included in the npm package; this README is shipped.
 
-- **Version scope:** The current candidate is **`1.4.0-rc.5`, not yet published**, based on local source identity `cbf55e300c3c7f0b62e0be3e51b7dce55feb4c4c`. A fresh npm registry check found `1.4.0-rc.4` as the latest published prerelease under the `rc` tag; npm examples below therefore use published rc.4, with an RC5 command separately labeled for use only after publication. Published rc.4 predates the latest V1 fixes and does not contain them. Pinned compatibility evidence uses V1 plugin/SDK `1.14.25`, V2 plugin API `2.0.8`, and V2 host `2.0.12`; it does not establish universal OpenCode 2.x support. The latest qualified runtime record is consumer `29.491` seconds, native V1 `60.376` seconds, and native V2 `58.765` seconds for artifact digest prefix `b4a4cf`; it covered the full 12-scenario keyboard/manual workflow, with completed pending-delta compaction refresh, plus five mutation fault checks. Those results do not qualify the new RC5 packaged bytes. See repository [RC Readiness](https://github.com/andrejtonev/opencode-short-term-memory/blob/dev/docs/RC-READINESS.md) for the latest results and evidence limits.
+- **Version scope:** The current candidate is **`1.4.0-rc.6`, not yet published**. The 2026-10-17 registry check found `rc: 1.4.0-rc.5`, `latest: 1.3.0`, and HTTP 404 for the exact RC6 endpoint. Installation examples use published RC5; the RC6 command is only for use after publication. Provider APIs remain pinned to V1 plugin/SDK `1.14.25` and V2 plugin `2.0.8`. Fresh RC6 archive, clean-consumer and native qualification are pending; see repository [RC Readiness](https://github.com/andrejtonev/opencode-short-term-memory/blob/dev/docs/RC-READINESS.md), which is not included in the npm package, for exact-artifact results and evidence limits.
 - **V1:** Provides `/stm` commands and eight tools: seven `stm_memory_*` tools plus legacy `short_term_memory`. Uses idle/pre-compaction updates, periodic injection and a separate side session in clean mode, as described below.
-- **RC5 V1 fixes:** The candidate preserves the no-reply delivery path, originating agent/model routing, and all existing memory tools. Native bus lifecycle handling and child snapshot ordering are corrected. DCP handling preserves the originating agent and skips reinjection when origin metadata is missing or stale; memory updates remain allowed, avoiding an unintended default-agent reinjection.
+- **RC6 V1 fixes:** Filters the plugin's own generated prompt messages and assistant replies to those prompts from update input. Automatic unchanged-input fingerprint suppression, real-user busy-turn idle waiting and internal temporary-session skipping remain in place; these process-local fences do not ban manual retries.
+- **V1 delivery behavior:** Preserves the no-reply delivery path, originating agent/model routing, and all existing memory tools. Native bus lifecycle and child snapshot fixes are prior RC5 behavior, not new RC6 features. DCP handling preserves the originating agent and skips reinjection when origin metadata is missing or stale; memory updates remain allowed, avoiding an unintended default-agent reinjection.
 - **V2 updates:** Native execution terminal events schedule an idle update after `debounceMs`, reading fresh settled durable history; the context hook also catches up from new visible conversation text. Updates require an assistant message in the delta and respect checkpoints and forward reset boundaries. Execution start, deletion, move and shutdown invalidate scheduled idle work. There is no DCP-compress trigger.
-- **V2 injection (RC5 candidate; behavior introduced in RC3):** Native context/system transform injection is supported but disabled by default. Set `enableLegacyPeriodicSystemTransform: true` to enable primary-session, task-child and compaction memory injection. When opted in, primary sessions inject on literally every N admitted user turns (`remindEveryN`), retaining that turn's eligibility across tool continuations. Cadence is process-local and bounded, not reconstructed from old history; restart or eviction can restart counting. Compaction attempts a refresh from settled durable history independently of injection opt-in; when opted in, it injects stored memory as fallback even if refresh skips, fails or is busy. Compaction injection bypasses reminder cadence and does not wait for an already-running update to drain.
+- **V2 injection (introduced in RC3; also in published RC5):** Native context/system transform injection is supported but disabled by default. Set `enableLegacyPeriodicSystemTransform: true` to enable primary-session, task-child and compaction memory injection. When opted in, primary sessions inject on literally every N admitted user turns (`remindEveryN`), retaining that turn's eligibility across tool continuations. Cadence is process-local and bounded, not reconstructed from old history; restart or eviction can restart counting. Compaction attempts a refresh from settled durable history independently of injection opt-in; when opted in, it injects stored memory as fallback even if refresh skips, fails or is busy. Compaction injection bypasses reminder cadence and does not wait for an already-running update to drain.
 - **V2 task children:** With system injection opted in and `injectInSubagents: true`, a task child freezes and persists a parent-memory snapshot on its first eligible context read. This is not creation-time capture or fork inheritance; later parent updates do not change a frozen snapshot. Task children never summarize, and a child reset boundary suppresses snapshot injection. Unavailable lineage metadata or invalid snapshot state fails closed.
 - **V2 controls:** Implements native `/stm` (default status), `/stm status`, `show`, `logs`, `settings`, `update`, `setup` and `reset`, plus eight tools: seven `stm_memory_*` tools and legacy `short_term_memory`. Every command requires the configured TUI companion to be connected, viewing the invoking session in the matching project/workspace, and admitted before any action runs. Without an available receiver, admission fails within three seconds and no action runs. Headless users can still use the tools; legacy reset/setup use the same literal confirmation rules.
 - **V2 model/retries:** `summarizerMode: "clean"` uses isolated direct text generation with the summarizer prompt, without a side session or main-session instructions, using the current model unless `memoryModel` supplies a valid `provider/model` override. `"active"` uses session generation; an explicit override is unsupported. `sideSessionRetries` bounds retries of settled transient or malformed output within one per-chunk deadline. Opt-in `cleanFallbackToActiveSession` allows one active fallback only after those settled failures and only without an explicit override. Timeout/cancellation is not retried or followed by fallback; the underlying operation may continue, retaining its generation reservation until it settles.
 - **V2 prompt/log options:** `includeAgentsMdOnFirstUpdate` adds bounded project-root `AGENTS.md` reference data to the first chunk of an eligible update with no checkpoint, not as instructions. `collapseAssistantBursts` retains the last consecutive visible assistant reply in the delta. `debug` adds generation/injection metadata (models, counts, sizes and outcomes, not prompt/response bodies); logs append with `logMaxLines` retention. Existing operational logs can still contain sensitive details.
 
-The bounded acceptance evidence above covered the previously qualified immutable artifact, not the new RC5 packaged bytes or this post-correction README. It did not exercise every host activation path, semantic quality, provider abort behavior, or unsupported OpenCode variant; no publication or npm registry claim is made.
+**Prior runtime evidence:** Four deterministic keyboard journeys (V1 clean/active and V2 default-off/opt-in) passed on native hosts `1.19.3` and `2.0.32` using development archive SHA-256 `e5590eeb71683a1712346093fd936ed61e1c8f33fcb27fc21ef27562e64c6826`. Its manifest still identified RC5 local development bytes, not published RC5 or the new RC6 README/version bytes. The earlier full 12-scenario keyboard/manual workflow, including pending-delta compaction refresh, and five mutation fault checks remain historical evidence for the earlier RC4 artifact (digest prefix `b4a4cf`), not a current RC6 PASS. These bounded checks do not establish minimum or universal host compatibility, every activation path, provider abort behavior or semantic quality; deletion/cancellation checks established persistence fencing while the host continued generation. See the feature matrix for per-capability limits.
 
-The qualified native workflow passed default-off automatic updates without SYSTEM injection, explicit opt-in injection and clean isolation, distinct clean-model override routing, one clean retry, one active fallback, deletion/cancellation persistence fencing, command reset/post-boundary delta, first-read task-child snapshot/injection without child summarization, completed native compaction with exact SYSTEM injection, and the pending-delta compaction refresh. These are specific fixture checks, not exhaustive variant coverage or semantic-quality guarantees. The host continued generation during deletion/cancellation; PASS establishes bounded persistence fencing, not provider abort. Refresh failure/busy variants and other unexercised paths remain locally covered or source-grounded. See the feature matrix for per-capability limits.
+**Test readiness:** The source gate at `1577d4f` passed 1,139 tests and 5,774 assertions, not RC6 artifact qualification. The paid V1 legacy sweep `stm-paid-e2e-cNWSEN` remains historically **50/51**, not a fully passing paid suite; no paid rerun and no 51/51 result is claimed. Neither deterministic acceptance nor that paid result guarantees semantic memory quality. Source checks do not qualify the new RC6 tarball; consult exact-artifact results in RC Readiness before drawing broader release conclusions.
 
-**Test readiness:** The latest source record contains 985 tests. The paid V1 legacy sweep `stm-paid-e2e-cNWSEN` remains historically **50/51**, not a fully passing paid suite; no paid rerun and no 51/51 result is claimed. Neither deterministic acceptance nor that paid result guarantees semantic memory quality. The qualified artifact digest prefix `b4a4cf` identifies tested bytes rather than this RC5 tree. No build, inference, test-suite rerun, release or publication was performed for this README preparation; fresh final-artifact validation remains required.
+**V2 configuration:** Both generations read the shared config files and defaults below, but the table's behavioral descriptions remain V1-specific. The current candidate applies the options described above, along with `enabled`, `maxMemoryLength`, `maxUpdateInputLength`, `maxDeltaMessages` (per-chunk message bound) and `memoryDir`. Native injection is opt-in and defaults to `false`; this behavior originated in RC3 and is also present in published RC5. Set `enableLegacyPeriodicSystemTransform: true` in the shared STM config to opt into all V2 system memory injection, including compaction. Automatic memory updates remain enabled independently when `enabled: true`. Use `stm_memory_settings` to inspect effective behavior in the installed version; these V2 behaviors are not new RC6 features.
 
-**V2 configuration:** Both generations read the shared config files and defaults below, but the table's behavioral descriptions remain V1-specific. The current candidate applies the options described above, along with `enabled`, `maxMemoryLength`, `maxUpdateInputLength`, `maxDeltaMessages` (per-chunk message bound) and `memoryDir`. Native injection is opt-in and defaults to `false`; this behavior originated in RC3 and is also present in published `1.4.0-rc.4`. Set `enableLegacyPeriodicSystemTransform: true` in the shared STM config to opt into all V2 system memory injection, including compaction. Automatic memory updates remain enabled independently when `enabled: true`. Published RC4 does not contain the latest V1 fixes. Use `stm_memory_settings` to inspect effective behavior in the installed version; this README does not claim that every V2 behavior is new in RC5.
-
-**V2 TUI loading:** On the pinned host, add the same package entry to both the server's `opencode.json` and the CLI/TUI's global `cli.json` `plugins` lists, preserving existing entries. The example below installs published rc.4, not the unpublished RC5 candidate. For a minimal global configuration, put the following in each of `~/.config/opencode/opencode.json` and `~/.config/opencode/cli.json` (or the corresponding `$XDG_CONFIG_HOME/opencode/` paths):
+**V2 TUI loading:** On the pinned host, add the same package entry to both the server's `opencode.json` and the CLI/TUI's global `cli.json` `plugins` lists, preserving existing entries. The example below installs published RC5, not the unpublished candidate. For a minimal global configuration, put the following in each of `~/.config/opencode/opencode.json` and `~/.config/opencode/cli.json` (or the corresponding `$XDG_CONFIG_HOME/opencode/` paths):
 
 ```json
 {
-  "plugins": ["@atonev/opencode-short-term-memory@1.4.0-rc.4"]
+  "plugins": ["@atonev/opencode-short-term-memory@1.4.0-rc.5"]
 }
 ```
 
@@ -47,16 +46,16 @@ The packaged plugin supplies separate server, `/tui` and `/rpc` exports resolved
 The [pinned authoritative CLI specification](https://github.com/anomalyco/opencode/blob/2670273ff17da96f85c5826ced57aa1b368754fa/packages/cli/src/commands/commands.ts) defines `plugin add <package>` as installing a plugin and adding it to global configuration, with no `--global` flag. Install the currently published prerelease explicitly:
 
 ```bash
-opencode plugin add '@atonev/opencode-short-term-memory@1.4.0-rc.4'
-```
-
-After `1.4.0-rc.5` is published, replace the package version in the command and both configuration entries above with `1.4.0-rc.5`:
-
-```bash
 opencode plugin add '@atonev/opencode-short-term-memory@1.4.0-rc.5'
 ```
 
-Verify both server and TUI configuration against [V2 TUI loading](#v1--v2-support) above, preserving existing entries. Published rc.4 is the registry fallback; its installation and behavior must not be read as validation of the unpublished RC5 candidate or its latest V1 fixes.
+Only after `1.4.0-rc.6` is published, replace the package version in the command and both configuration entries above with `1.4.0-rc.6`:
+
+```bash
+opencode plugin add '@atonev/opencode-short-term-memory@1.4.0-rc.6'
+```
+
+Verify both server and TUI configuration against [V2 TUI loading](#v1--v2-support) above, preserving existing entries. Installing published RC5 does not validate the unpublished candidate or include its new V1 fixes.
 
 ### V1
 
@@ -64,11 +63,11 @@ Use config-based installation; V1 CLI installation syntax is not verified here. 
 
 ```json
 {
-  "plugin": ["@atonev/opencode-short-term-memory@1.4.0-rc.4"]
+  "plugin": ["@atonev/opencode-short-term-memory@1.4.0-rc.5"]
 }
 ```
 
-V1 installs configured npm plugins automatically using Bun at startup. Packages and their dependencies are cached in `~/.cache/opencode/node_modules/`. The singular key is also used by the repository's V1 host-load fixture; it is distinct from V2's `plugins` key.
+V1 installs configured npm plugins automatically using Bun at startup. Packages and their dependencies are cached in `~/.cache/opencode/node_modules/`. The singular key is also used by the repository's V1 host-load fixture; it is distinct from V2's `plugins` key. Only after RC6 publication, replace the version in this entry with `1.4.0-rc.6`.
 
 ### Post-install
 
@@ -79,6 +78,8 @@ Restart OpenCode after setup or configuration edits before checking settings or 
 ## Configuration (V1 behavior)
 
 All keys are optional. Place in `.opencode/stm.jsonc` (project) or a global config directory. Global → env → project merge with project taking precedence.
+
+RC6 accepts JSONC comments and trailing commas, but rejects the whole source file if parsing reports errors rather than using a recovered partial object. Resolution can then use a valid same-directory `stm.json` sibling, lower configuration layers or defaults; an invalid file does not necessarily disable STM.
 
 | Key                                   | Type                 | Default              | Description                                                                                                                                                                                                                                              |
 | ------------------------------------- | -------------------- | -------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -135,7 +136,7 @@ Agents should use `stm_memory_read` when prior instructions, decisions, or const
 | `stm_memory_logs`     | Show plugin logs. Logs may include sensitive content; do not disclose secrets or other sensitive information from them.                                                                                                                                                                                            |
 | `stm_memory_settings` | V1: show resolved configuration. V2: show resolved config, effective behavior and inactive settings.                                                                                                                                                                                                               |
 | `stm_memory_setup`    | Create a project-local shared example with `confirm: true`; never overwrite existing config. V1 gives guidance without confirmation; V2 refuses creation.                                                                                                                                                          |
-| `short_term_memory`   | Legacy compatibility tool in V1 and RC5 candidate V2 (introduced in RC3): `action` selects show/status/update/reset/logs/settings/setup. V1 reset runs without confirmation; V1 setup requires `confirm: true`. V2 reset and setup both require literal `confirm: true`; V2 reset anchors at the invoking message. |
+| `short_term_memory`   | Legacy compatibility tool in V1 and RC6 candidate V2 (introduced in RC3): `action` selects show/status/update/reset/logs/settings/setup. V1 reset runs without confirmation; V1 setup requires `confirm: true`. V2 reset and setup both require literal `confirm: true`; V2 reset anchors at the invoking message. |
 
 ## How it works (V1)
 
