@@ -19,6 +19,7 @@ import type {
 import type { RuntimeContract } from "./runtime-contract";
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
+import { createHash, randomUUID } from "node:crypto";
 import {
   createRuntimeState,
   ensureMemoryFile,
@@ -47,6 +48,7 @@ import {
   readLastProcessedMessageID,
   writeLastProcessedMessageID,
   collectRecentVisibleMessages,
+  getMessageID,
 } from "./message-collector";
 import { parseMemoryActionFromCommandArgument, executeMemoryAction, type CommandContext } from "./commands";
 import { appendChildMemoryToSystem, deliverMemoryViaNoReply, injectMemoryIntoSystemTransform } from "./injection";
@@ -133,6 +135,9 @@ export const SessionMemoryPlugin = async (
   // the session.  Unlike a terminal lifecycle tombstone, this lets deletion
   // still run its normal cleanup path.
   const internalSessionIDs = new Set<string>();
+  const ownedPromptIDs = new Map<string, Set<string>>();
+  const lastActiveInputFingerprints = new Map<string, string>();
+  const sessionsAwaitingIdle = new Set<string>();
   // I2 – Reverse mapping for cleanup
   const parentToChildren = new Map<string, Set<string>>(); // parentID → set of childIDs
   const childDeliveryMetadata = new Map<
@@ -140,6 +145,94 @@ export const SessionMemoryPlugin = async (
     { startupSnapshot: string; startupInjectionPending: boolean; dcpInjectionPending: boolean }
   >();
   const pendingChildInitializations = new Map<string, { generation: number; promise: Promise<void> }>();
+
+  function registerOwnedPrompt(sessionID: string, messageID: string): void {
+    const ids = ownedPromptIDs.get(sessionID) ?? new Set<string>();
+    ids.add(messageID);
+    ownedPromptIDs.set(sessionID, ids);
+  }
+
+  function ownsPrompt(sessionID: string, messageID: string | undefined): boolean {
+    return Boolean(messageID && ownedPromptIDs.get(sessionID)?.has(messageID));
+  }
+
+  function parentMessageID(row: unknown): string {
+    const r = row as Record<string, unknown>;
+    const message = r?.message as Record<string, unknown> | undefined;
+    const info = r?.info as Record<string, unknown> | undefined;
+    const messageInfo = message?.info as Record<string, unknown> | undefined;
+    const parent = message?.parent as Record<string, unknown> | undefined;
+    return String(
+      r?.parentID ||
+        r?.parentId ||
+        info?.parentID ||
+        info?.parentId ||
+        message?.parentID ||
+        message?.parentId ||
+        messageInfo?.parentID ||
+        messageInfo?.parentId ||
+        parent?.id ||
+        "",
+    ).trim();
+  }
+
+  function activeInputFingerprint(
+    recentEntries: unknown,
+    existingMemory: string,
+    agentsMdContext: string,
+    currentConfig: SessionMemoryConfig,
+    operationGeneration: number,
+  ): string {
+    return createHash("sha256")
+      .update(
+        JSON.stringify({
+          recentEntries,
+          existingMemory,
+          agentsMdContext,
+          config: currentConfig,
+          operationGeneration,
+        }),
+      )
+      .digest("hex");
+  }
+
+  function wrapperSummarizerRuntime(sessionID: string, onActivePromptDispatch?: () => void): SharedRuntime {
+    return {
+      ...runtime,
+      readSessionMessages: async (readSessionID, options) => {
+        const rows = await runtime.readSessionMessages(readSessionID, options);
+        return rows.filter((row) => {
+          const messageID = getMessageID(row);
+          return !ownsPrompt(readSessionID, messageID) && !ownsPrompt(readSessionID, parentMessageID(row));
+        });
+      },
+      createTemporarySession: async (request) => {
+        const created = await runtime.createTemporarySession(request);
+        internalSessionIDs.add(created.id);
+        const state = sessionStates.get(created.id);
+        if (state?.timer) {
+          clearTimeout(state.timer);
+          state.timer = undefined;
+        }
+        return created;
+      },
+      deliverGeneratedPrompt: async (request) => {
+        if (request.sessionId !== sessionID) return runtime.deliverGeneratedPrompt(request);
+        const messageID = `msg_${randomUUID()}`;
+        registerOwnedPrompt(request.sessionId, messageID);
+        onActivePromptDispatch?.();
+        return runtime.deliverGeneratedPrompt({
+          ...request,
+          prompt: { ...request.prompt, messageID } as typeof request.prompt,
+        });
+      },
+      deleteTemporarySession: async (request) => {
+        await runtime.deleteTemporarySession(request);
+        invalidateSession(request.id, true);
+        internalSessionIDs.delete(request.id);
+      },
+    };
+  }
 
   // I3 / I11 – Idle waiters per session
   const idleWaiters = new Map<string, IdleWaiter>();
@@ -507,6 +600,25 @@ export const SessionMemoryPlugin = async (
     if (!config.enabled) return false;
     const operationGeneration = schedulingGeneration ?? lifecycleFor(sessionID).generation;
     if (!isCurrentGeneration(sessionID, operationGeneration)) return false;
+    if (isInternalSession(sessionID)) return false;
+
+    const isAutomaticUpdate =
+      reason === "session_idle" ||
+      reason === "post_in_flight_replay" ||
+      reason === "session_created_bootstrap" ||
+      reason === "session_updated_bootstrap";
+    if (
+      isAutomaticUpdate &&
+      (config.summarizerMode === "active" || config.cleanFallbackToActiveSession) &&
+      sessionsAwaitingIdle.has(sessionID)
+    ) {
+      await logEvent(config, "memory_update_skipped", {
+        sessionID,
+        reason,
+        detail: "awaiting_session_idle",
+      });
+      return false;
+    }
 
     // Sub-agent sessions never update memory
     if (sessionParents.has(sessionID)) {
@@ -544,7 +656,32 @@ export const SessionMemoryPlugin = async (
             ? await readText(join(directory || ".", "AGENTS.md"), "")
             : "";
         const agentsMdContext = sanitizeMessage(agentsMdContextRaw).slice(0, config.maxUpdateInputLength);
-        const recent = await collectRecentVisibleMessages(runtime, client, sessionID, config, globalState);
+        if (!isCurrentGeneration(sessionID, operationGeneration) || isInternalSession(sessionID)) return false;
+        let inputFingerprint = "";
+        const wrapperRuntime = wrapperSummarizerRuntime(sessionID, () => {
+          lastActiveInputFingerprints.set(sessionID, inputFingerprint);
+        });
+        const recent = await collectRecentVisibleMessages(wrapperRuntime, client, sessionID, config, globalState);
+        if (!isCurrentGeneration(sessionID, operationGeneration) || isInternalSession(sessionID)) return false;
+        inputFingerprint = activeInputFingerprint(
+          {
+            entries: recent.entries,
+            newestMessageID: recent.newestMessageID,
+            sinceMessageID: recent.sinceMessageID,
+          },
+          existing,
+          agentsMdContext,
+          config,
+          operationGeneration,
+        );
+        if (isAutomaticUpdate && lastActiveInputFingerprints.get(sessionID) === inputFingerprint) {
+          await logEvent(config, "memory_update_skipped", {
+            sessionID,
+            reason,
+            detail: "unchanged_active_summary_input",
+          });
+          return false;
+        }
         if (!recent.entries.length) {
           await logEvent(config, "memory_update_skipped", { sessionID, reason, detail: "no_visible_recent_messages" });
           return false;
@@ -569,7 +706,7 @@ export const SessionMemoryPlugin = async (
         // I13 – delegate chunk processing to extracted helper
         wroteMemory = await processMemoryChunks(
           client,
-          runtime,
+          wrapperRuntime,
           sessionID,
           reason,
           config,
@@ -581,9 +718,10 @@ export const SessionMemoryPlugin = async (
           async (previousMemory, nextMemory, checkpointID) =>
             await withPersistenceLock(sessionID, async () => {
               if (!isCurrentGeneration(sessionID, operationGeneration)) return "stale";
+              if (isInternalSession(sessionID)) return "stale";
               const currentOnDisk = await readText(memoryPath, "");
               if (currentOnDisk !== previousMemory) return "concurrent_change";
-              if (!isCurrentGeneration(sessionID, operationGeneration)) return "stale";
+              if (!isCurrentGeneration(sessionID, operationGeneration) || isInternalSession(sessionID)) return "stale";
               await writeTextAtomic(memoryPath, nextMemory);
               try {
                 if (checkpointID) {
@@ -599,7 +737,7 @@ export const SessionMemoryPlugin = async (
               return isCurrentGeneration(sessionID, operationGeneration) ? "committed" : "stale";
             }),
         );
-        if (!isCurrentGeneration(sessionID, operationGeneration)) wroteMemory = false;
+        if (!isCurrentGeneration(sessionID, operationGeneration) || isInternalSession(sessionID)) wroteMemory = false;
         if (wroteMemory) {
           const s = ensureSessionState(sessionID, sessionStates, sessionStatesOrder, MAX_SESSION_STATES);
           bumpMemoryRevision(s);
@@ -687,6 +825,30 @@ export const SessionMemoryPlugin = async (
         (typeof properties?.sessionId === "string" && properties.sessionId) ||
         getSessionID(evt) ||
         getSessionID(input);
+
+      const lifecycleEventSessionID = getSessionID(evt) || getSessionID(input);
+      if (name === "session.idle" && lifecycleEventSessionID) {
+        sessionsAwaitingIdle.delete(lifecycleEventSessionID);
+      }
+      if (name === "session.status" && lifecycleEventSessionID) {
+        const rawStatus = properties?.status ?? info?.status;
+        const statusType =
+          typeof rawStatus === "string"
+            ? rawStatus
+            : rawStatus && typeof rawStatus === "object"
+              ? String(
+                  (rawStatus as Record<string, unknown>).type || (rawStatus as Record<string, unknown>).status || "",
+                )
+              : "";
+        if (
+          !internalSessionIDs.has(lifecycleEventSessionID) &&
+          !isSessionTerminal(lifecycleEventSessionID) &&
+          !sessionParents.has(lifecycleEventSessionID)
+        ) {
+          if (statusType === "busy") sessionsAwaitingIdle.add(lifecycleEventSessionID);
+          if (statusType === "idle") sessionsAwaitingIdle.delete(lifecycleEventSessionID);
+        }
+      }
 
       // The native dispatcher emits lifecycle events through the generic
       // event hook. Route them to the concrete hooks so existing direct-hook
@@ -791,7 +953,7 @@ export const SessionMemoryPlugin = async (
       }
 
       if (config.enabled && name === "session.idle") {
-        const sessionID = getSessionID(evt) || getSessionID(input);
+        const sessionID = lifecycleEventSessionID;
         if (sessionID) {
           if (isInternalSession(sessionID)) return;
           if (isSessionTerminal(sessionID)) return;
@@ -860,6 +1022,9 @@ export const SessionMemoryPlugin = async (
       if (wasTerminal) {
         lifecycle.generation += 1;
         lifecycle.terminal = false;
+        ownedPromptIDs.delete(sessionID);
+        lastActiveInputFingerprints.delete(sessionID);
+        sessionsAwaitingIdle.delete(sessionID);
       }
       const childGeneration = lifecycle.generation;
       let resolveChildInitialization: (() => void) | undefined;
@@ -951,6 +1116,9 @@ export const SessionMemoryPlugin = async (
       const sessionID = getSessionID(input);
       if (!sessionID) return;
       internalSessionIDs.delete(sessionID);
+      ownedPromptIDs.delete(sessionID);
+      lastActiveInputFingerprints.delete(sessionID);
+      sessionsAwaitingIdle.delete(sessionID);
       invalidateSession(sessionID, true);
       const children = parentToChildren.get(sessionID);
       if (children) {
@@ -971,6 +1139,9 @@ export const SessionMemoryPlugin = async (
       sessionParents.delete(sessionID);
       if (children) {
         for (const child of children) {
+          ownedPromptIDs.delete(child);
+          lastActiveInputFingerprints.delete(child);
+          sessionsAwaitingIdle.delete(child);
           await withPersistenceLock(child, async () => {
             await removePath(memoryPathFor(child, config.memoryDir));
             await removePath(checkpointPathFor(child, config.memoryDir));
@@ -1013,6 +1184,8 @@ export const SessionMemoryPlugin = async (
       const earlyOwnerID = earlyMessage?.id || earlyMessage?.messageID;
       const earlyParentID =
         earlyMessage?.parentID || earlyMessage?.parentId || earlyMessage?.parent?.id || earlyMessage?.parent?.messageID;
+      if (earlySessionID && (ownsPrompt(earlySessionID, earlyOwnerID) || ownsPrompt(earlySessionID, earlyParentID)))
+        return;
       if (earlySessionID && earlyOwnerID && earlyParentID) {
         const earlyState = sessionStates.get(earlySessionID);
         if (earlyState?.originUserContexts.has(earlyParentID)) {
@@ -1023,6 +1196,7 @@ export const SessionMemoryPlugin = async (
       if (!config.enabled) return;
       const sessionID = getSessionID(input);
       if (!sessionID) return;
+      if (ownsPrompt(sessionID, earlyOwnerID) || ownsPrompt(sessionID, earlyParentID)) return;
       if (isSessionTerminal(sessionID)) return;
       if (isInternalSession(sessionID)) return;
       const generation = lifecycleFor(sessionID).generation;
@@ -1068,11 +1242,16 @@ export const SessionMemoryPlugin = async (
           String((part as { text: string }).text).includes("[MEMORY_SYSTEM]"),
       );
       const explicitSessionID = input.sessionID;
+      const earlyText = getMessageText(input) || getMessageText({ message: output?.message, parts: output?.parts });
       const earlyEligible =
         explicitSessionID &&
         !internalSessionIDs.has(explicitSessionID) &&
         !isSessionTerminal(explicitSessionID) &&
         !sessionParents.has(explicitSessionID);
+      if (earlyEligible && userID && ownsPrompt(explicitSessionID, String(userID))) return;
+      if (earlyEligible && earlyRole === "user" && earlyText && !isSelfInjection(earlyText)) {
+        sessionsAwaitingIdle.add(explicitSessionID);
+      }
       if (earlyEligible && userID && earlyRole === "user" && !taggedOutput) {
         const earlyState = ensureSessionState(explicitSessionID, sessionStates, sessionStatesOrder, MAX_SESSION_STATES);
         admitOriginUserTurn(earlyState, String(userID), hasOriginMetadata ? executionMetadata : undefined);
@@ -1093,6 +1272,8 @@ export const SessionMemoryPlugin = async (
 
       const role = getMessageRole(output?.message) ?? getMessageRole(input.message || input);
       if (role !== "user") return;
+
+      if (ownsPrompt(sessionID, userID ? String(userID) : undefined)) return;
 
       globalState.lastActiveSessionID = sessionID;
       if (!(await ensureMemoryFileForGeneration(sessionID, generation, config))) return;
