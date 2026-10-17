@@ -494,6 +494,85 @@ describe("pure V2 diagnostic policy", () => {
 
   test.each([
     [
+      "exact native socket-closed disconnect",
+      'level=INFO message="event stream disconnected" component=client error="Transport: The socket connection was closed unexpectedly. For more information, pass `verbose: true` in the second argument to fetch()" role=cli tsISO="2026-10-10T12:00:00.000Z"',
+      0,
+      1,
+    ],
+    [
+      "pre-cleanup timestamp",
+      'level=INFO message="event stream disconnected" component=client error="Transport: The socket connection was closed unexpectedly. For more information, pass `verbose: true` in the second argument to fetch()" role=cli tsISO="2026-10-09T12:00:00.000Z"',
+      1,
+      0,
+    ],
+    [
+      "wrong role",
+      'level=INFO message="event stream disconnected" component=client error="Transport: The socket connection was closed unexpectedly. For more information, pass `verbose: true` in the second argument to fetch()" role=server tsISO="2026-10-10T12:00:00.000Z"',
+      1,
+      0,
+    ],
+    [
+      "unknown component",
+      'level=INFO message="event stream disconnected" component=unknown error="Transport: The socket connection was closed unexpectedly. For more information, pass `verbose: true` in the second argument to fetch()" role=cli tsISO="2026-10-10T12:00:00.000Z"',
+      1,
+      0,
+    ],
+    [
+      "different message",
+      'level=INFO message="event stream opened" component=client error="Transport: The socket connection was closed unexpectedly. For more information, pass `verbose: true` in the second argument to fetch()" role=cli tsISO="2026-10-10T12:00:00.000Z"',
+      1,
+      0,
+    ],
+    [
+      "error phrase extra suffix",
+      'level=INFO message="event stream disconnected" component=client error="Transport: The socket connection was closed unexpectedly. For more information, pass `verbose: true` in the second argument to fetch() suffix" role=cli tsISO="2026-10-10T12:00:00.000Z"',
+      1,
+      0,
+    ],
+    [
+      "error phrase missing suffix",
+      'level=INFO message="event stream disconnected" component=client error="Transport: The socket connection was closed unexpectedly." role=cli tsISO="2026-10-10T12:00:00.000Z"',
+      1,
+      0,
+    ],
+    [
+      "different transport",
+      'level=INFO message="event stream disconnected" component=client error="OtherTransport: The socket connection was closed unexpectedly. For more information, pass `verbose: true` in the second argument to fetch()" role=cli tsISO="2026-10-10T12:00:00.000Z"',
+      1,
+      0,
+    ],
+    [
+      "extra cause",
+      'level=INFO message="event stream disconnected" component=client error="Transport: The socket connection was closed unexpectedly. For more information, pass `verbose: true` in the second argument to fetch()" cause=unexpected role=cli tsISO="2026-10-10T12:00:00.000Z"',
+      1,
+      0,
+    ],
+    [
+      "extra exception",
+      'level=INFO message="event stream disconnected" component=client error="Transport: The socket connection was closed unexpectedly. For more information, pass `verbose: true` in the second argument to fetch()" exception=unexpected role=cli tsISO="2026-10-10T12:00:00.000Z"',
+      1,
+      0,
+    ],
+    [
+      "WARN severity",
+      'level=WARN message="event stream disconnected" component=client error="Transport: The socket connection was closed unexpectedly. For more information, pass `verbose: true` in the second argument to fetch()" role=cli tsISO="2026-10-10T12:00:00.000Z"',
+      1,
+      0,
+    ],
+    [
+      "duplicate timestamp",
+      'level=INFO message="event stream disconnected" component=client error="Transport: The socket connection was closed unexpectedly. For more information, pass `verbose: true` in the second argument to fetch()" role=cli tsISO="2026-10-10T12:00:00.000Z" tsISO="2026-10-10T12:00:00.000Z"',
+      1,
+      0,
+    ],
+  ])("requires the exact native socket-closed disconnect: %s", (_name, line, unexpected, expected) => {
+    const result = classifyV2Diagnostics(context({ hostLogs: host(line) }));
+    expect(result.unexpectedHost).toHaveLength(unexpected);
+    expect(result.expectedHost).toHaveLength(expected);
+  });
+
+  test.each([
+    [
       "duplicate cause keys",
       'level=WARN message="failed to check plugin update" target="@atonev/opencode-short-term-memory@file:/tmp/stm-candidate.tgz" cause="Cause([Fail(NpmInstallFailedError (cause: Error: Package checks only support registry and Git package specs))])" cause="OtherError" role=server',
     ],

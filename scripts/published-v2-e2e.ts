@@ -14,6 +14,7 @@ import {
   PROBE_MEMORY_MODEL_ID,
   PROBE_TASK_CHILD_AGENT,
   PROBE_TASK_TOOL,
+  RC_TOOL_CASES,
   taskChildContract,
 } from "../fixtures/v2-generation-probe/index.js";
 import { buildTaggedMemoryForInjection } from "../src/injection.js";
@@ -44,6 +45,7 @@ const host = join(root, "host");
 const bun = await realpath(process.execPath);
 const fixture = await realpath(join(import.meta.dir, "../fixtures/v2-generation-probe"));
 let productVersion = "1.4.0-rc.1";
+let hostVersion = "2.0.12";
 let spec = `@atonev/opencode-short-term-memory@${productVersion}`;
 let candidateInput: string | undefined;
 let setupOnly = false;
@@ -141,6 +143,7 @@ const env: Record<string, string> = {
   PROBE_SHARED_CORE: "1",
   // This scenario records prompts but does not match any fixture tool-dispatch marker.
   PROBE_SCENARIO: "reset",
+  PROBE_RC_TOOLS: "1",
   PROBE_TELEMETRY_PATH: join(root, "telemetry.jsonl"),
   PROBE_MEMORY_DIR: join(project, ".opencode", "memory"),
   PROBE_MEMORY_FAILURES: JSON.stringify({ deterministic: 1, "deterministic-memory": 1 }),
@@ -158,6 +161,7 @@ const evidence: Record<string, unknown> = {
     "/home/dev/workspace/opencode-work/stm-readiness-improvements/2026-10-13--full-stm-acceptance.html",
   limits: { outerMs: 350_000, internalMs: 320_000, cleanupReserveMs: 15_000 },
   spec,
+  hostVersion,
   stages,
   commands,
   rpc,
@@ -314,9 +318,10 @@ async function stopService(cleanup = false) {
 }
 workflow: try {
   let explicitVersion = false;
+  let explicitHostVersion = false;
   const args = Bun.argv.slice(2);
   const usage =
-    "Usage: bun scripts/published-v2-e2e.ts [/absolute/path/candidate.tgz | --version VERSION] [--setup-only]";
+    "Usage: bun scripts/published-v2-e2e.ts [/absolute/path/candidate.tgz | --version VERSION] [--host-version EXACT2.x] [--setup-only]";
   for (let index = 0; index < args.length; index++) {
     const arg = args[index]!;
     if (arg === "--setup-only") {
@@ -331,6 +336,18 @@ workflow: try {
       );
       productVersion = version;
       explicitVersion = true;
+    } else if (arg === "--host-version") {
+      assert.ok(!explicitHostVersion, usage);
+      const version = args[++index];
+      assert.ok(
+        version &&
+          /^2\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-(?:0|[1-9]\d*|\d*[a-zA-Z-][\da-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][\da-zA-Z-]*))*)?(?:\+[\da-zA-Z-]+(?:\.[\da-zA-Z-]+)*)?$/.test(
+            version,
+          ),
+        usage,
+      );
+      hostVersion = version;
+      explicitHostVersion = true;
     } else {
       assert.ok(!arg.startsWith("-") && candidateInput === undefined && !explicitVersion && isAbsolute(arg), usage);
       candidateInput = arg;
@@ -340,6 +357,8 @@ workflow: try {
   configuredTarget = spec;
   evidence.spec = spec;
   evidence.version = productVersion;
+  evidence.hostVersion = hostVersion;
+  evidence.explicitHostVersion = explicitHostVersion;
   evidence.explicitVersion = explicitVersion;
   evidence.setupOnly = setupOnly;
   evidence.scope = candidateInput
@@ -367,7 +386,7 @@ workflow: try {
   await command(["/usr/bin/git", "init", "--quiet"], 5_000);
   evidence.projectGitBoundary = (await command(["/usr/bin/git", "rev-parse", "--show-toplevel"], 5_000)).stdout.trim();
   assert.equal(evidence.projectGitBoundary, project);
-  evidence.hostRegistry = await registry("@opencode/cli", "2.0.12");
+  evidence.hostRegistry = await registry("@opencode/cli", hostVersion);
   if (candidateInput) {
     assert.ok(isAbsolute(candidateInput), "Candidate tarball path must be absolute");
     const source = await realpath(candidateInput);
@@ -412,7 +431,7 @@ workflow: try {
   }
   await Bun.write(
     join(host, "package.json"),
-    JSON.stringify({ private: true, dependencies: { "@opencode/cli": "2.0.12" } }),
+    JSON.stringify({ private: true, dependencies: { "@opencode/cli": hostVersion } }),
   );
   await command(
     [bun, "install", "--production", "--registry", "https://registry.npmjs.org"],
@@ -422,18 +441,19 @@ workflow: try {
     host,
   );
   const nativeName = `@opencode/cli-linux-${process.arch}`;
-  const native = await provenance(join(host, "node_modules", nativeName), nativeName, "2.0.12", "bin/opencode");
+  const native = await provenance(join(host, "node_modules", nativeName), nativeName, hostVersion, "bin/opencode");
   binary = native.entry;
   const hostManifest = await Bun.file(join(host, "node_modules/@opencode/cli/package.json")).json();
-  assert.equal(hostManifest.version, "2.0.12");
-  assert.equal(hostManifest.optionalDependencies[nativeName], "2.0.12");
+  assert.equal(hostManifest.version, hostVersion);
+  assert.equal(hostManifest.optionalDependencies[nativeName], hostVersion);
   evidence.hostPackage = {
     manifest: hostManifest,
     native,
     execution: "Published platform CLI executable, not a loader adapter; normal Bun lifecycle/trust policy",
   };
   const version = (await command([binary, "--version"])).stdout.trim();
-  assert.ok(["2.0.12", "opencode v2.0.12"].includes(version));
+  assert.ok([hostVersion, `opencode v${hostVersion}`].includes(version));
+  evidence.hostVersionOutput = version;
   const added = candidateInput
     ? {
         status: 0,
@@ -524,6 +544,13 @@ workflow: try {
   const endpoint = /server listening on (http:\/\/127\.0\.0\.1:\d+)/.exec(serveLog)![1]!;
   evidence.endpoint = endpoint;
   const client = OpenCode.make({ baseUrl: endpoint, headers: { Authorization: `Basic ${basic}` } });
+  if (typeof client.server.info === "function") {
+    const serverInfo = await client.server.info({ signal: AbortSignal.timeout(remaining(5_000)) });
+    assert.equal(serverInfo.version, hostVersion);
+    evidence.connectedServerInfo = { version: serverInfo.version };
+  } else {
+    evidence.connectedServerInfo = null;
+  }
   async function call<T>(name: string, input: unknown, operation: (signal: AbortSignal) => Promise<T>, max = 15_000) {
     const record: Record<string, unknown> = { name, input, started: new Date().toISOString() };
     rpc.push(record);
@@ -682,6 +709,7 @@ workflow: try {
   type DialogSpec = { text: string; title: string; lines: string[]; screenName: string; sessionID: string };
   async function verifyDialog({ text, title, lines, screenName }: DialogSpec) {
     let renderedScreen = "";
+    let dialogCrop: { start: number; end: number } | undefined;
     await wait(
       8_000,
       async () => {
@@ -689,14 +717,29 @@ workflow: try {
         await save(`${screenName}-screen.txt`, screen);
         const rows = screen.split(/\r?\n/);
         const titleMatch = rows.map((row) => new RegExp(`${title}[ \\t]+esc[ \\t]*$`).exec(row)).find(Boolean);
-        const rendered =
-          !!titleMatch && dialogRows(rows.map((row) => row.slice(titleMatch.index)).join("\n"), title, lines);
+        const rendered = (() => {
+          if (!titleMatch) return false;
+          const start = titleMatch.index;
+          const end = start + titleMatch[0].trimEnd().length;
+          const cropped = rows.map((row) => row.slice(start, end)).join("\n");
+          if (!dialogRows(cropped, title, lines)) return false;
+          dialogCrop = { start, end };
+          return true;
+        })();
         if (rendered) renderedScreen = screen;
         return rendered;
       },
       `Actual ${title} dialog missing expected rendered output`,
     );
-    dialogs.push({ text, title, lines, screen: join(root, `${screenName}-screen.txt`), rendered: true });
+    assert.ok(dialogCrop, `Actual ${title} dialog crop geometry was not captured`);
+    dialogs.push({
+      text,
+      title,
+      lines,
+      screen: join(root, `${screenName}-screen.txt`),
+      rendered: true,
+      crop: dialogCrop,
+    });
     return renderedScreen;
   }
   async function nativeCommand(
@@ -720,11 +763,14 @@ workflow: try {
   }
   function composerBlockRows(screen: string) {
     const rows = screen.split(/\r?\n/);
-    const border = rows.findLastIndex((row) => /^\s*╹/.test(row));
+    const border = rows.findLastIndex((row) => /^\s*╹▀+/.test(row));
     assert.ok(border >= 0, "Native composer bottom border was not present in the captured screen");
+    const borderMatch = /^\s*╹▀+/.exec(rows[border]!);
+    assert.ok(borderMatch, "Native composer bottom border width was not measurable");
+    const panelEnd = borderMatch.index + borderMatch[0].length;
     const composerRows: string[] = [];
     for (let index = border - 1; index >= 0 && /^\s*┃/.test(rows[index]!); index--) {
-      composerRows.push(rows[index]!);
+      composerRows.push(rows[index]!.slice(0, panelEnd));
     }
     composerRows.reverse();
     if (composerRows.at(-1)?.match(/\bBuild\s*[·•]/)) composerRows.pop();
@@ -1033,6 +1079,7 @@ workflow: try {
   );
   assert.ok(existsSync(setupPath), "Confirmed native setup created no config");
   const createdBytes = readFileSync(setupPath);
+  const originalSettingsBytes = Buffer.from(createdBytes);
   const created = createdBytes.toString("utf8");
   const createdSha256 = createHash("sha256").update(createdBytes).digest("hex");
   evidence.setupCreatedConfig = { path: setupPath, text: created, bytes: createdBytes.length, sha256: createdSha256 };
@@ -1666,7 +1713,13 @@ workflow: try {
   const cleanIsolation = {
     verdict: "NOTRUN",
     provenance: {
-      hostVersion: "2.0.12",
+      hostVersion,
+      hostSourcePin:
+        hostVersion === "2.0.12"
+          ? "2670273ff17da96f85c5826ced57aa1b368754fa"
+          : hostVersion === "2.0.29"
+            ? "042d0832f5f3a73eaa039a58a7d565776f6d4290"
+            : null,
       instructionSource: `${serverConfig}#agents.build.system`,
       activeInstruction,
       telemetryPath: env.PROBE_TELEMETRY_PATH!,
@@ -2438,8 +2491,13 @@ workflow: try {
       checkpointBase64: parentCheckpointBytes.toString("base64"),
     },
     provenance: {
-      hostVersion: "2.0.12",
-      hostSourcePin: "2670273ff17da96f85c5826ced57aa1b368754fa",
+      hostVersion,
+      hostSourcePin:
+        hostVersion === "2.0.12"
+          ? "2670273ff17da96f85c5826ced57aa1b368754fa"
+          : hostVersion === "2.0.29"
+            ? "042d0832f5f3a73eaa039a58a7d565776f6d4290"
+            : null,
       investigationArtifact:
         "/home/dev/workspace/opencode-work/opencode-short-term-memory-v2-latest-parity/2026-10-07--child-first-request-acceptance.html",
       configSchema: join(fixture, "node_modules/@opencode/schema/dist/config/agent.js"),
@@ -3415,6 +3473,395 @@ workflow: try {
     compaction:
       "PASS: completed native compaction and exact production SYSTEM injection; pending-delta refresh qualified",
   };
+  type RcToolExecutionEvidence = {
+    readonly uniqueToolNames: string[];
+    readonly caseExecutions: object[];
+  };
+  const rcToolEvidence: {
+    verdict: string;
+    sessionID: string;
+    settingsRestored: boolean;
+    summaryInvocations: number;
+    ordinaryInvocations: number;
+    baselineArtifactsUnchanged: boolean;
+    nativeToolExecutions: RcToolExecutionEvidence;
+    cases: object[];
+  } = {
+    verdict: "FAIL",
+    sessionID: "",
+    settingsRestored: false,
+    summaryInvocations: 0,
+    ordinaryInvocations: 0,
+    baselineArtifactsUnchanged: false,
+    nativeToolExecutions: { uniqueToolNames: [], caseExecutions: [] },
+    cases: [] as object[],
+  };
+  evidence.rcToolCoverage = rcToolEvidence;
+  const rcBaselineMemory = existsSync(memoryPath) ? readFileSync(memoryPath) : null;
+  const rcBaselineCheckpoint = existsSync(checkpointPath) ? readFileSync(checkpointPath) : null;
+  const rcExpectedTools = new Set(RC_TOOL_CASES.map((item) => item.toolName));
+  const rcSnapshot = (path: string) => (existsSync(path) ? readFileSync(path) : null);
+  const rcSessionMemoryPath = (sessionID: string) => join(env.PROBE_MEMORY_DIR!, `session_${sessionID}.md`);
+  const rcSessionCheckpointPath = (sessionID: string) =>
+    join(env.PROBE_MEMORY_DIR!, "checkpoints", `${sessionID}.last-message-id.txt`);
+  const rcSessionBoundaryPath = (sessionID: string) =>
+    join(env.PROBE_MEMORY_DIR!, "reset-boundaries", `${sessionID.replace(/[^A-Za-z0-9._-]/g, "_")}.json`);
+  try {
+    const rcRawSettings = parse(originalSettingsBytes.toString("utf8"));
+    const rcDefaultSettings = {
+      enabled: true,
+      memoryModel: "",
+      summarizerMode: "clean",
+      cleanFallbackToActiveSession: false,
+      includeAgentsMdOnFirstUpdate: false,
+      injectInSubagents: true,
+      enableLegacyPeriodicSystemTransform: false,
+      sideSessionRetries: 1,
+      remindEveryN: 4,
+      maxMemoryLength: 10_000,
+      maxUpdateInputLength: 20_000,
+      debounceMs: 1_200,
+      debug: false,
+      logMaxLines: 300,
+      maxDeltaMessages: 200,
+      collapseAssistantBursts: false,
+      memoryDir: ".opencode/memory",
+    };
+    const rcSettingKeys = Object.keys(rcDefaultSettings);
+    assert.equal(
+      rcRawSettings !== null && typeof rcRawSettings === "object" && !Array.isArray(rcRawSettings),
+      true,
+      "RC setup example settings must be an object",
+    );
+    const rcExpectedSettings = {
+      ...rcDefaultSettings,
+      ...Object.fromEntries(
+        rcSettingKeys.filter((key) => key in rcRawSettings).map((key) => [key, rcRawSettings[key]]),
+      ),
+      enabled: false,
+      enableLegacyPeriodicSystemTransform: false,
+    };
+    assert.deepEqual(Object.keys(rcExpectedSettings).sort(), [...rcSettingKeys].sort());
+    const rcSettings = { ...rcRawSettings };
+    Object.assign(rcSettings, { enabled: false, enableLegacyPeriodicSystemTransform: false });
+    await Bun.write(setupPath, JSON.stringify(rcSettings, null, 2));
+    const rcSession = await createUpdateSession(`RC tools V2 ${runID.slice(0, 8)}`);
+    rcToolEvidence.sessionID = rcSession.id;
+    const rcTelemetryStart = readTelemetry().length;
+    const rcMemoryPath = rcSessionMemoryPath(rcSession.id);
+    const rcCheckpointPath = rcSessionCheckpointPath(rcSession.id);
+    const rcBoundaryPath = rcSessionBoundaryPath(rcSession.id);
+    for (const rcCase of RC_TOOL_CASES) {
+      const beforeHistory =
+        rcCase.caseID === "reset-confirmed"
+          ? await call("session.context", { sessionID: rcSession.id }, (signal) =>
+              client.session.context({ sessionID: rcSession.id }, { signal }),
+            )
+          : undefined;
+      if (rcCase.caseID === "reset-confirmed") {
+        assert.ok(beforeHistory, "Reset confirmation requires the settled pre-action session history");
+        const seedUser = beforeHistory.findLast((message) => message.type === "user");
+        const seedAssistant = beforeHistory.findLast((message) => message.type === "assistant");
+        assert.ok(seedUser && seedAssistant, "Reset confirmation seed history lacks user and assistant records");
+        assert.ok(seedAssistant.time.completed, "Reset confirmation seed assistant is not completed");
+        await Bun.write(
+          rcMemoryPath,
+          `<!-- stm:v1 -->\n## Session Memory\n\n### Conclusions\n- STM_RC_RESET_SENTINEL:${runID}\n`,
+        );
+        await Bun.write(rcCheckpointPath, `${seedAssistant.id}\n`);
+        await Bun.write(rcBoundaryPath, `${JSON.stringify({ version: 1, anchorID: seedUser.id })}\n`);
+      }
+      const before = {
+        memory: rcSnapshot(rcMemoryPath),
+        checkpoint: rcSnapshot(rcCheckpointPath),
+        boundary: rcSnapshot(rcBoundaryPath),
+        config: readFileSync(setupPath),
+        log: existsSync(productionLogPath) ? readFileSync(productionLogPath, "utf8") : "",
+      };
+      const turn = await promptUpdateSession(rcSession.id, `STM_RC_TOOL:${rcCase.caseID}`);
+      const rows = telemetryRowsFor(turn.beforeRows);
+      const invocations = rows.filter(
+        (row) => row.event === "model.invocation" && row.details?.rcToolCase === rcCase.caseID,
+      );
+      assert.equal(invocations.length, 2, `${rcCase.caseID} must have exactly one tool and one completion invocation`);
+      const [toolInvocation, completionInvocation] = invocations;
+      assert.equal(toolInvocation.sentinel, `STM_RC_TOOL:${rcCase.caseID}`);
+      assert.equal(completionInvocation.sentinel, `STM_RC_TOOL_COMPLETE:${rcCase.caseID}`);
+      assert.equal(toolInvocation.details?.correlation?.sessionID, rcSession.id);
+      assert.equal(completionInvocation.details?.correlation?.sessionID, rcSession.id);
+      assert.deepEqual(toolInvocation.details?.toolCall, {
+        toolCallId: rcCase.callID,
+        toolName: rcCase.toolName,
+        input: rcCase.args,
+      });
+      assert.deepEqual(completionInvocation.details?.toolResult?.toolCallId, rcCase.callID);
+      assert.deepEqual(completionInvocation.details?.toolResult?.toolName, rcCase.toolName);
+      const result = completionInvocation.details?.toolResult?.result;
+      assert.equal(typeof result, "string", `${rcCase.caseID} completion lacks the actual durable tool result`);
+      assert.ok(result.length > 0, `${rcCase.caseID} returned an empty tool result`);
+      const assistantMessages = turn.history.filter((message) => message.type === "assistant");
+      const structuredToolParts = assistantMessages.flatMap((message) => message.content);
+      const structuredResult = structuredToolParts.find(
+        (part) => part.type === "tool" && part.id === rcCase.callID && part.name === rcCase.toolName,
+      );
+      assert.ok(structuredResult, `${rcCase.caseID} durable assistant content lacks the matching tool part`);
+      if (structuredResult === undefined || structuredResult.state?.status !== "completed")
+        assert.fail(`${rcCase.caseID} durable assistant tool part is not completed`);
+      const structuredContent = structuredResult.state.content;
+      const isArray = (value: unknown): value is readonly unknown[] => Array.isArray(value);
+      if (!isArray(structuredContent)) assert.fail(`${rcCase.caseID} durable assistant tool output lacks content`);
+      const structuredContentArray: readonly unknown[] = structuredContent;
+      const isTextContent = (part: unknown): part is { type: "text"; text: string } =>
+        typeof part === "object" &&
+        part !== null &&
+        !Array.isArray(part) &&
+        "type" in part &&
+        part.type === "text" &&
+        "text" in part &&
+        typeof part.text === "string";
+      const structuredResultText = structuredContentArray
+        .filter(isTextContent)
+        .map((part) => part.text)
+        .join("\n");
+      assert.equal(
+        structuredResultText,
+        result,
+        `${rcCase.caseID} assistant tool output differs from the model continuation result`,
+      );
+      const executions = rows.filter(
+        (row) =>
+          row.event === "event.observed" &&
+          (row.observedEvent === "tool.execute.before" || row.observedEvent === "tool.execute.after") &&
+          row.details?.eventData?.id === rcCase.callID,
+      );
+      assert.equal(executions.length, 2, `${rcCase.caseID} must have exactly one native before/after execution pair`);
+      const nativeBefore = executions.find((row) => row.observedEvent === "tool.execute.before");
+      const nativeAfter = executions.find((row) => row.observedEvent === "tool.execute.after");
+      assert.ok(nativeBefore && nativeAfter, `${rcCase.caseID} native execution pair is incomplete`);
+      const beforeData = nativeBefore.details!.eventData!;
+      const afterData = nativeAfter.details!.eventData!;
+      for (const [label, data] of [
+        ["before", beforeData],
+        ["after", afterData],
+      ] as const) {
+        assert.equal(data.id, rcCase.callID, `${rcCase.caseID} ${label} execution call ID mismatch`);
+        assert.equal(data.tool, rcCase.toolName, `${rcCase.caseID} ${label} execution tool mismatch`);
+        assert.equal(data.sessionID, rcSession.id, `${rcCase.caseID} ${label} execution session mismatch`);
+        assert.deepEqual(data.input, rcCase.args, `${rcCase.caseID} ${label} execution input mismatch`);
+      }
+      assert.equal(afterData.status, "completed", `${rcCase.caseID} native execution did not complete`);
+      const nativeResultContent = afterData.result?.content;
+      if (!isArray(nativeResultContent)) assert.fail(`${rcCase.caseID} native execution result lacks content`);
+      const nativeResultText = nativeResultContent
+        .filter(isTextContent)
+        .map((part) => part.text)
+        .join("\n");
+      assert.equal(
+        nativeResultText,
+        result,
+        `${rcCase.caseID} native tool result differs from model continuation result`,
+      );
+      const after = {
+        memory: rcSnapshot(rcMemoryPath),
+        checkpoint: rcSnapshot(rcCheckpointPath),
+        boundary: rcSnapshot(rcBoundaryPath),
+        config: readFileSync(setupPath),
+      };
+      const caseEvidence: Record<string, unknown> = {
+        caseID: rcCase.caseID,
+        toolName: rcCase.toolName,
+        input: rcCase.args,
+        callID: rcCase.callID,
+        sessionID: rcSession.id,
+        invocationCount: invocations.length,
+        toolInvocation,
+        completionInvocation,
+        result,
+        durableToolResult: structuredResult,
+        nativeExecution: { before: nativeBefore, after: nativeAfter },
+        before,
+        after,
+      };
+      assert.deepEqual(after.config, before.config, `${rcCase.caseID} changed project settings bytes`);
+      switch (rcCase.caseID) {
+        case "read":
+          assert.equal(result, RESET_MEMORY_TEMPLATE);
+          assert.ok(after.memory?.equals(Buffer.from(RESET_MEMORY_TEMPLATE, "utf8")));
+          break;
+        case "status":
+          if (typeof rcExpectedSettings.memoryDir !== "string") assert.fail("RC status memoryDir is not a string");
+          const configuredMemoryDir = rcExpectedSettings.memoryDir;
+          const statusLines = result.split("\n");
+          assert.ok(statusLines.includes("generation: v2"));
+          assert.ok(statusLines.includes("enabled: false"));
+          assert.ok(statusLines.includes(`authoritative sessionID: ${rcSession.id}`));
+          assert.ok(statusLines.includes(`memoryBytes: ${Buffer.byteLength(RESET_MEMORY_TEMPLATE, "utf8")}`));
+          assert.ok(statusLines.includes(`memoryPath: ${join(configuredMemoryDir, `session_${rcSession.id}.md`)}`));
+          assert.ok(
+            statusLines.includes(
+              `checkpointPath: ${join(configuredMemoryDir, "checkpoints", `${rcSession.id}.last-message-id.txt`)}`,
+            ),
+          );
+          assert.ok(
+            statusLines.includes(
+              `resetBoundaryPath: ${join(configuredMemoryDir, "reset-boundaries", `${rcSession.id}.json`)}`,
+            ),
+          );
+          break;
+        case "settings": {
+          const parsedSettings = JSON.parse(result);
+          assert.deepEqual(parsedSettings.resolvedConfig, rcExpectedSettings);
+          assert.deepEqual(parsedSettings.effective, {
+            enabled: false,
+            memoryModel: null,
+            memoryModelSelection: "inherited-current-session",
+            summarizerMode: "clean",
+            activeWithExplicitMemoryModel: "unsupported",
+            maxMemoryLength: rcExpectedSettings.maxMemoryLength,
+            maxUpdateInputLength: rcExpectedSettings.maxUpdateInputLength,
+            maxDeltaMessages: rcExpectedSettings.maxDeltaMessages,
+            memoryDir: rcExpectedSettings.memoryDir,
+            cleanFallbackToActiveSession: rcExpectedSettings.cleanFallbackToActiveSession,
+            includeAgentsMdOnFirstUpdate: rcExpectedSettings.includeAgentsMdOnFirstUpdate,
+            injectInSubagents: rcExpectedSettings.injectInSubagents,
+            enableLegacyPeriodicSystemTransform: false,
+            sideSessionRetries: rcExpectedSettings.sideSessionRetries,
+            remindEveryN: rcExpectedSettings.remindEveryN,
+            debounceMs: rcExpectedSettings.debounceMs,
+            collapseAssistantBursts: rcExpectedSettings.collapseAssistantBursts,
+            debug: rcExpectedSettings.debug,
+            logMaxLines: rcExpectedSettings.logMaxLines,
+            updateHook: "context",
+            injectionHooks: ["context", "compaction"],
+          });
+          assert.deepEqual(parsedSettings.inactiveSettings, []);
+          caseEvidence.resolvedSettings = parsedSettings;
+          break;
+        }
+        case "logs": {
+          assert.ok(before.log.trim().length > 0, "RC logs case requires a populated shared log before snapshot");
+          const expectedTail = before.log.split(/\r?\n/).filter(Boolean).slice(-120).join("\n");
+          assert.equal(result, expectedTail);
+          break;
+        }
+        case "setup-refused":
+          assert.equal(
+            result,
+            "Refused to create a project example config: set confirm to literal true to confirm setup.",
+          );
+          assert.deepEqual(after.config, before.config);
+          break;
+        case "setup-confirmed":
+          assert.match(
+            result,
+            new RegExp(`^No example config created: stm\\.jsonc already exists in ${dirname(setupPath)}\\.`),
+          );
+          assert.deepEqual(after.config, before.config);
+          break;
+        case "update":
+          assert.match(result, /update: skipped/);
+          assert.match(result, /reason: disabled/);
+          assert.deepEqual(after.memory, before.memory);
+          assert.deepEqual(after.checkpoint, before.checkpoint);
+          assert.deepEqual(after.boundary, before.boundary);
+          break;
+        case "reset-refused":
+        case "compat-reset-refused":
+          assert.equal(
+            result,
+            "Refused to reset V2 short-term memory: set confirm to literal true to confirm this destructive action.",
+          );
+          assert.deepEqual(after.memory, before.memory);
+          assert.deepEqual(after.checkpoint, before.checkpoint);
+          assert.deepEqual(after.boundary, before.boundary);
+          break;
+        case "reset-confirmed": {
+          assert.ok(beforeHistory, "Reset confirmation requires the settled pre-action session history");
+          const oldUser = beforeHistory.findLast((message) => message.type === "user");
+          const oldAssistant = beforeHistory.findLast((message) => message.type === "assistant");
+          assert.ok(oldUser && oldAssistant, "Reset confirmation seed history lacks user and assistant records");
+          assert.ok(oldAssistant.time.completed, "Reset confirmation seed assistant is not completed");
+          assert.ok(before.memory, "Reset confirmation seed memory file is missing");
+          assert.notDeepEqual(
+            before.memory,
+            Buffer.from(RESET_MEMORY_TEMPLATE, "utf8"),
+            "Reset confirmation seed memory unexpectedly contains only the reset template",
+          );
+          assert.ok(
+            before.memory.toString("utf8").includes("STM_RC_RESET_SENTINEL"),
+            "Reset confirmation seed memory lacks STM_RC_RESET_SENTINEL",
+          );
+          assert.ok(before.checkpoint && before.checkpoint.length > 0, "Reset confirmation seed checkpoint is empty");
+          assert.equal(before.checkpoint.toString("utf8").trim(), oldAssistant.id);
+          assert.ok(before.boundary, "Reset confirmation seed boundary is missing");
+          assert.equal(before.boundary.toString("utf8").endsWith("\n"), true);
+          assert.deepEqual(parseV2ResetBoundary(before.boundary), { version: 1, anchorID: oldUser.id });
+          assert.match(result, /reset: completed/);
+          assert.deepEqual(after.memory, Buffer.from(RESET_MEMORY_TEMPLATE, "utf8"));
+          assert.deepEqual(after.checkpoint, Buffer.alloc(0));
+          assert.ok(after.boundary);
+          const anchor = /^resetBoundaryAnchor: (.+)$/m.exec(result)?.[1];
+          assert.ok(anchor);
+          assert.notEqual(anchor, oldUser.id, "Reset confirmation reused the old seed user as its execution anchor");
+          assert.equal(anchor, beforeData.messageID, "Reset boundary anchor differs from native tool message ID");
+          assert.equal(afterData.messageID, beforeData.messageID, "Reset native before/after message IDs differ");
+          assert.ok(
+            turn.history.some((message) => message.id === anchor),
+            "Reset anchor absent from actual settled history",
+          );
+          assert.equal(
+            turn.history.some(
+              (message) =>
+                message.type === "user" && message.text === `STM_RC_TOOL:${rcCase.caseID}` && message.id === anchor,
+            ),
+            false,
+            "Reset anchor incorrectly identifies the current RC user message",
+          );
+          assert.deepEqual(parseV2ResetBoundary(after.boundary!), { version: 1, anchorID: anchor });
+          assert.equal(after.memory.toString("utf8").includes("STM_RC_RESET_SENTINEL"), false);
+          caseEvidence.boundaryAnchor = anchor;
+          caseEvidence.invocationAnchorIdentity = "verified against actual prior session history IDs";
+          break;
+        }
+        case "compatibility-read":
+          assert.equal(result, RESET_MEMORY_TEMPLATE);
+          assert.deepEqual(after.memory, Buffer.from(RESET_MEMORY_TEMPLATE, "utf8"));
+          break;
+        default:
+          assert.fail("Unhandled RC tool case");
+      }
+      rcToolEvidence.cases.push(caseEvidence);
+    }
+    const rcPhaseRows = readTelemetry().slice(rcTelemetryStart);
+    const rcInvocations = rcPhaseRows.filter(
+      (row) => row.event === "model.invocation" && row.details?.rcToolCase !== undefined,
+    );
+    rcToolEvidence.ordinaryInvocations = rcInvocations.length;
+    assert.equal(rcInvocations.length, RC_TOOL_CASES.length * 2);
+    assert.equal(rcInvocations.filter((row) => isMemoryUpdateInvocation(row)).length, 0);
+    const nativeExecutions = RC_TOOL_CASES.map((rcCase) => {
+      const rows = rcInvocations.filter((row) => row.details?.rcToolCase === rcCase.caseID);
+      return { caseID: rcCase.caseID, toolName: rcCase.toolName, callID: rcCase.callID, sessionID: rcSession.id, rows };
+    });
+    assert.deepEqual(new Set(nativeExecutions.map((item) => item.toolName)), rcExpectedTools);
+    assert.equal(nativeExecutions.length, RC_TOOL_CASES.length);
+    rcToolEvidence.nativeToolExecutions = {
+      uniqueToolNames: [...rcExpectedTools].sort(),
+      caseExecutions: nativeExecutions,
+    };
+    rcToolEvidence.summaryInvocations = rcPhaseRows.filter(
+      (row) => row.event === "model.invocation" && isMemoryUpdateInvocation(row),
+    ).length;
+    assert.equal(rcToolEvidence.summaryInvocations, 0);
+    assert.deepEqual(rcSnapshot(memoryPath), rcBaselineMemory);
+    assert.deepEqual(rcSnapshot(checkpointPath), rcBaselineCheckpoint);
+    rcToolEvidence.baselineArtifactsUnchanged = true;
+    rcToolEvidence.verdict = "PASS";
+  } finally {
+    await Bun.write(setupPath, originalSettingsBytes);
+    assert.deepEqual(readFileSync(setupPath), originalSettingsBytes, "RC tool phase did not restore settings bytes");
+    rcToolEvidence.settingsRestored = true;
+  }
   const finalSession = await call("session.get", { sessionID: session.id }, (signal) =>
     client.session.get({ sessionID: session.id }, { signal }),
   );
@@ -3730,6 +4177,7 @@ workflow: try {
         evidence: join(root, "evidence.json"),
         verdict: evidence.verdict,
         version: productVersion,
+        hostVersion,
         setupOnly,
         stages,
         functionalVerdict: evidence.functionalVerdict,

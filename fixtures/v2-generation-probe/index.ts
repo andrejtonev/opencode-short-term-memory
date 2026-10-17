@@ -61,6 +61,56 @@ export const PROBE_TASK_CHILD_AGENT = "stm-probe-child";
 export const PROBE_TASK_TOOL = "subagent";
 const PROBE_REQUEST_HEADER = "x-stm-probe-request-id";
 
+export const RC_TOOL_CASES = [
+  { caseID: "read", toolName: "stm_memory_read", args: {}, callID: "stm-rc-tool:read" },
+  { caseID: "status", toolName: "stm_memory_status", args: {}, callID: "stm-rc-tool:status" },
+  { caseID: "logs", toolName: "stm_memory_logs", args: {}, callID: "stm-rc-tool:logs" },
+  { caseID: "settings", toolName: "stm_memory_settings", args: {}, callID: "stm-rc-tool:settings" },
+  {
+    caseID: "setup-refused",
+    toolName: "stm_memory_setup",
+    args: { confirm: false },
+    callID: "stm-rc-tool:setup-refused",
+  },
+  {
+    caseID: "setup-confirmed",
+    toolName: "stm_memory_setup",
+    args: { confirm: true },
+    callID: "stm-rc-tool:setup-confirmed",
+  },
+  { caseID: "update", toolName: "stm_memory_update", args: {}, callID: "stm-rc-tool:update" },
+  {
+    caseID: "reset-refused",
+    toolName: "stm_memory_reset",
+    args: { confirm: false },
+    callID: "stm-rc-tool:reset-refused",
+  },
+  {
+    caseID: "reset-confirmed",
+    toolName: "stm_memory_reset",
+    args: { confirm: true },
+    callID: "stm-rc-tool:reset-confirmed",
+  },
+  {
+    caseID: "compatibility-read",
+    toolName: "short_term_memory",
+    args: { action: "show" },
+    callID: "stm-rc-tool:compatibility-read",
+  },
+  {
+    caseID: "compat-reset-refused",
+    toolName: "short_term_memory",
+    args: { action: "reset", confirm: false },
+    callID: "stm-rc-tool:compat-reset-refused",
+  },
+] as const;
+export const RC_TOOL_CALL_IDS = Object.fromEntries(RC_TOOL_CASES.map((item) => [item.caseID, item.callID])) as Readonly<
+  Record<string, string>
+>;
+export const RC_TOOL_ARGS = Object.fromEntries(RC_TOOL_CASES.map((item) => [item.caseID, item.args])) as Readonly<
+  Record<string, object>
+>;
+
 export function taskChildContract(runId: string) {
   return {
     prompt: `STM_PROBE_TASK_PRIMARY:${runId}`,
@@ -196,7 +246,7 @@ async function resetExecutionEvidence(event: Record<string, unknown>): Promise<R
     memory: await read(join(memoryDir, `session_${safe}.md`)),
     checkpoint: await read(join(memoryDir, "checkpoints", `${safe}.last-message-id.txt`)),
     boundary: await read(join(memoryDir, "reset-boundaries", `${safe}.json`)),
-    ...(DIAGNOSTICS_CALLS.some((call) => call.tool === data.tool)
+    ...(Bun.env.PROBE_SCENARIO === "manual-update" && DIAGNOSTICS_CALLS.some((call) => call.tool === data.tool)
       ? {
           diagnosticsFiles: Object.fromEntries(
             await Promise.all(
@@ -379,6 +429,37 @@ function primaryMarker(options: LanguageModelV3CallOptions): string | undefined 
   const content = users.at(-1)?.content;
   if (!Array.isArray(content) || content.some((part) => part.type !== "text")) return undefined;
   return content.map((part) => (part.type === "text" ? part.text : "")).join("");
+}
+
+function latestRawUserText(options: LanguageModelV3CallOptions): string | undefined {
+  if (!Array.isArray(options.prompt)) return undefined;
+  const message = [...options.prompt]
+    .reverse()
+    .find((candidate) => isNonArrayObject(candidate) && candidate.role === "user");
+  if (!isNonArrayObject(message) || message.role !== "user" || !Array.isArray(message.content)) return undefined;
+  if (
+    message.content.length === 0 ||
+    message.content.some((part) => !isNonArrayObject(part) || part.type !== "text" || typeof part.text !== "string")
+  )
+    return undefined;
+  return message.content.map((part) => (part as { text: string }).text).join("");
+}
+
+type RcToolDispatch = (typeof RC_TOOL_CASES)[number] & {
+  result?: string;
+};
+
+function rcToolDispatch(options: LanguageModelV3CallOptions): RcToolDispatch | undefined {
+  if (Bun.env.PROBE_RC_TOOLS !== "1") return undefined;
+  const marker = latestRawUserText(options);
+  if (marker === undefined || !marker.startsWith("STM_RC_TOOL:")) return undefined;
+  const caseID = marker.slice("STM_RC_TOOL:".length);
+  const selected = RC_TOOL_CASES.find((item) => item.caseID === caseID);
+  if (selected === undefined) throw new Error(`Unknown STM_RC_TOOL case: ${caseID}`);
+  if (!availableFunctionToolNames(options).includes(selected.toolName))
+    throw new Error(`STM_RC_TOOL:${caseID} requires unavailable tool ${selected.toolName}`);
+  const result = pairedToolResults(options, selected.toolName).get(selected.callID);
+  return result === undefined ? selected : { ...selected, result };
 }
 
 export function manualToolDispatch(
@@ -704,6 +785,65 @@ const probe = {
               supportedUrls: {},
               async doGenerate(options) {
                 const invocation = ++modelInvocation;
+                const rcTool = rcToolDispatch(options);
+                if (rcTool !== undefined) {
+                  const details = {
+                    ...invocationDetails(options),
+                    rcToolCase: rcTool.caseID,
+                    toolNames: availableFunctionToolNames(options),
+                    toolCall: { toolCallId: rcTool.callID, toolName: rcTool.toolName, input: rcTool.args },
+                    ...(rcTool.result === undefined
+                      ? {}
+                      : {
+                          toolResult: { toolCallId: rcTool.callID, toolName: rcTool.toolName, result: rcTool.result },
+                        }),
+                    rcToolCorrelation: {
+                      sessionID: invocationDetails(options).correlation?.sessionID ?? null,
+                      toolCallId: rcTool.callID,
+                    },
+                    prompt: JSON.stringify(options.prompt),
+                  };
+                  if (rcTool.result === undefined) {
+                    await writer.emit({
+                      event: "model.invocation",
+                      provider: PROBE_PROVIDER_ID,
+                      model: modelID,
+                      requestKind: "doGenerate",
+                      invocation,
+                      sentinel: `STM_RC_TOOL:${rcTool.caseID}`,
+                      details,
+                    });
+                    return {
+                      content: [
+                        {
+                          type: "tool-call",
+                          toolCallId: rcTool.callID,
+                          toolName: rcTool.toolName,
+                          input: JSON.stringify(rcTool.args),
+                        },
+                      ],
+                      finishReason: { unified: "tool-calls", raw: "tool-calls" },
+                      usage: ZERO_USAGE,
+                      warnings: [],
+                    };
+                  }
+                  const completion = `STM_RC_TOOL_COMPLETE:${rcTool.caseID}`;
+                  await writer.emit({
+                    event: "model.invocation",
+                    provider: PROBE_PROVIDER_ID,
+                    model: modelID,
+                    requestKind: "doGenerate",
+                    invocation,
+                    sentinel: completion,
+                    details,
+                  });
+                  return {
+                    content: [{ type: "text", text: completion }],
+                    finishReason: { unified: "stop", raw: "stop" },
+                    usage: ZERO_USAGE,
+                    warnings: [],
+                  };
+                }
                 const memory =
                   !isCompactionPrompt(options) && isMemoryUpdatePrompt(options)
                     ? await scheduledMemoryResponse(options, modelID)
@@ -742,8 +882,9 @@ const probe = {
               },
               async doStream(options) {
                 const invocation = ++modelInvocation;
+                const rcTool = rcToolDispatch(options);
                 const memory =
-                  !isCompactionPrompt(options) && isMemoryUpdatePrompt(options)
+                  rcTool === undefined && !isCompactionPrompt(options) && isMemoryUpdatePrompt(options)
                     ? await scheduledMemoryResponse(options, modelID)
                     : undefined;
                 const responseText = isCompactionPrompt(options)
@@ -761,6 +902,78 @@ const probe = {
                     : undefined;
                 const details = invocationDetails(options);
                 const identity = details.correlation;
+                if (rcTool !== undefined) {
+                  const rcDetails = {
+                    ...details,
+                    rcToolCase: rcTool.caseID,
+                    toolNames: availableFunctionToolNames(options),
+                    toolCall: { toolCallId: rcTool.callID, toolName: rcTool.toolName, input: rcTool.args },
+                    ...(rcTool.result === undefined
+                      ? {}
+                      : {
+                          toolResult: { toolCallId: rcTool.callID, toolName: rcTool.toolName, result: rcTool.result },
+                        }),
+                    rcToolCorrelation: { sessionID: identity?.sessionID ?? null, toolCallId: rcTool.callID },
+                    prompt: JSON.stringify(options.prompt),
+                  };
+                  if (rcTool.result === undefined) {
+                    await writer.emit({
+                      event: "model.invocation",
+                      provider: PROBE_PROVIDER_ID,
+                      model: modelID,
+                      requestKind: "doStream",
+                      invocation,
+                      sentinel: `STM_RC_TOOL:${rcTool.caseID}`,
+                      details: rcDetails,
+                    });
+                    return {
+                      stream: new ReadableStream({
+                        start(controller) {
+                          controller.enqueue({ type: "stream-start", warnings: [] });
+                          controller.enqueue({
+                            type: "tool-call",
+                            toolCallId: rcTool.callID,
+                            toolName: rcTool.toolName,
+                            input: JSON.stringify(rcTool.args),
+                          });
+                          controller.enqueue({
+                            type: "finish",
+                            usage: ZERO_USAGE,
+                            finishReason: { unified: "tool-calls", raw: "tool-calls" },
+                          });
+                          controller.close();
+                        },
+                      }),
+                    };
+                  }
+                  const completion = `STM_RC_TOOL_COMPLETE:${rcTool.caseID}`;
+                  await writer.emit({
+                    event: "model.invocation",
+                    provider: PROBE_PROVIDER_ID,
+                    model: modelID,
+                    requestKind: "doStream",
+                    invocation,
+                    sentinel: completion,
+                    details: rcDetails,
+                  });
+                  const textId = `stm-rc-tool-text-${invocation}`;
+                  return {
+                    stream: new ReadableStream({
+                      start(controller) {
+                        controller.enqueue({ type: "stream-start", warnings: [] });
+                        controller.enqueue({ type: "text-start", id: textId });
+                        controller.enqueue({ type: "text-delta", id: textId, delta: completion });
+                        controller.enqueue({ type: "text-end", id: textId });
+                        controller.enqueue({
+                          type: "finish",
+                          usage: ZERO_USAGE,
+                          finishReason: { unified: "stop", raw: "stop" },
+                        });
+                        controller.close();
+                      },
+                    }),
+                  };
+                }
                 const task =
                   responseText === undefined &&
                   identity?.kind === "primary" &&

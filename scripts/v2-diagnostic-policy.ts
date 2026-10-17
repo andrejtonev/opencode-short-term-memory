@@ -264,7 +264,9 @@ const isExactPostCleanupStreamDisconnect = (entry: Record<string, unknown>, clea
   entry.level === "INFO" &&
   entry.message === "event stream disconnected" &&
   entry.component === "client" &&
-  entry.error === "Transport" &&
+  (entry.error === "Transport" ||
+    entry.error ===
+      "Transport: The socket connection was closed unexpectedly. For more information, pass `verbose: true` in the second argument to fetch()") &&
   entry.role === "cli" &&
   !("cause" in entry) &&
   !("exception" in entry) &&

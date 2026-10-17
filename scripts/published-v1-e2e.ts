@@ -11,6 +11,7 @@ import {
   type ProviderRequest,
   type SharedCoreAdapter,
 } from "../test/e2e/shared-core-scenario";
+import { RC_TOOL_CASES } from "../fixtures/v2-generation-probe/index";
 import { classifyDiagnosticRows, parseDiagnosticLog, type DiagnosticRow } from "./v1-diagnostic-policy";
 
 // Explicit invocation only. STM is installed exclusively by the native host loader.
@@ -26,7 +27,14 @@ const bun = await realpath(process.execPath);
 let candidateArg: string | undefined;
 let setupOnly = false;
 let pluginVersion = "1.4.0-rc.1";
+let hostVersion = "1.14.25";
 let spec = `@atonev/opencode-short-term-memory@${pluginVersion}`;
+let rcToolPhaseEnabled = false;
+let originalSetupConfigBytes: Buffer | undefined;
+const rcToolDispatch = {
+  cases: new Map<string, { caseID: string; toolName: string; callID: string; result?: string }>(),
+  emitted: new Set<string>(),
+};
 type Stage = "install" | "load" | "setup" | "run" | "memory";
 const stages: Record<Stage, { verdict: string; evidence?: unknown }> = {
   install: { verdict: "NOTRUN" },
@@ -99,6 +107,7 @@ const evidence: Record<string, unknown> = {
   started: new Date(started).toISOString(),
   spec,
   version: pluginVersion,
+  hostVersion,
   setupOnly,
   scope: candidateArg
     ? "Unpublished candidate tarball installed by native host; not published acceptance"
@@ -114,13 +123,6 @@ const evidence: Record<string, unknown> = {
   globalBudgetChanged: false,
   limitations:
     "Deterministic loopback model verifies plumbing, not model summarization quality. V1 command result delivery is model-mediated, not model-free. The native V1 shared-core workflow is unpaced and records a sub-1500ms rapid-turn gap; the fixed candidate remains pending live qualification. Manual isolation restarts the host, resetting in-process diagnostics but preserving historical errors in evidence. No STM exports called.",
-  inspectionReferences: [
-    "https://raw.githubusercontent.com/anomalyco/opencode/v1.14.25/packages/opencode/src/plugin/index.ts",
-    "https://raw.githubusercontent.com/anomalyco/opencode/v1.14.25/packages/opencode/src/plugin/shared.ts",
-    "https://raw.githubusercontent.com/anomalyco/opencode/v1.14.25/packages/opencode/src/session/prompt.ts",
-    "https://raw.githubusercontent.com/anomalyco/opencode/v1.14.25/packages/opencode/src/config/plugin.ts",
-    "https://raw.githubusercontent.com/anomalyco/opencode/v1.14.25/packages/opencode/src/npm/index.ts",
-  ],
 };
 let current: Stage = "install";
 let server: ReturnType<typeof Bun.serve> | undefined;
@@ -158,6 +160,7 @@ interface DiagnosticState {
   readonly snapshots: Partial<Record<DiagnosticPhase, DiagnosticSnapshot>>;
   retainedRows: DiagnosticRow[];
   hostErrors: string[];
+  hostWarnings: string[];
   expectedWarnings: string[];
   snapshotWarnings: string[];
   stmErrors: DiagnosticRow[];
@@ -181,6 +184,7 @@ const newDiagnosticState = (): DiagnosticState => ({
   snapshots: {},
   retainedRows: [],
   hostErrors: [],
+  hostWarnings: [],
   expectedWarnings: [],
   snapshotWarnings: [],
   stmErrors: [],
@@ -347,7 +351,14 @@ async function provenance(path: string, name: string, version: string) {
   const manifest = await Bun.file(join(physical, "package.json")).json();
   assert.equal(manifest.name, name);
   assert.equal(manifest.version, version);
-  const entry = join(physical, manifest.main ?? "bin/opencode");
+  const declaredEntry = name === "opencode-ai" ? manifest.bin?.opencode : (manifest.main ?? "bin/opencode");
+  assert.ok(typeof declaredEntry === "string" && declaredEntry.length > 0 && !isAbsolute(declaredEntry));
+  const entry = await realpath(join(physical, declaredEntry));
+  const entryRelative = relative(physical, entry);
+  assert.ok(
+    entryRelative !== "" && entryRelative !== ".." && !entryRelative.startsWith("../") && !isAbsolute(entryRelative),
+    "Installed package entry escapes package root",
+  );
   return {
     root: physical,
     manifest,
@@ -399,9 +410,10 @@ async function commandDelivery(
 }
 workflow: try {
   let explicitVersion = false;
+  let explicitHostVersion = false;
   const args = Bun.argv.slice(2);
   const usage =
-    "Usage: bun scripts/published-v1-e2e.ts [/absolute/path/candidate.tgz | --version VERSION] [--setup-only]";
+    "Usage: bun scripts/published-v1-e2e.ts [/absolute/path/candidate.tgz | --version VERSION] [--host-version EXACT_SEMVER] [--setup-only]";
   for (let index = 0; index < args.length; index++) {
     const arg = args[index]!;
     if (arg === "--setup-only") {
@@ -416,6 +428,18 @@ workflow: try {
       );
       pluginVersion = version;
       explicitVersion = true;
+    } else if (arg === "--host-version") {
+      assert.ok(!explicitHostVersion, usage);
+      const version = args[++index];
+      assert.ok(
+        version &&
+          /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-(?:0|[1-9]\d*|\d*[a-zA-Z-][\da-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][\da-zA-Z-]*))*)?(?:\+[\da-zA-Z-]+(?:\.[\da-zA-Z-]+)*)?$/.test(
+            version,
+          ),
+        usage,
+      );
+      hostVersion = version;
+      explicitHostVersion = true;
     } else {
       assert.ok(!arg.startsWith("-") && candidateArg === undefined && !explicitVersion && isAbsolute(arg), usage);
       candidateArg = arg;
@@ -424,6 +448,14 @@ workflow: try {
   spec = `@atonev/opencode-short-term-memory@${pluginVersion}`;
   evidence.spec = spec;
   evidence.version = pluginVersion;
+  evidence.hostVersion = hostVersion;
+  evidence.inspectionReferences = [
+    "plugin/index.ts",
+    "plugin/shared.ts",
+    "session/prompt.ts",
+    "config/plugin.ts",
+    "npm/index.ts",
+  ].map((path) => `https://raw.githubusercontent.com/anomalyco/opencode/v${hostVersion}/packages/opencode/src/${path}`);
   evidence.setupOnly = setupOnly;
   evidence.scope = candidateArg
     ? `Unpublished candidate tarball installed by native host; ${setupOnly ? "setup-only verification" : "full workflow"}; not published acceptance`
@@ -466,36 +498,56 @@ workflow: try {
       scope: "Installed unpublished bytes, not registry-published acceptance",
     };
   }
-  evidence.hostRegistry = await registry("opencode-ai", "1.14.25");
+  evidence.hostRegistry = await registry("opencode-ai", hostVersion);
   if (candidateArg === undefined)
     evidence.pluginRegistry = await registry("@atonev/opencode-short-term-memory", pluginVersion);
   await Bun.write(
     join(host, "package.json"),
-    JSON.stringify({ private: true, dependencies: { "opencode-ai": "1.14.25" } }),
+    JSON.stringify({ private: true, dependencies: { "opencode-ai": hostVersion } }),
   );
   await command([bun, "install", "--production", "--registry", "https://registry.npmjs.org"], host, 120_000);
   const hostRoot = join(host, "node_modules", "opencode-ai");
-  evidence.hostPackage = await provenance(hostRoot, "opencode-ai", "1.14.25");
-  const launcher = readFileSync(join(hostRoot, "bin", "opencode"), "utf8");
-  await Bun.write(join(root, "host-launcher-source.txt"), launcher);
-  // The published launcher searches platform siblings. This bypass is host-only.
-  assert.ok(launcher.startsWith("#!/usr/bin/env node"));
-  assert.ok(launcher.includes('path.join(modules, name, "bin", binary)') && launcher.includes("run(resolved)"));
+  const hostPackage = await provenance(hostRoot, "opencode-ai", hostVersion);
+  evidence.hostPackage = hostPackage;
+  const launcherBytes = readFileSync(hostPackage.entry);
+  const launcherType = launcherBytes.subarray(0, 4).toString("hex") === "7f454c46" ? "ELF" : "JavaScript";
+  if (launcherType === "JavaScript") {
+    const launcher = launcherBytes.toString("utf8");
+    assert.ok(launcher.startsWith("#!/usr/bin/env node"));
+    assert.ok(launcher.includes('path.join(modules, name, "bin", binary)') && launcher.includes("run(resolved)"));
+    await Bun.write(join(root, "host-launcher-source.txt"), launcher);
+  } else {
+    assert.equal(hostPackage.manifest.bin.opencode, "./bin/opencode.exe");
+  }
   const platformName = `opencode-linux-${process.arch}`;
   const nativeRoot = join(host, "node_modules", platformName);
   const native = join(nativeRoot, "bin", "opencode");
   const nativeManifest = await Bun.file(join(nativeRoot, "package.json")).json();
   assert.equal(nativeManifest.name, platformName);
-  assert.equal(nativeManifest.version, "1.14.25");
+  assert.equal(nativeManifest.version, hostVersion);
   assert.ok((await realpath(native)).startsWith(`${root}/`));
+  const nativeSha256 = createHash("sha256").update(readFileSync(native)).digest("hex");
+  if (launcherType === "ELF") {
+    assert.equal(hostPackage.manifest.optionalDependencies?.[platformName], hostVersion);
+    assert.equal(hostPackage.entrySha256, nativeSha256, "Declared ELF launcher differs from installed native sibling");
+  }
   evidence.hostLauncher = {
     bypass:
-      "Direct installed native sibling: Node absent. Verified published launcher source; no STM fallback or adapter.",
+      launcherType === "JavaScript"
+        ? "Direct installed native sibling: Node absent. Verified published JavaScript launcher source; no STM fallback or adapter."
+        : "Direct installed native sibling: verified declared ELF launcher matches sibling bytes; no launcher source verification, STM fallback or adapter.",
+    declaredLauncher: {
+      path: hostPackage.entry,
+      manifestBin: hostPackage.manifest.bin,
+      type: launcherType,
+      sourceVerified: launcherType === "JavaScript",
+      sha256: hostPackage.entrySha256,
+    },
     native,
     manifest: nativeManifest,
-    sha256: createHash("sha256").update(readFileSync(native)).digest("hex"),
+    sha256: nativeSha256,
   };
-  assert.equal((await command([native, "--version"], project)).trim(), "1.14.25");
+  assert.equal((await command([native, "--version"], project)).trim(), hostVersion);
   stages.install = { verdict: "PASS", evidence: "Exact registry host installed; installed native version verified" };
   current = "load";
   server = Bun.serve({
@@ -525,6 +577,19 @@ workflow: try {
       const latestUserText = textContent(
         typedBody.messages?.filter((message) => message.role === "user").at(-1)?.content,
       );
+      const rcCase = rcToolPhaseEnabled
+        ? RC_TOOL_CASES.find((candidate) => latestUserText === `STM_RC_TOOL:${candidate.caseID}`)
+        : undefined;
+      const rcToolMessage = [...(typedBody.messages ?? [])].reverse().find((message) => message.role === "tool") as
+        | { role?: string; content?: unknown; tool_call_id?: string; tool_callID?: string }
+        | undefined;
+      const rcContinuation = rcToolPhaseEnabled
+        ? [...rcToolDispatch.cases.values()].find(
+            (candidate) =>
+              candidate.callID === (rcToolMessage?.tool_call_id ?? rcToolMessage?.tool_callID) &&
+              rcToolMessage !== undefined,
+          )
+        : undefined;
       const summary =
         /^You are a short[\u2011-]term session memory processor for an OpenCode plugin\./.test(latestUserText) &&
         latestUserText.includes("<conversation_update>") &&
@@ -542,6 +607,71 @@ workflow: try {
         created: Math.floor(Date.now() / 1000),
         model: "deterministic",
       };
+      if (rcCase !== undefined && rcContinuation === undefined) {
+        const advertised = (typedBody.tools ?? []).some(
+          (tool) => (tool.function?.name ?? tool.name) === rcCase.toolName,
+        );
+        assert.ok(advertised, `RC case ${rcCase.caseID} did not advertise ${rcCase.toolName}`);
+        assert.ok(!rcToolDispatch.emitted.has(rcCase.caseID), `RC case ${rcCase.caseID} recursively dispatched`);
+        rcToolDispatch.emitted.add(rcCase.caseID);
+        rcToolDispatch.cases.set(rcCase.caseID, { ...rcCase });
+        const argumentsText = JSON.stringify(rcCase.args);
+        const toolChunks = [
+          {
+            ...common,
+            object: "chat.completion.chunk",
+            choices: [
+              {
+                index: 0,
+                delta: {
+                  role: "assistant",
+                  tool_calls: [
+                    {
+                      index: 0,
+                      id: rcCase.callID,
+                      type: "function",
+                      function: { name: rcCase.toolName, arguments: argumentsText },
+                    },
+                  ],
+                },
+                finish_reason: null,
+              },
+            ],
+          },
+          {
+            ...common,
+            object: "chat.completion.chunk",
+            choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }],
+          },
+        ];
+        return new Response(
+          toolChunks.map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`).join("") + "data: [DONE]\n\n",
+          { headers: { "content-type": "text/event-stream" } },
+        );
+      }
+      if (rcContinuation !== undefined) {
+        const result = textContent(rcToolMessage?.content) || JSON.stringify(rcToolMessage?.content ?? "");
+        rcContinuation.result = result;
+        const content = `STM_RC_TOOL_COMPLETE:${rcContinuation.caseID}`;
+        if (!body.stream)
+          return Response.json({
+            ...common,
+            object: "chat.completion",
+            choices: [{ index: 0, message: { role: "assistant", content }, finish_reason: "stop" }],
+            usage: { prompt_tokens: 100, completion_tokens: 10, total_tokens: 110 },
+          });
+        const chunks = [
+          {
+            ...common,
+            object: "chat.completion.chunk",
+            choices: [{ index: 0, delta: { role: "assistant", content }, finish_reason: null }],
+          },
+          { ...common, object: "chat.completion.chunk", choices: [{ index: 0, delta: {}, finish_reason: "stop" }] },
+        ];
+        return new Response(chunks.map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`).join("") + "data: [DONE]\n\n", {
+          headers: { "content-type": "text/event-stream" },
+        });
+      }
       if (isNativeTaskTurn && !hasToolResult && !nativeTask.emitted) {
         nativeTask.emitted = true;
         nativeTask.finishReason = "tool_calls";
@@ -756,7 +886,11 @@ workflow: try {
     assert.ok(base, `Host listener unavailable: ${serveLog}`);
     evidence.hostURL = base;
     const availableCommands = await api("/command", undefined, 120_000);
-    const configPaths = [...serveLog.matchAll(/service=config path=(\S+) loading/g)].map((match) => match[1]!);
+    const configPaths = [
+      ...serveLog.matchAll(
+        /service=config path=(\S+) loading|^timestamp=\S+ level=INFO [^\r\n]*?\bmessage=loading path=(\S+)(?:[ \t]|$)/gm,
+      ),
+    ].map((match) => (match[1] ?? match[2])!);
     assert.ok(configPaths.length > 0, "Host config provenance logs missing");
     assert.ok(
       configPaths.every((path) => path.startsWith(`${root}/`)),
@@ -869,6 +1003,7 @@ workflow: try {
   classifyDiagnostics = () => {
     const classified = classifyDiagnosticRows(diagnostic.retainedRows, serveLog);
     diagnostic.hostErrors = classified.hostErrors;
+    diagnostic.hostWarnings = serveLog.split(/\r?\n/).filter((line) => /\blevel=(?:WARN|WARNING)\b/.test(line));
     diagnostic.expectedWarnings = classified.expectedWarnings;
     diagnostic.snapshotWarnings = classified.snapshotWarnings;
     diagnostic.unexplainedHostErrors = classified.hostErrors;
@@ -983,6 +1118,7 @@ workflow: try {
   snapshotDiagnostics("setup");
   if (setupOnly) break workflow;
   current = "run";
+  originalSetupConfigBytes = readFileSync(setupPath);
   // Only after native setup succeeds, adjust the test-owned config for this bounded mock run.
   await Bun.write(
     setupPath,
@@ -1556,7 +1692,11 @@ workflow: try {
     taskRequests.some((request) => {
       const messages = (request.body as { messages?: { role?: string; content?: unknown }[] }).messages ?? [];
       return messages.some(
-        (message) => message.role === "tool" && JSON.stringify(message.content).includes("task_id:"),
+        (message) =>
+          message.role === "tool" &&
+          (JSON.stringify(message.content).includes("task_id:") ||
+            exactMessageText(message.content) ===
+              `<task id="${taskChildID}" state="completed">\n<task_result>\n${sharedCoreScenario.assistantText}\n</task_result>\n</task>`),
       );
     }),
     "Native TaskTool tool result was not delivered to the parent provider request",
@@ -1793,6 +1933,19 @@ workflow: try {
     "Native DCP compress tool did not persist successful output",
   );
   assert.equal(nativeDcp.finishReason, "tool_calls", "Native mock did not emit tool_calls for DCP");
+  const dcpRawRequests = mockRequests.slice(dcpRequestStart).filter((request) => !request.summary);
+  const dcpInitialRawRequest = dcpRawRequests.find((request) => {
+    const messages = (request.body as { messages?: { role?: string; content?: unknown }[] }).messages ?? [];
+    const latestUserText = exactMessageText(messages.filter((message) => message.role === "user").at(-1)?.content);
+    return (
+      !latestUserText.includes(nativeDcp.compressMarker) &&
+      messages.some(
+        (message) => message.role === "user" && exactMessageText(message.content).includes(nativeDcp.marker),
+      )
+    );
+  });
+  assert.ok(dcpInitialRawRequest, "Native DCP initial parent provider request was not captured");
+  const dcpInitialRequest = normalizeRequest(dcpInitialRawRequest);
   const dcpRequests = mockRequests.slice(dcpRequestStart).map(normalizeRequest);
   assert.ok(
     dcpRequests.some((request) => request.tools.includes("compress")),
@@ -1803,7 +1956,7 @@ workflow: try {
     "DCP marker absent from provider request",
   );
   assert.ok(
-    dcpRequests[0]?.messages.every((message) => !message.text.includes("[MEMORY_SYSTEM]")),
+    dcpInitialRequest.messages.every((message) => !message.text.includes("[MEMORY_SYSTEM]")),
     "Native DCP initial parent request unexpectedly included an injected memory user",
   );
   assert.ok(
@@ -2334,6 +2487,357 @@ workflow: try {
     );
   }
   manualUsage.verdict = "PASS";
+  const rcToolEvidence: Record<string, unknown> = {
+    verdict: "FAIL",
+    enabled: false,
+    settingsRestored: false,
+    summaryInvocations: 0,
+    ordinaryInvocations: 0,
+    uniqueToolNames: [] as string[],
+    caseExecutions: [] as object[],
+    granularResetFalseSchemaCase: "NOTRUN",
+    scope: "disable-only;update-only",
+  };
+  const rcCaseExecutions: object[] = [];
+  rcToolEvidence.caseExecutions = rcCaseExecutions;
+  evidence.nativeToolExecutions = rcToolEvidence;
+  try {
+    const rcConfig = { ...manualConfig, enabled: false, debounceMs: 60_000 };
+    assert.equal(
+      rcConfig.memoryModel,
+      "isolated/deterministic",
+      "V1 RC settings fixture must retain its explicit valid memory-model override",
+    );
+    const rcToolNames = [...new Set(RC_TOOL_CASES.map((candidate) => candidate.toolName))];
+    const rcResetTemplate =
+      "<!-- stm:v1 -->\n## Session Memory\n\n" +
+      ["User Instructions", "Long Horizon Context", "Decisions", "Conclusions", "Active References"]
+        .map((heading) => `### ${heading}\n- None captured yet.\n`)
+        .join("\n");
+    const rcToolPermission = Object.fromEntries(rcToolNames.map((toolName) => [toolName, "allow"]));
+    const rcHostConfig = {
+      ...config,
+      agent: {
+        ...config.agent,
+        "stm-rc-tools": {
+          mode: "primary",
+          model: "isolated/deterministic",
+          permission: { "*": "deny", ...rcToolPermission },
+        },
+      },
+    };
+    await Bun.write(setupPath, JSON.stringify(rcConfig, null, 2));
+    await Bun.write(join(project, "opencode.json"), JSON.stringify(rcHostConfig, null, 2));
+    const rcBeforeMemory = existsSync(memoryPath) ? readFileSync(memoryPath) : null;
+    const rcBeforeCheckpoint = existsSync(checkpoint) ? readFileSync(checkpoint) : null;
+    const rcSnapshot = (path: string) => (existsSync(path) ? readFileSync(path) : null);
+    snapshotDiagnostics("beforeManualRestart");
+    const manualRestart = await shutdown(manualHost.child, "v1-rc-tool-disabled-restart");
+    assert.ok(manualRestart.exited, "Manual host did not exit before disabled RC tool restart");
+    const rcHost = await startHost();
+    snapshotDiagnostics("afterManualRestart");
+    const rcRawConfig = JSON.parse(readFileSync(setupPath, "utf8")) as Record<string, unknown>;
+    const rcConfigFields = [
+      "enabled",
+      "memoryModel",
+      "summarizerMode",
+      "cleanFallbackToActiveSession",
+      "includeAgentsMdOnFirstUpdate",
+      "injectInSubagents",
+      "sideSessionRetries",
+      "enableLegacyPeriodicSystemTransform",
+      "remindEveryN",
+      "maxMemoryLength",
+      "maxUpdateInputLength",
+      "maxDeltaMessages",
+      "collapseAssistantBursts",
+      "debounceMs",
+      "debug",
+      "logMaxLines",
+      "memoryDir",
+    ] as const;
+    const rcExpectedSettings = {
+      ...Object.fromEntries(rcConfigFields.map((field) => [field, rcRawConfig[field]])),
+      memoryModelSelection: "explicit-override",
+      effectiveDeliveryMode: "promptNoReply",
+    };
+    const allowedCases = RC_TOOL_CASES.filter((candidate) => candidate.caseID !== "reset-refused");
+    assert.equal(allowedCases.length, 10);
+    rcToolPhaseEnabled = true;
+    for (const rcCase of allowedCases) {
+      const rcSession = await api("/session", { title: `V1 RC tool ${rcCase.caseID}`, agent: "stm-rc-tools" });
+      const rcMemoryPath = join(memoryDir, `session_${rcSession.id}.md`);
+      const rcCheckpointPath = join(memoryDir, "checkpoints", `${rcSession.id}.last-message-id.txt`);
+      const initializationDeadline = Date.now() + remaining(5_000);
+      let initialized = false;
+      while (Date.now() < initializationDeadline) {
+        const sessionCreated = completeLogLines().some((line) => {
+          try {
+            const row = JSON.parse(line) as { event?: string; sessionID?: string };
+            return row.event === "session_created" && row.sessionID === rcSession.id;
+          } catch {
+            return false;
+          }
+        });
+        const memoryInitialized = existsSync(rcMemoryPath) && readFileSync(rcMemoryPath, "utf8") === rcResetTemplate;
+        const checkpointAbsent = !existsSync(rcCheckpointPath);
+        if (sessionCreated && memoryInitialized && checkpointAbsent) {
+          initialized = true;
+          break;
+        }
+        await Bun.sleep(Math.min(100, Math.max(1, initializationDeadline - Date.now())));
+      }
+      assert.ok(initialized, `${rcCase.caseID} session initialization did not quiesce within 5s`);
+      const resetCase = rcCase.caseID === "reset-confirmed" || rcCase.caseID === "compat-reset-refused";
+      const resetSeedMemory = `<!-- stm:v1 -->\n## Session Memory\n\n### User Instructions\n- RC reset seed ${rcCase.caseID}\n\n### Decisions\n- Structured reset sentinel: rc-reset-seed-${rcSession.id}\n`;
+      const resetSeedCheckpoint = `v1-rc-reset-seed:${rcCase.caseID}:${rcSession.id}`;
+      if (resetCase) {
+        await Bun.write(rcMemoryPath, resetSeedMemory);
+        await Bun.write(rcCheckpointPath, resetSeedCheckpoint);
+      }
+      const before = {
+        memory: existsSync(rcMemoryPath) ? readFileSync(rcMemoryPath) : null,
+        checkpoint: existsSync(rcCheckpointPath) ? readFileSync(rcCheckpointPath) : null,
+        config: readFileSync(setupPath),
+        log: completeLogLines(),
+      };
+      if (resetCase) {
+        assert.notEqual(
+          before.memory?.toString("utf8"),
+          rcResetTemplate,
+          `${rcCase.caseID} reset seed was not nonempty`,
+        );
+        assert.equal(before.memory?.toString("utf8"), resetSeedMemory, `${rcCase.caseID} reset seed memory differs`);
+        assert.equal(
+          before.checkpoint?.toString("utf8"),
+          resetSeedCheckpoint,
+          `${rcCase.caseID} reset seed checkpoint differs`,
+        );
+      }
+      rcToolDispatch.emitted.clear();
+      rcToolDispatch.cases.clear();
+      const requestStart = mockRequests.length;
+      await api(`/session/${rcSession.id}/message`, {
+        model: { providerID: "isolated", modelID: "deterministic" },
+        agent: "stm-rc-tools",
+        tools: Object.fromEntries(rcToolNames.map((toolName) => [toolName, true])),
+        parts: [{ type: "text", text: `STM_RC_TOOL:${rcCase.caseID}` }],
+      });
+      const history = (await api(`/session/${rcSession.id}/message`)) as {
+        info: { role: string; id: string };
+        parts: {
+          type: string;
+          text?: string;
+          tool?: string;
+          callID?: string;
+          state?: { status?: string; input?: unknown; output?: string };
+        }[];
+      }[];
+      const expectedResult = rcToolDispatch.cases.get(rcCase.caseID)?.result;
+      assert.equal(rcToolDispatch.emitted.size, 1, `${rcCase.caseID} emitted more than one tool call`);
+      assert.equal(typeof expectedResult, "string", `${rcCase.caseID} lacked a captured tool result`);
+      const durableToolParts = history.flatMap((row) =>
+        row.parts.filter((part) => part.type === "tool" && part.callID === rcCase.callID),
+      );
+      assert.equal(durableToolParts.length, 1, `${rcCase.caseID} must have exactly one durable tool part`);
+      const durableToolPart = durableToolParts[0]!;
+      assert.equal(durableToolPart.tool, rcCase.toolName, `${rcCase.caseID} durable tool name differs`);
+      assert.equal(durableToolPart.state?.status, "completed", `${rcCase.caseID} durable tool did not complete`);
+      assert.deepEqual(durableToolPart.state?.input, rcCase.args, `${rcCase.caseID} durable tool input differs`);
+      assert.equal(
+        durableToolPart.state?.output,
+        expectedResult,
+        `${rcCase.caseID} durable tool output differs from provider continuation`,
+      );
+      const resultMessage = history.find(
+        (row) =>
+          row.info.role === "assistant" &&
+          row.parts.some((part) => part.text === `STM_RC_TOOL_COMPLETE:${rcCase.caseID}`),
+      );
+      assert.ok(resultMessage, `${rcCase.caseID} did not return the ordinary completion sentinel`);
+      const after = {
+        memory: existsSync(rcMemoryPath) ? readFileSync(rcMemoryPath) : null,
+        checkpoint: existsSync(rcCheckpointPath) ? readFileSync(rcCheckpointPath) : null,
+        config: readFileSync(setupPath),
+        log: completeLogLines(),
+      };
+      const requestsInCase = mockRequests.slice(requestStart);
+      assert.equal(
+        requestsInCase.length,
+        2,
+        `${rcCase.caseID} must have exactly one tool and one completion provider request`,
+      );
+      assert.ok(
+        requestsInCase.every((request) => !request.summary),
+        `${rcCase.caseID} included a summary request`,
+      );
+      assert.equal(
+        requestsInCase.filter((request) => request.summary).length,
+        0,
+        `${rcCase.caseID} invoked summarization`,
+      );
+      const caseEvidence: Record<string, unknown> = {
+        caseID: rcCase.caseID,
+        toolName: rcCase.toolName,
+        args: rcCase.args,
+        callID: rcCase.callID,
+        sessionID: rcSession.id,
+        result: expectedResult,
+        before,
+        after,
+        invocations: requestsInCase.length,
+        providerRequestActors: requestsInCase.map((request) => ({ path: request.path, summary: request.summary })),
+      };
+      switch (rcCase.caseID) {
+        case "read":
+          assert.equal(expectedResult, rcResetTemplate);
+          assert.equal(after.memory?.toString("utf8"), rcResetTemplate);
+          break;
+        case "status":
+          assert.match(expectedResult!, /enabled: false/);
+          assert.match(expectedResult!, new RegExp(`activeSessionID: ${rcSession.id}`));
+          break;
+        case "logs": {
+          const afterRows = after.log.slice(before.log.length);
+          const currentActionRows = afterRows.filter((line) => {
+            try {
+              const row = JSON.parse(line) as { event?: string; action?: string; sessionID?: string };
+              return row.event === "tool_memory" && row.action === "logs" && row.sessionID === rcSession.id;
+            } catch {
+              return false;
+            }
+          });
+          assert.equal(currentActionRows.length, 1, "V1 logs action row was not emitted exactly once");
+          const returnedLines = expectedResult!.split("\n");
+          const persistedLines = after.log;
+          const findContiguousWindows = (source: readonly string[], target: readonly string[]) => {
+            const starts: number[] = [];
+            for (let start = 0; start + target.length <= source.length; start++) {
+              if (target.every((line, offset) => source[start + offset] === line)) starts.push(start);
+            }
+            return starts;
+          };
+          const expectedLineCount = Math.min(120, persistedLines.length);
+          assert.equal(
+            returnedLines.length,
+            expectedLineCount,
+            "V1 logs result line count differs from the bounded persisted log window",
+          );
+          for (const line of returnedLines)
+            assert.doesNotThrow(() => JSON.parse(line), "V1 logs returned invalid JSON");
+          const windowStarts = findContiguousWindows(persistedLines, returnedLines);
+          assert.equal(windowStarts.length, 1, "V1 logs result did not match exactly one contiguous persisted window");
+          const windowStart = windowStarts[0]!;
+          const windowEnd = windowStart + returnedLines.length;
+          const changedLine = [...returnedLines];
+          changedLine[0] = `${changedLine[0]} `;
+          assert.equal(findContiguousWindows(persistedLines, changedLine).length, 0, "Changed log window was accepted");
+          assert.ok(returnedLines.length >= 2, "V1 logs result is too short for reorder rejection coverage");
+          const reorderedLines = [...returnedLines];
+          [reorderedLines[0], reorderedLines[1]] = [reorderedLines[1]!, reorderedLines[0]!];
+          assert.equal(
+            findContiguousWindows(persistedLines, reorderedLines).length,
+            0,
+            "Reordered log window was accepted",
+          );
+          assert.ok(returnedLines.includes(currentActionRows[0]!), "V1 logs result omitted its current action row");
+          caseEvidence.logWindow = { start: windowStart, end: windowEnd, count: returnedLines.length };
+          assert.deepEqual(after.memory, before.memory, "V1 logs changed session memory");
+          assert.deepEqual(after.checkpoint, before.checkpoint, "V1 logs changed checkpoint");
+          break;
+        }
+        case "settings":
+          assert.equal(Object.keys(JSON.parse(expectedResult!)).length, 19, "V1 settings result key count changed");
+          assert.deepEqual(JSON.parse(expectedResult!), rcExpectedSettings);
+          break;
+        case "setup-refused":
+          assert.equal(
+            expectedResult,
+            "Setup not run: explicit confirmation is required.\nRun `/stm setup confirm true` or call `stm_memory_setup` with `confirm: true`.\nThis creates only the project-local .opencode/stm.jsonc example and never overwrites stm.jsonc or stm.json.",
+          );
+          assert.deepEqual(after.config, before.config);
+          break;
+        case "setup-confirmed":
+          assert.match(
+            expectedResult!,
+            new RegExp(`^No example config created: stm\\.jsonc already exists in ${dirname(setupPath)}\\.`),
+          );
+          assert.deepEqual(after.config, before.config);
+          break;
+        case "update":
+          assert.equal(
+            expectedResult,
+            existsSync(rcMemoryPath)
+              ? readFileSync(rcMemoryPath, "utf8")
+              : "Memory update attempted, but no memory file was found.",
+          );
+          assert.deepEqual(after.memory, before.memory);
+          assert.deepEqual(after.checkpoint, before.checkpoint);
+          break;
+        case "reset-confirmed":
+          assert.equal(expectedResult, `Reset memory for session ${rcSession.id}.`);
+          assert.equal(after.memory?.toString("utf8"), rcResetTemplate);
+          assert.ok(!existsSync(rcCheckpointPath));
+          assert.ok(!after.memory?.toString("utf8").includes("rc-reset-seed:"), "Reset seed marker survived reset");
+          break;
+        case "compatibility-read":
+          assert.equal(expectedResult, rcResetTemplate);
+          assert.equal(after.memory?.toString("utf8"), rcResetTemplate);
+          break;
+        case "compat-reset-refused":
+          assert.equal(expectedResult, `Reset memory for session ${rcSession.id}.`);
+          assert.ok(
+            !existsSync(rcCheckpointPath),
+            "Legacy compatibility reset false did not preserve shipped reset semantics",
+          );
+          assert.equal(after.memory?.toString("utf8"), rcResetTemplate);
+          assert.ok(
+            !after.memory?.toString("utf8").includes("rc-reset-seed:"),
+            "Legacy reset seed marker survived reset",
+          );
+          caseEvidence.legacyResetFalse = "reset-shipped-v1-semantics";
+          break;
+        default:
+          assert.fail("Unhandled V1 RC tool case");
+      }
+      assert.deepEqual(after.config, before.config, `${rcCase.caseID} changed its configuration`);
+      if (
+        rcCase.caseID !== "read" &&
+        rcCase.caseID !== "logs" &&
+        rcCase.caseID !== "reset-confirmed" &&
+        rcCase.caseID !== "compatibility-read" &&
+        rcCase.caseID !== "compat-reset-refused"
+      ) {
+        assert.deepEqual(after.memory, before.memory, `${rcCase.caseID} changed its session memory`);
+        assert.deepEqual(after.checkpoint, before.checkpoint, `${rcCase.caseID} changed its checkpoint`);
+      }
+      rcCaseExecutions.push(caseEvidence);
+    }
+    const uniqueToolNames = [...new Set(allowedCases.map((candidate) => candidate.toolName))].sort();
+    rcToolEvidence.ordinaryInvocations = allowedCases.length * 2;
+    rcToolEvidence.summaryInvocations = 0;
+    rcToolEvidence.uniqueToolNames = uniqueToolNames;
+    rcToolEvidence.uniqueToolNameCount = uniqueToolNames.length;
+    rcToolEvidence.hostVersion = hostVersion;
+    rcToolEvidence.hostDigest = (evidence.hostPackage as { entrySha256?: string } | undefined)?.entrySha256 ?? null;
+    rcToolEvidence.correlation = rcCaseExecutions.map((entry) => {
+      const row = entry as { caseID?: string; sessionID?: string; callID?: string };
+      return { caseID: row.caseID, sessionID: row.sessionID, callID: row.callID };
+    });
+    assert.equal(uniqueToolNames.length, 8);
+    assert.deepEqual(rcSnapshot(memoryPath), rcBeforeMemory);
+    assert.deepEqual(rcSnapshot(checkpoint), rcBeforeCheckpoint);
+    rcToolEvidence.baselineArtifactsUnchanged = true;
+    rcToolEvidence.hostRestart = { pid: rcHost.child.pid, shutdown: manualRestart, config: rcExpectedSettings };
+    rcToolEvidence.granularResetFalseSchemaCase = "NOTRUN";
+    rcToolEvidence.verdict = "PASS";
+  } finally {
+    rcToolPhaseEnabled = false;
+    if (originalSetupConfigBytes !== undefined) await Bun.write(setupPath, originalSetupConfigBytes);
+    await Bun.write(join(project, "opencode.json"), originalHostConfigJSON);
+    rcToolEvidence.settingsRestored =
+      originalSetupConfigBytes === undefined || readFileSync(setupPath).equals(originalSetupConfigBytes);
+  }
   stages.run.evidence =
     "Unpaced shared core exact initial/followup durable turns and provider requests with rapid-turn timestamps retained in evidence (rapid-turn candidate passed); all required native manual commands validated from production synthetic JSON results and persistence after isolated host restart, not model ACK";
 } catch (error) {
@@ -2383,6 +2887,7 @@ workflow: try {
   evidence.diagnosticClassification = {
     expectedWarnings: diagnostic.expectedWarnings,
     hostErrors: diagnostic.hostErrors,
+    hostWarnings: diagnostic.hostWarnings,
     unexplainedHostErrors: diagnostic.unexplainedHostErrors,
     snapshotWarnings: diagnostic.snapshotWarnings,
     unrecoveredStmErrors: diagnostic.stmErrors,
@@ -2414,6 +2919,7 @@ workflow: try {
   const diagnosticsPassed =
     diagnosticCoverage.complete &&
     diagnostic.unexplainedHostErrors.length === 0 &&
+    diagnostic.hostWarnings.length === 0 &&
     diagnostic.snapshotWarnings.length === 0 &&
     diagnostic.stmErrors.length === 0;
   const cleanupPassed = cleanupSucceeded && residuePaths.length === 0;
@@ -2438,6 +2944,7 @@ workflow: try {
         diagnosticCounts: {
           retainedRows: diagnostic.retainedRows.length,
           hostErrors: diagnostic.hostErrors.length,
+          hostWarnings: diagnostic.hostWarnings.length,
           unexplainedHostErrors: diagnostic.unexplainedHostErrors.length,
           snapshotWarnings: diagnostic.snapshotWarnings.length,
           unrecoveredStmErrors: diagnostic.stmErrors.length,
