@@ -17,6 +17,7 @@ import { OpenCode } from "../fixtures/v2-generation-probe/node_modules/@opencode
 import { sharedCoreScenario } from "../test/e2e/shared-core-scenario.js";
 import { tuiReadiness } from "../fixtures/v2-generation-probe/tui-output/production-acceptance.js";
 import { extractComposer, typeAndSubmitOrdinary } from "./rc-keyboard-driver";
+import { classifyDiagnosticRows, parseDiagnosticLog } from "./v1-diagnostic-policy";
 import { classifyV2Diagnostics } from "./v2-diagnostic-policy";
 import {
   cleanupOwnedRoot,
@@ -42,6 +43,19 @@ const JOURNEYS = [
   "Keep port 7319 for project cobalt. Reply without tools. KB3:",
 ] as const;
 const SCENARIOS = ["v1-clean", "v1-active", "v2-default-off", "v2-opt-in"] as const;
+const V1_OPERATION_EVENTS = [
+  "memory_update_start",
+  "memory_update_prompt",
+  "memory_update_chunk_done",
+  "memory_update_done",
+  "side_session_created",
+  "side_session_summarize_done",
+  "active_session_summarizer_start",
+  "active_session_summarizer_done",
+  "memory_inject_start",
+  "memory_inject_message",
+  "memory_inject_done",
+];
 type Scenario = (typeof SCENARIOS)[number];
 type Generation = "v1" | "v2";
 type Child = ChildProcess & { pid?: number };
@@ -79,8 +93,17 @@ type CaseEvidence = {
   logs: string[];
   checkpoints: unknown[];
   providerRequests: unknown[];
+  rawProviderRequests?: unknown[];
+  sessionID?: string;
+  v1Validation?: {
+    turnIndex: number;
+    report: ReturnType<typeof validateV1TurnEvidence>;
+    logs: LogRow[];
+    memory: string;
+    checkpoint: string;
+  }[];
   turnEvidence?: unknown[];
-  diagnosticClassification?: ReturnType<typeof classifyV2Diagnostics>;
+  diagnosticClassification?: unknown;
   rawTelemetry?: string;
   telemetryStart?: number;
   installedCandidateDirectories?: string[];
@@ -115,10 +138,17 @@ type DurableRow = {
   parentID?: string;
   agent?: string;
   model?: unknown;
+  providerID?: string;
+  modelID?: string;
   parts: unknown[];
   completed?: number;
   finish?: string;
   cost?: number;
+  sessionID?: string;
+  tools?: unknown;
+  error?: unknown;
+  mode?: string;
+  info?: unknown;
 };
 type PromptHistoryRow = { input?: string; parts?: unknown[]; mode?: string; text?: string; pasted?: unknown[] };
 type LogRow = Record<string, unknown>;
@@ -500,12 +530,14 @@ async function runCase(
   let endpoint = "";
   let hostOutput = "";
   let turnsCompleted = false;
+  const rawProviderRequests: unknown[] = [];
+  evidence.rawProviderRequests = rawProviderRequests;
   const remaining = (limit: number) => {
     const value = Math.min(limit, started + CASE_MS - Date.now());
     if (value <= 0) throw new Error("case bounded deadline reached");
     return value;
   };
-  const signal = () => AbortSignal.timeout(remaining(15_000));
+  const signal = (timeoutMs = 15_000) => AbortSignal.timeout(remaining(timeoutMs));
   const inspectTmux = async () => {
     const pid = Number((await tmux(socket, ["display-message", "-p", "#{pid}"], env)).stdout.trim());
     assert.ok(Number.isSafeInteger(pid) && pid > 1, "tmux did not report its server PID");
@@ -607,7 +639,6 @@ async function runCase(
       versionOutput === selectedVersion || versionOutput === `opencode v${selectedVersion}`,
       `unexpected native version: ${versionOutput}`,
     );
-    const providerRequests: unknown[] = [];
     if (generation === "v1")
       provider = Bun.serve({
         hostname: "127.0.0.1",
@@ -615,7 +646,13 @@ async function runCase(
         async fetch(request) {
           if (request.method !== "POST" || new URL(request.url).pathname !== "/v1/chat/completions")
             return new Response("Not found", { status: 404 });
-          const body = (await request.json()) as { model?: string; stream?: boolean; messages?: unknown[] };
+          const rawRequestBody = await request.text();
+          const body = JSON.parse(rawRequestBody) as {
+            model?: string;
+            stream?: boolean;
+            messages?: unknown[];
+            tools?: unknown[];
+          };
           const messages = Array.isArray(body.messages) ? body.messages : [];
           const textOf = (value: unknown): string => {
             if (typeof value === "string") return value;
@@ -630,47 +667,54 @@ async function runCase(
             .filter((item) => item && typeof item === "object" && (item as Record<string, unknown>).role === "user")
             .at(-1);
           const latestUserText = textOf(latestUser);
-          const summary =
-            latestUserText.startsWith("<conversation_update>\n") && latestUserText.endsWith("\n</conversation_update>");
+          const summary = /^You are a short[\u2011-]term session memory processor for an OpenCode plugin\./u.test(
+            latestUserText,
+          );
           const content = summary ? sharedCoreScenario.memoryResponse : sharedCoreScenario.assistantText;
-          providerRequests.push({
+          const requestRow: Record<string, unknown> = {
             receivedAt: new Date().toISOString(),
             model: body.model,
             stream: body.stream === true,
             isSummary: summary,
             latestUserText,
             messages,
-          });
-          const id = `keyboard-provider-${providerRequests.length}`;
+            rawRequestBody,
+            tools: body.tools ?? [],
+          };
+          const id = `keyboard-provider-${rawProviderRequests.length}`;
           const common = {
             id,
             object: body.stream ? "chat.completion.chunk" : "chat.completion",
             created: Math.floor(Date.now() / 1000),
             model: body.model ?? "unknown",
           };
-          if (body.stream !== true)
-            return Response.json({
+          if (body.stream !== true) {
+            const responseBody = {
               ...common,
               choices: [{ index: 0, message: { role: "assistant", content }, finish_reason: "stop" }],
               usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
-            });
+            };
+            requestRow.rawResponseBody = JSON.stringify(responseBody);
+            rawProviderRequests.push(requestRow);
+            return Response.json(responseBody);
+          }
           const chunks = [
             { ...common, choices: [{ index: 0, delta: { role: "assistant", content }, finish_reason: null }] },
             { ...common, choices: [{ index: 0, delta: {}, finish_reason: "stop" }] },
           ];
-          return new Response(
-            chunks.map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`).join("") + "data: [DONE]\n\n",
-            {
-              headers: { "content-type": "text/event-stream" },
-            },
-          );
+          const rawResponseBody =
+            chunks.map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`).join("") + "data: [DONE]\n\n";
+          requestRow.rawResponseBody = rawResponseBody;
+          rawProviderRequests.push(requestRow);
+          return new Response(rawResponseBody, {
+            headers: { "content-type": "text/event-stream" },
+          });
         },
       });
-    evidence.providerRequests = providerRequests;
     const providerURL = provider ? `http://127.0.0.1:${provider.port}/v1` : "";
     const providerID = generation === "v1" ? "isolated" : "stm-probe";
     const primaryModel = `${providerID}/deterministic`;
-    const summaryModel = `${providerID}/deterministic-memory`;
+    const summaryModel = generation === "v1" ? primaryModel : `${providerID}/deterministic-memory`;
     const providerConfig = {
       model: primaryModel,
       small_model: summaryModel,
@@ -815,27 +859,33 @@ async function runCase(
         checkpointPath: join(memory, "checkpoints", `${session.id}.last-message-id.txt`),
         logPath: join(memory, "session-memory.log"),
         telemetryPath: telemetry,
-        providerLedger: evidence.providerRequests,
+        providerLedger: rawProviderRequests,
         deadlineAt: started + CASE_MS,
         record: evidence,
         readHistory,
       });
     } else {
-      const session = await readOnly(evidence.apiLedger, "session.create", async () =>
-        (
-          await fetch(`${endpoint}/session?directory=${encodeURIComponent(project)}`, {
-            method: "POST",
-            signal: signal(),
-            headers: { Authorization: auth, "content-type": "application/json" },
-            body: JSON.stringify({
-              title: `Keyboard ${caseID}`,
-              model: { providerID: "stm-probe", modelID: "deterministic" },
-              agent: "build",
-              location: { directory: project },
-            }),
-          })
-        ).json(),
-      );
+      await readOnly(evidence.apiLedger, "command.list", async () => {
+        const response = await fetch(`${endpoint}/command?directory=${encodeURIComponent(project)}`, {
+          headers: { Authorization: auth },
+          signal: signal(120_000),
+        });
+        assert.ok(response.ok, `V1 command inventory failed: ${response.status}`);
+        return response.json();
+      });
+      evidence.installedCandidateDirectories = await verifyInstalledCandidate(env.XDG_CACHE_HOME!, candidateFiles);
+      const session = await readOnly(evidence.apiLedger, "session.create", async () => {
+        const response = await fetch(`${endpoint}/session?directory=${encodeURIComponent(project)}`, {
+          method: "POST",
+          signal: signal(),
+          headers: { Authorization: auth, "content-type": "application/json" },
+          body: JSON.stringify({
+            title: `Keyboard ${caseID}`,
+          }),
+        });
+        assert.ok(response.ok, `V1 session creation failed: ${response.status}`);
+        return response.json();
+      });
       const id = String((session as { id?: string }).id);
       assert.ok(id && id !== "undefined");
       const readHistory = () =>
@@ -847,15 +897,6 @@ async function runCase(
           assert.ok(response.ok, `V1 history failed: ${response.status}`);
           return response.json();
         });
-      await readOnly(evidence.apiLedger, "command.list", async () => {
-        const response = await fetch(`${endpoint}/command?directory=${encodeURIComponent(project)}`, {
-          headers: { Authorization: auth },
-          signal: signal(),
-        });
-        assert.ok(response.ok, `V1 command inventory failed: ${response.status}`);
-        return response.json();
-      });
-      evidence.installedCandidateDirectories = await verifyInstalledCandidate(env.XDG_CACHE_HOME!, candidateFiles);
       const attach = [
         "exec",
         "/usr/bin/timeout",
@@ -897,9 +938,6 @@ async function runCase(
         },
         "V1 TUI did not become ready",
       );
-      throw new Error(
-        "V1 qualification blocked: split summary-delta unions and cumulative NoReply cadence validation are not implemented",
-      );
       await turns({
         generation,
         scenario,
@@ -915,7 +953,7 @@ async function runCase(
         checkpointPath: join(memory, "checkpoints", `${id}.last-message-id.txt`),
         logPath: join(memory, "session-memory.log"),
         telemetryPath: telemetry,
-        providerLedger: evidence.providerRequests,
+        providerLedger: rawProviderRequests,
         deadlineAt: started + CASE_MS,
         record: evidence,
         readHistory,
@@ -925,7 +963,12 @@ async function runCase(
     turnsCompleted = true;
     evidence.finished = new Date().toISOString();
   } catch (error) {
-    evidence.error = error instanceof Error ? (error.stack ?? error.message) : String(error);
+    evidence.error =
+      error instanceof Error
+        ? error.stack?.trim()
+          ? error.stack
+          : `${error.name.trim() || "Error"}: ${error.message.trim() || "unknown error"}`
+        : String(error);
   } finally {
     const cleanupStartedAt = Date.now();
     const failure = (error: unknown) => {
@@ -1042,7 +1085,115 @@ async function runCase(
       const hostLog = join(env.XDG_DATA_HOME!, "opencode/log/opencode.log");
       const finalHostLog = existsSync(hostLog) ? await readFile(hostLog, "utf8") : "";
       evidence.logs.push(redacted(finalHostLog, secrets), redacted(hostOutput, secrets));
-      if (generation === "v2") {
+      if (generation === "v1") {
+        const stmLog = await readFile(join(memory, "session-memory.log"), "utf8").catch(
+          (error: NodeJS.ErrnoException) => {
+            if (error.code === "ENOENT" && !turnsCompleted) return "";
+            throw error;
+          },
+        );
+        evidence.logs.push(stmLog);
+        const parsed = parseDiagnosticLog(stmLog);
+        const allHostLogs = evidence.logs.slice(0, -1).join("\n");
+        const classification = classifyDiagnosticRows(parsed.rows, allHostLogs);
+        const unexpectedHostWarnings = allHostLogs
+          .split(/\r?\n/u)
+          .filter(
+            (line) =>
+              (/^\s*(?:WARN(?:ING)?\b|Warning:)/iu.test(line) || /\blevel=WARN(?:ING)?\b/iu.test(line)) &&
+              !/^\s*Warning:\s*OPENCODE_SERVER_PASSWORD\b/iu.test(line),
+          );
+        const unexpectedStmWarnings = parsed.rows.filter((row) => /^warn(?:ing)?$/iu.test(row.level ?? ""));
+        evidence.diagnosticClassification = {
+          ...classification,
+          parsed,
+          unexpectedHostWarnings,
+          unexpectedStmWarnings,
+        };
+        if (
+          parsed.issues.length > 0 ||
+          parsed.incompleteTail !== undefined ||
+          classification.stmErrors.length > 0 ||
+          classification.hostErrors.length > 0 ||
+          classification.snapshotWarnings.length > 0 ||
+          unexpectedHostWarnings.length > 0 ||
+          unexpectedStmWarnings.length > 0 ||
+          /(?:^|\n)child-error:/u.test(hostOutput) ||
+          (turnsCompleted && (!stmLog || !(finalHostLog || hostOutput) || parsed.rows.length >= 20_000))
+        )
+          failure("V1 final diagnostic coverage/classification failed");
+        if (turnsCompleted) {
+          const validated = evidence.v1Validation ?? [];
+          assert.equal(validated.length, JOURNEYS.length, "V1 final validated-turn coverage missing");
+          assert.deepEqual(
+            validated.map((row) => row.turnIndex),
+            [0, 1, 2],
+            "V1 final turn order mismatch",
+          );
+          assert.ok(evidence.sessionID, "V1 owned main session ID missing");
+          assert.equal(
+            rawProviderRequests.filter((row) => (row as LogRow).isSummary === false).length,
+            JOURNEYS.length,
+            "V1 late/extra PRIMARY request",
+          );
+          const summaryCount = validated.reduce((count, row) => count + row.report.summaries.length, 0);
+          assert.equal(
+            rawProviderRequests.filter((row) => (row as LogRow).isSummary === true).length,
+            summaryCount,
+            "V1 late/extra summary request",
+          );
+          assert.ok(
+            summaryCount >= 3 && summaryCount <= (scenario === "v1-clean" ? 6 : 3),
+            "V1 final summary count outside source bounds",
+          );
+          assert.deepEqual(
+            rawProviderRequests,
+            evidence.providerRequests.flatMap((row) => (row as { rows: unknown[] }).rows),
+            "V1 raw provider ledger differs from validated turn requests",
+          );
+          const finalOperations = parsed.rows.filter((row) => V1_OPERATION_EVENTS.includes(row.event));
+          assert.deepEqual(
+            finalOperations,
+            validated.flatMap((row) => row.logs.filter((log) => V1_OPERATION_EVENTS.includes(String(log.event)))),
+            "V1 late/extra production generation or NoReply operation",
+          );
+          assert.ok(
+            !parsed.rows.some((row) => /^tool_|^tool\.|^command_|^command\./u.test(row.event)),
+            "V1 final manual STM/tool operation",
+          );
+          const finalCommits = parsed.rows.filter((row) => row.event === "memory_update_chunk_done");
+          const validatedCommits = validated.flatMap((row) => row.report.commits);
+          assert.deepEqual(finalCommits, validatedCommits, "V1 final commit sequence differs from validated chunks");
+          assert.deepEqual(
+            finalCommits.map((row) => row.checkpointID),
+            evidence.checkpoints.flatMap((row) =>
+              (row as { rows: LogRow[] }).rows.map((commit) => commit.checkpointID),
+            ),
+            "V1 retained checkpoint report omitted a committed chunk",
+          );
+          const injections = parsed.rows.filter((row) => row.event === "memory_inject_done");
+          assert.equal(injections.length, 1, "V1 final NoReply completion count mismatch");
+          assert.equal(injections[0]!.sessionID, evidence.sessionID, "V1 final NoReply session mismatch");
+          const last = validated.at(-1)!;
+          assert.equal(
+            await readFile(join(memory, `session_${evidence.sessionID}.md`), "utf8"),
+            last.memory,
+            "V1 memory changed after last quiet period/shutdown",
+          );
+          assert.equal(
+            await readFile(join(memory, "checkpoints", `${evidence.sessionID}.last-message-id.txt`), "utf8"),
+            last.checkpoint,
+            "V1 checkpoint changed after last quiet period/shutdown",
+          );
+          const sideSessionsPath = join(memory, "side-sessions.json");
+          if (scenario === "v1-clean" || existsSync(sideSessionsPath))
+            assert.deepEqual(
+              JSON.parse(await readFile(sideSessionsPath, "utf8")),
+              [],
+              "V1 side-session tracking changed after last quiet period/shutdown",
+            );
+        }
+      } else {
         evidence.rawTelemetry = await readFile(telemetry, "utf8").catch((error: NodeJS.ErrnoException) => {
           if (error.code === "ENOENT" && !turnsCompleted) return "";
           throw error;
@@ -1220,24 +1371,108 @@ export function durableProjection(raw: unknown, generation: Generation): Durable
       }
       continue;
     }
-    const info = value.info && typeof value.info === "object" ? (value.info as Record<string, unknown>) : value;
+    if (!value.info || typeof value.info !== "object" || Array.isArray(value.info))
+      throw new Error("V1 native row has no info object");
+    const info = value.info as Record<string, unknown>;
+    if (["tool_calls", "toolCalls", "function_call", "functionCall"].some((key) => key in info))
+      throw new Error("V1 native message has tool metadata");
     const role = info.role;
-    if (role !== "user" && role !== "assistant") continue;
-    const parts = Array.isArray(value.parts) ? value.parts : Array.isArray(info.parts) ? info.parts : [];
-    if (parts.some((part) => part && typeof part === "object" && (part as Record<string, unknown>).type === "tool"))
-      throw new Error(`${generation} durable history contains a tool part`);
+    if (role !== "user" && role !== "assistant") throw new Error("V1 native row has an unknown/tool role");
+    const parts = value.parts ?? info.parts;
+    if (!Array.isArray(parts)) throw new Error("V1 native row has no parts array");
     const id = typeof info.id === "string" ? info.id : "";
-    if (!id) throw new Error(`${generation} durable row has no id`);
+    if (!id.trim()) throw new Error("V1 durable row has no id");
     if (ids.has(id)) throw new Error(`duplicate V1 durable message ID: ${id}`);
     ids.add(id);
+    if (typeof info.sessionID !== "string" || !info.sessionID.trim()) throw new Error("V1 row has no session ID");
+    if (!info.time || typeof info.time !== "object" || Array.isArray(info.time))
+      throw new Error("V1 row has no time metadata");
+    const time = info.time as Record<string, unknown>;
+    if (
+      typeof time.created !== "number" ||
+      !Number.isFinite(time.created) ||
+      (time.completed !== undefined && (typeof time.completed !== "number" || !Number.isFinite(time.completed)))
+    )
+      throw new Error("V1 native time metadata is malformed");
+    for (const field of ["agent", "mode", "parentID", "providerID", "modelID", "finish"])
+      if (info[field] !== undefined && typeof info[field] !== "string") throw new Error(`V1 malformed ${field}`);
+    if (
+      info.tools !== undefined &&
+      (!info.tools ||
+        typeof info.tools !== "object" ||
+        Array.isArray(info.tools) ||
+        Object.values(info.tools).some((enabled) => typeof enabled !== "boolean"))
+    )
+      throw new Error("V1 tools metadata is malformed");
+    for (const part of parts) {
+      if (!part || typeof part !== "object" || Array.isArray(part)) throw new Error("V1 malformed native part");
+      const p = part as Record<string, unknown>;
+      if (typeof p.id !== "string" || !p.id.trim() || ids.has(p.id)) throw new Error("V1 missing/duplicate part ID");
+      ids.add(p.id);
+      if (p.sessionID !== info.sessionID || p.messageID !== id) throw new Error("V1 part ownership mismatch");
+      if (!["text", "reasoning", "step-start", "step-finish", "patch"].includes(String(p.type)))
+        throw new Error("V1 unknown/tool part type");
+      if (["text", "reasoning"].includes(String(p.type)) && typeof p.text !== "string")
+        throw new Error("V1 text/reasoning part has no text");
+      if (["tool_calls", "toolCalls", "function_call", "functionCall"].some((key) => key in p))
+        throw new Error("V1 part tool metadata");
+    }
+    const model = info.model;
+    if (role === "user") {
+      if (
+        model !== undefined &&
+        (!model ||
+          typeof model !== "object" ||
+          Array.isArray(model) ||
+          typeof (model as LogRow).providerID !== "string" ||
+          typeof (model as LogRow).modelID !== "string")
+      )
+        throw new Error(`${generation} user model metadata is malformed`);
+      if (info.providerID !== undefined && typeof info.providerID !== "string")
+        throw new Error(`${generation} user provider metadata is malformed`);
+      if (info.modelID !== undefined && typeof info.modelID !== "string")
+        throw new Error(`${generation} user model ID metadata is malformed`);
+    } else {
+      if (typeof info.providerID !== "string" || typeof info.modelID !== "string")
+        throw new Error(`${generation} assistant provider/model metadata is incomplete`);
+      if (info.cost !== undefined && (typeof info.cost !== "number" || !Number.isFinite(info.cost)))
+        throw new Error(`${generation} assistant cost metadata is malformed`);
+      if (info.finish !== undefined && typeof info.finish !== "string")
+        throw new Error(`${generation} assistant finish metadata is malformed`);
+      if (info.parentID !== undefined && typeof info.parentID !== "string")
+        throw new Error(`${generation} assistant parent metadata is malformed`);
+    }
+    const stableInfo = { ...info };
+    if (role === "user") {
+      if (
+        info.summary !== undefined &&
+        (!info.summary || typeof info.summary !== "object" || Array.isArray(info.summary))
+      )
+        throw new Error("V1 user summary metadata is malformed");
+      // Native user diff summaries update asynchronously without changing the durable message.
+      delete stableInfo.summary;
+    }
     rows.push({
       id,
       role,
-      text: partText(parts),
+      text: parts
+        .filter((part) => (part as LogRow).type === "text")
+        .map((part) => (part as LogRow).text)
+        .join(""),
       parentID: typeof info.parentID === "string" ? info.parentID : undefined,
       agent: typeof info.agent === "string" ? info.agent : undefined,
-      model: info.model,
+      model,
+      providerID: typeof info.providerID === "string" ? info.providerID : undefined,
+      modelID: typeof info.modelID === "string" ? info.modelID : undefined,
       parts,
+      completed: typeof time.completed === "number" ? time.completed : undefined,
+      finish: typeof info.finish === "string" ? info.finish : undefined,
+      cost: typeof info.cost === "number" ? info.cost : undefined,
+      sessionID: info.sessionID,
+      tools: info.tools,
+      error: info.error,
+      mode: typeof info.mode === "string" ? info.mode : undefined,
+      info: stableInfo,
     });
   }
   return rows;
@@ -1469,6 +1704,431 @@ export function validateV2TurnEvidence(input: {
   );
   return { requests, invocations, commits };
 }
+
+/** Validate the legacy native message shape without projecting it into V2's schema. */
+export function validateV1TurnEvidence(input: {
+  typedinput: string;
+  baseline: readonly DurableRow[];
+  rawcurrentnativehistory: unknown;
+  actualproviderRequests: readonly unknown[];
+  logs: readonly unknown[];
+  scenario: "v1-clean" | "v1-active";
+  sessionID: string;
+  caseID: string;
+  turnIndex: number;
+  literal: string;
+  priorMemory: string | null;
+  actualcheckpoint: string;
+}) {
+  const record = (value: unknown): LogRow => {
+    assert.ok(value && typeof value === "object" && !Array.isArray(value), "V1 evidence must be an object");
+    return value as LogRow;
+  };
+  const noTools = (row: LogRow) => {
+    assert.ok(
+      ![
+        "tool_calls",
+        "toolCalls",
+        "function_call",
+        "functionCall",
+        "tool_call_id",
+        "providerMetadata",
+        "providerOptions",
+        "experimental_providerMetadata",
+      ].some((key) => key in row),
+      "V1 tool/request metadata",
+    );
+  };
+  const prompt = (value: unknown) => {
+    assert.ok(Array.isArray(value) && value.length > 0, "V1 provider messages missing");
+    return value.map((message) => {
+      const row = record(message);
+      assert.ok(["system", "user", "assistant"].includes(String(row.role)), "V1 unknown/tool provider role");
+      noTools(row);
+      const text =
+        typeof row.content === "string"
+          ? row.content
+          : (() => {
+              assert.ok(Array.isArray(row.content), "V1 provider content must be string/text parts");
+              return row.content
+                .map((part) => {
+                  const p = record(part);
+                  noTools(p);
+                  assert.equal(p.type, "text", "V1 tool/unknown provider content part");
+                  assert.equal(typeof p.text, "string", "V1 provider text missing");
+                  return p.text as string;
+                })
+                .join("");
+            })();
+      return { role: row.role, text };
+    });
+  };
+  const wrapperPrefix = /^You are a short[\u2011-]term session memory processor for an OpenCode plugin\./u;
+  const initialMemory = `${MEMORY_PREFIX}## Session Memory\n\n${["User Instructions", "Long Horizon Context", "Decisions", "Conclusions", "Active References"].map((heading) => `### ${heading}\n- None captured yet.\n`).join("\n")}`;
+  assert.ok(Number.isInteger(input.turnIndex) && input.turnIndex >= 0 && input.turnIndex < JOURNEYS.length);
+  assert.equal(input.typedinput, input.literal, "typed input/literal mismatch");
+  const literals = JOURNEYS.slice(0, input.turnIndex + 1).map((text) => `${text}${input.caseID.slice(-8)}`);
+  assert.equal(input.literal, literals.at(-1), "V1 literal is not this journey turn");
+  const current = durableProjection(input.rawcurrentnativehistory, "v1");
+  assert.deepEqual(current.slice(0, input.baseline.length), input.baseline, "V1 durable prefix metadata changed");
+  assert.ok(
+    current.every((row) => row.sessionID === input.sessionID),
+    "V1 wrong-session native history",
+  );
+  const fresh = current.slice(input.baseline.length);
+  const genuine = current.filter((row) => row.role === "user" && literals.includes(row.text));
+  assert.deepEqual(
+    genuine.map((row) => row.text),
+    literals,
+    "V1 cumulative genuine users differ",
+  );
+  assert.deepEqual(
+    input.baseline.filter((row) => row.role === "user" && literals.includes(row.text)).map((row) => row.text),
+    literals.slice(0, -1),
+    "V1 baseline genuine users differ",
+  );
+  const user = fresh.filter((row) => row.role === "user" && row.text === input.literal);
+  const ordinary = fresh.filter((row) => row.role === "assistant" && row.text === sharedCoreScenario.assistantText);
+  assert.equal(user.length, 1, "V1 requires one fresh genuine user");
+  assert.equal(ordinary.length, 1, "V1 requires one fresh ordinary assistant");
+  const typed = user[0]!;
+  const assistant = ordinary[0]!;
+  assert.ok(fresh.indexOf(typed) < fresh.indexOf(assistant), "V1 ordinary response preceded typed user");
+  const completed = (row: DurableRow) => {
+    assert.equal(row.sessionID, input.sessionID);
+    assert.equal(row.agent, "build");
+    assert.equal(row.mode, "build");
+    assert.equal(row.providerID, "isolated");
+    assert.equal(row.modelID, "deterministic");
+    assert.equal(row.finish, "stop");
+    assert.equal(row.cost, 0);
+    assert.ok(typeof row.completed === "number" && Number.isFinite(row.completed), "V1 unfinished assistant");
+    assert.equal(row.error, undefined, "V1 native assistant error");
+  };
+  completed(assistant);
+  for (const row of genuine) {
+    assert.equal(row.agent, "build");
+    assert.deepEqual(row.model, { providerID: "isolated", modelID: "deterministic" });
+  }
+  const injected = current.filter((row) => row.role === "user" && row.text.startsWith(SYSTEM_PREFIX));
+  const freshInjected = fresh.filter((row) => injected.includes(row));
+  const freshCount = [0, 1, 0][input.turnIndex]!;
+  assert.equal(freshInjected.length, freshCount, "V1 fresh NoReply cadence mismatch");
+  assert.equal(injected.length, [0, 1, 1][input.turnIndex], "V1 cumulative NoReply cadence mismatch");
+  assert.equal(
+    input.baseline.filter((row) => row.role === "user" && row.text.startsWith(SYSTEM_PREFIX)).length,
+    [0, 0, 1][input.turnIndex],
+    "V1 baseline NoReply cadence mismatch",
+  );
+  for (const row of injected) {
+    assert.equal(row.text, injectedExpected(), "V1 exact NoReply body mismatch");
+    assert.equal(row.agent, genuine[1]?.agent);
+    assert.deepEqual(row.model, genuine[1]?.model);
+    assert.deepEqual(row.tools, genuine[1]?.tools, "V1 NoReply lost typed tools metadata");
+  }
+  assert.ok(
+    assistant.parentID === typed.id ||
+      freshInjected.some((row) => row.id === assistant.parentID && fresh.indexOf(row) < fresh.indexOf(assistant)),
+    "V1 assistant parent is not a fresh owned user",
+  );
+
+  const requests = input.actualproviderRequests.map(record);
+  const decoded = requests.map((row) => {
+    assert.equal(row.model, "deterministic", "V1 raw OpenAI model mismatch");
+    assert.equal(row.stream, true, "V1 provider must stream");
+    assert.ok(Array.isArray(row.tools), "V1 tool catalog missing");
+    for (const tool of row.tools) {
+      const definition = record(tool);
+      assert.equal(definition.type, "function", "V1 malformed advertised tool");
+      const fn = record(definition.function);
+      assert.ok(typeof fn.name === "string" && fn.name.trim(), "V1 advertised tool has no name");
+    }
+    assert.equal(typeof row.rawRequestBody, "string", "V1 raw request missing");
+    const body = record(JSON.parse(row.rawRequestBody as string));
+    noTools(body);
+    assert.equal(body.model, row.model);
+    assert.equal(body.stream, row.stream);
+    assert.deepEqual(body.messages, row.messages, "V1 raw/recorded messages disagree");
+    assert.deepEqual(body.tools ?? [], row.tools, "V1 raw/recorded tools disagree");
+    const messages = prompt(body.messages);
+    const latest = messages.filter((message) => message.role === "user").at(-1)?.text;
+    assert.equal(typeof latest, "string", "V1 provider has no user");
+    assert.equal(row.latestUserText, latest, "V1 recorded latest user disagrees with request");
+    const isSummary = wrapperPrefix.test(latest!);
+    assert.equal(row.isSummary, isSummary, "V1 summary classification disagrees with full wrapper");
+    assert.equal(typeof row.rawResponseBody, "string", "V1 raw response missing");
+    const raw = row.rawResponseBody as string;
+    const responses = raw.trimStart().startsWith("{")
+      ? [record(JSON.parse(raw))]
+      : (() => {
+          assert.ok(raw.endsWith("data: [DONE]\n\n"), "V1 SSE response is incomplete");
+          assert.equal(
+            raw.split("\n\n").filter((line) => line === "data: [DONE]").length,
+            1,
+            "V1 duplicate SSE terminator",
+          );
+          return raw
+            .split("\n\n")
+            .filter(Boolean)
+            .filter((line) => line !== "data: [DONE]")
+            .map((line) => {
+              assert.ok(line.startsWith("data: "), "V1 malformed SSE frame");
+              return record(JSON.parse(line.slice(6)));
+            });
+        })();
+    let responseText = "";
+    const finishes: unknown[] = [];
+    for (const [index, response] of responses.entries()) {
+      noTools(response);
+      assert.equal(response.model, row.model);
+      assert.ok(Array.isArray(response.choices) && response.choices.length === 1, "V1 malformed response choices");
+      const choice = record(response.choices[0]);
+      assert.equal(choice.index, 0, "V1 response choice index mismatch");
+      noTools(choice);
+      const output = record(choice.delta ?? choice.message);
+      noTools(output);
+      assert.ok(output.role === undefined || output.role === "assistant", "V1 response role mismatch");
+      if (choice.message !== undefined) assert.equal(output.role, "assistant", "V1 JSON response lacks assistant role");
+      assert.ok(
+        output.content === undefined || output.content === null || typeof output.content === "string",
+        "V1 malformed response content",
+      );
+      responseText += output.content ?? "";
+      if (choice.finish_reason !== null && choice.finish_reason !== undefined) {
+        assert.equal(index, responses.length - 1, "V1 response continued after finish");
+        finishes.push(choice.finish_reason);
+      }
+    }
+    assert.deepEqual(finishes, ["stop"], "V1 response did not stop exactly once");
+    assert.equal(
+      responseText,
+      isSummary ? sharedCoreScenario.memoryResponse : sharedCoreScenario.assistantText,
+      "V1 raw fixture response mismatch",
+    );
+    return { row, messages, latest: latest!, isSummary };
+  });
+  const primaries = decoded.filter((row) => !row.isSummary);
+  const summaries = decoded.filter((row) => row.isSummary);
+  assert.equal(primaries.length, 1, "V1 needs exactly one PRIMARY");
+  assert.ok(
+    summaries.length >= 1 && summaries.length <= (input.scenario === "v1-clean" ? 2 : 1),
+    "V1 missing/extra summary requests",
+  );
+  const primaryUsers = primaries[0]!.messages.filter((row) => row.role === "user");
+  assert.deepEqual(
+    primaryUsers.filter((row) => literals.includes(row.text)).map((row) => row.text),
+    literals,
+    "V1 PRIMARY lost genuine user sequence",
+  );
+  assert.deepEqual(
+    primaryUsers.filter((row) => row.text.startsWith(SYSTEM_PREFIX)).map((row) => row.text),
+    injected.map((row) => row.text),
+    "V1 PRIMARY cumulative NoReply tags mismatch",
+  );
+  const priorOwned = input.baseline
+    .filter((row) => row.role === "user" && wrapperPrefix.test(row.text))
+    .map((row) => row.text);
+  assert.ok(
+    primaryUsers.every(
+      (row) =>
+        literals.includes(row.text) ||
+        row.text === injectedExpected() ||
+        (input.scenario === "v1-active" && priorOwned.includes(row.text)),
+    ),
+    "V1 PRIMARY contains unowned/summary user text",
+  );
+  if (input.scenario === "v1-clean")
+    assert.ok(
+      primaries[0]!.messages.every(
+        (row) =>
+          !wrapperPrefix.test(row.text) &&
+          !/^<(?:existing_memory|conversation_update|agents_md_context)>$/mu.test(row.text),
+      ),
+      "V1 clean PRIMARY contains summary history",
+    );
+  assert.ok(
+    primaries[0]!.latest === input.literal || (freshCount === 1 && primaries[0]!.latest === injectedExpected()),
+    "V1 PRIMARY latest user is not current typed/NoReply text",
+  );
+  const deltas: string[] = [];
+  for (const [index, summary] of summaries.entries()) {
+    if (input.scenario === "v1-clean") {
+      assert.deepEqual(summary.row.tools, [], "V1 clean summary advertised tools");
+      assert.deepEqual(
+        summary.messages.filter((row) => row.role !== "system"),
+        [{ role: "user", text: summary.latest }],
+        "V1 clean summary is not standalone",
+      );
+    }
+    const wrapper = summary.latest;
+    assert.ok(!/^<\/?agents_md_context>(?=\n|$)/mu.test(wrapper), "V1 agents DATA block unexpectedly present");
+    const frame = (name: string) => {
+      const opens = [...wrapper.matchAll(new RegExp(`^<${name}>\\n`, "gm"))];
+      const closes = [...wrapper.matchAll(new RegExp(`^</${name}>(?=\\n|$)`, "gm"))];
+      assert.equal(opens.length, 1, `V1 duplicate/missing ${name} DATA opening`);
+      assert.equal(closes.length, 1, `V1 duplicate/missing ${name} DATA closing`);
+      const start = opens[0]!.index! + opens[0]![0].length;
+      const end = closes[0]!.index!;
+      assert.ok(end > start && wrapper[end - 1] === "\n", "V1 invalid DATA newline framing");
+      return { text: wrapper.slice(start, end - 1), start: opens[0]!.index!, end: end + closes[0]![0].length };
+    };
+    const existing = frame("existing_memory");
+    const delta = frame("conversation_update");
+    assert.ok(existing.end < delta.start && delta.end === wrapper.length, "V1 DATA frame order/tail mismatch");
+    assert.equal(
+      existing.text,
+      index === 0 ? (input.priorMemory ?? initialMemory) : memoryExpected(),
+      "V1 retained memory mismatch",
+    );
+    deltas.push(delta.text);
+  }
+  const entries = [`USER:\n${input.literal}`, `ASSISTANT:\n${sharedCoreScenario.assistantText}`];
+  assert.deepEqual(
+    deltas,
+    summaries.length === 1 ? [entries.join("\n\n---\n\n")] : entries,
+    "V1 delta union is not exactly fresh user then ordinary assistant",
+  );
+
+  const generatedUsers = fresh.filter((row) => row.role === "user" && wrapperPrefix.test(row.text));
+  const generatedAssistants = fresh.filter(
+    (row) => row.role === "assistant" && row.text === sharedCoreScenario.memoryResponse,
+  );
+  assert.equal(
+    generatedUsers.length,
+    input.scenario === "v1-active" ? 1 : 0,
+    "V1 generated wrapper ownership/count mismatch",
+  );
+  assert.equal(generatedAssistants.length, generatedUsers.length, "V1 generated assistant count mismatch");
+  if (generatedUsers.length) {
+    const wrapper = generatedUsers[0]!;
+    const result = generatedAssistants[0]!;
+    assert.match(
+      wrapper.id,
+      /^msg_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u,
+      "V1 generated wrapper lacks source-owned UUID ID",
+    );
+    assert.equal(wrapper.text, summaries[0]!.latest);
+    assert.equal(wrapper.agent, "build");
+    assert.deepEqual(wrapper.model, typed.model);
+    completed(result);
+    assert.equal(result.parentID, wrapper.id);
+    assert.ok(
+      fresh.indexOf(assistant) < fresh.indexOf(wrapper) && fresh.indexOf(wrapper) < fresh.indexOf(result),
+      "V1 active generated pair order mismatch",
+    );
+  }
+  assert.equal(
+    fresh.length,
+    2 + freshInjected.length + generatedUsers.length + generatedAssistants.length,
+    "V1 unaccounted fresh native rows",
+  );
+  assert.equal(input.actualcheckpoint, `${assistant.id}\n`, "V1 final checkpoint is not ordinary assistant");
+  const logRows = input.logs.map(record);
+  assert.ok(
+    !logRows.some((row) => /^tool_|^tool\.|^command_|^command\./u.test(String(row.event))),
+    "V1 manual STM/tool event observed",
+  );
+  const events = (event: string, count: number, main = true) => {
+    const rows = logRows.filter((row) => row.event === event);
+    assert.equal(rows.length, count, `V1 ${event} count mismatch`);
+    for (const row of rows) {
+      if (main) assert.equal(row.sessionID, input.sessionID, `V1 wrong-session ${event}`);
+      else
+        assert.ok(
+          typeof row.sessionID === "string" && row.sessionID && row.sessionID !== input.sessionID,
+          "V1 side session must differ from main",
+        );
+    }
+    return rows;
+  };
+  const injectStarts = events("memory_inject_start", freshCount);
+  const injectMessages = events("memory_inject_message", freshCount);
+  const injectDone = events("memory_inject_done", freshCount);
+  if (freshCount) {
+    assert.equal(injectStarts[0]!.transport, "prompt_no_reply");
+    assert.equal(injectStarts[0]!.bytes, input.priorMemory?.length);
+    assert.equal(injectDone[0]!.bytes, input.priorMemory?.length);
+    assert.equal(injectMessages[0]!.injectedMessage, injectedExpected());
+    assert.equal(injectMessages[0]!.messageChars, injectedExpected().length);
+    assert.ok(
+      logRows.indexOf(injectStarts[0]!) < logRows.indexOf(injectMessages[0]!) &&
+        logRows.indexOf(injectMessages[0]!) < logRows.indexOf(injectDone[0]!),
+      "V1 NoReply log order mismatch",
+    );
+  }
+  const starts = events("memory_update_start", summaries.length);
+  const prompts = events("memory_update_prompt", summaries.length);
+  const commits = events("memory_update_chunk_done", summaries.length);
+  const done = events("memory_update_done", summaries.length);
+  const clean = input.scenario === "v1-clean";
+  const summaryStarts = events(
+    clean ? "side_session_created" : "active_session_summarizer_start",
+    summaries.length,
+    !clean,
+  );
+  const summaryDone = events(
+    clean ? "side_session_summarize_done" : "active_session_summarizer_done",
+    summaries.length,
+    !clean,
+  );
+  events(clean ? "active_session_summarizer_start" : "side_session_created", 0);
+  events(clean ? "active_session_summarizer_done" : "side_session_summarize_done", 0);
+  assert.equal(new Set(summaryStarts.map((row) => row.sessionID)).size, clean ? summaries.length : 1);
+  for (const [index, summary] of summaries.entries()) {
+    const size = summaries.length === 1 ? 2 : 1;
+    const checkpointID = summaries.length === 2 && index === 0 ? typed.id : assistant.id;
+    assert.equal(starts[index]!.mode, clean ? "clean" : "active");
+    assert.equal(starts[index]!.model, "");
+    assert.ok(
+      ["session_idle", "post_in_flight_replay", "session_created_bootstrap", "session_updated_bootstrap"].includes(
+        String(starts[index]!.reason),
+      ),
+      "V1 summary was not automatically scheduled",
+    );
+    for (const row of [prompts[index]!, commits[index]!, done[index]!])
+      assert.equal(row.reason, starts[index]!.reason, "V1 operation reason mismatch");
+    assert.equal(starts[index]!.deltaEntries, size);
+    assert.equal(prompts[index]!.prompt, summary.latest, "V1 production prompt disagrees with provider wrapper");
+    assert.equal(prompts[index]!.promptChars, summary.latest.length);
+    for (const key of ["chunkEntries", "processedEntries", "totalEntries"]) assert.equal(commits[index]![key], size);
+    assert.equal(commits[index]!.checkpointID, checkpointID, "V1 chunk checkpoint sequence mismatch");
+    assert.equal(done[index]!.processedEntries, size);
+    assert.equal(summaryDone[index]!.sessionID, summaryStarts[index]!.sessionID);
+    assert.equal(summaryDone[index]!.resultChars, sharedCoreScenario.memoryResponse.trim().length);
+    assert.equal(summaryDone[index]!.resultPreview, sharedCoreScenario.memoryResponse.trim().slice(0, 120));
+    if (!clean) assert.equal(summaryStarts[index]!.promptChars, summary.latest.length);
+    const ordered = [
+      starts[index]!,
+      prompts[index]!,
+      summaryStarts[index]!,
+      summaryDone[index]!,
+      commits[index]!,
+      done[index]!,
+    ].map((row) => logRows.indexOf(row));
+    assert.ok(
+      ordered.every((position, i) => i === 0 || position > ordered[i - 1]!),
+      "V1 summary operation log order mismatch",
+    );
+    if (index) assert.ok(logRows.indexOf(done[index - 1]!) < ordered[0]!, "V1 summary operations out of order");
+  }
+  const diagnosticText = logRows.map((row) => JSON.stringify(row)).join("\n") + "\n";
+  const parsed = parseDiagnosticLog(diagnosticText);
+  assert.equal(parsed.issues.length, 0, "malformed V1 diagnostic evidence");
+  assert.equal(parsed.incompleteTail, undefined, "incomplete V1 diagnostic evidence");
+  assert.deepEqual(parsed.rows, logRows, "V1 diagnostic encoding altered the supplied schema");
+  const classified = classifyDiagnosticRows(parsed.rows, "");
+  assert.equal(classified.stmErrors.length, 0, "unrecovered V1 STM diagnostic error");
+  return {
+    user: typed,
+    assistant,
+    primaries: primaries.map((row) => row.row),
+    summaries: summaries.map((row) => row.row),
+    commits,
+    generatedIDs: [...generatedUsers, ...generatedAssistants].map((row) => row.id),
+    injectedIDs: injected.map((row) => row.id),
+    diagnostic: classified,
+  };
+}
 async function waitTurn(
   context: ObservationContext,
   literal: string,
@@ -1490,6 +2150,16 @@ async function waitTurn(
   (context.record.turnEvidence ??= []).push(observed);
   let accepted: DurableRow[] = [];
   let latestRaw: unknown;
+  const v1Completed = (row: DurableRow) =>
+    row.completed !== undefined &&
+    row.finish === "stop" &&
+    row.cost === 0 &&
+    row.agent === "build" &&
+    row.mode === "build" &&
+    row.providerID === "isolated" &&
+    row.modelID === "deterministic" &&
+    row.sessionID === context.sessionID &&
+    row.error === undefined;
   while (Date.now() < deadline) {
     latestRaw = await context.readHistory();
     observed.raw = latestRaw;
@@ -1510,19 +2180,22 @@ async function waitTurn(
     if (
       user &&
       assistant &&
-      (context.generation === "v1" ||
-        (assistant.completed !== undefined &&
+      (context.generation === "v1"
+        ? v1Completed(assistant)
+        : assistant.completed !== undefined &&
           assistant.finish === "stop" &&
           assistant.agent === "build" &&
           assistant.model !== undefined &&
-          assistant.cost === 0))
+          assistant.cost === 0)
     )
       break;
     await Bun.sleep(100);
   }
-  const user = accepted.find((row) => row.role === "user" && row.text === literal);
-  const assistant = accepted.find((row) => row.role === "assistant" && row.text === sharedCoreScenario.assistantText);
+  let user = accepted.find((row) => row.role === "user" && row.text === literal);
+  let assistant = accepted.find((row) => row.role === "assistant" && row.text === sharedCoreScenario.assistantText);
   if (!user || !assistant) throw new Error(`turn ${turnIndex + 1} did not produce a genuine typed user/assistant pair`);
+  if (context.generation === "v1" && !v1Completed(assistant))
+    throw new Error(`V1 ordinary assistant did not complete on turn ${turnIndex + 1}`);
   if (
     context.generation === "v2" &&
     (accepted.length !== 2 ||
@@ -1557,6 +2230,7 @@ async function waitTurn(
   let telemetryRows: { rows: LogRow[]; next: number } = { rows: [], next: baseline.telemetry };
   let logRows: { rows: LogRow[]; next: number } = { rows: [], next: baseline.log };
   let committed: LogRow[] = [];
+  const ordinaryAssistantID = assistant.id;
   await waitUntil(
     deadline,
     async () => {
@@ -1571,13 +2245,40 @@ async function waitTurn(
       committed = logRows.rows.filter(
         (row) =>
           (row.event === "memory_update_chunk_done" || row.event === "v2_memory_update_committed") &&
-          row.checkpointID === assistant.id &&
+          row.checkpointID === ordinaryAssistantID &&
           row.sessionID === context.sessionID,
       );
-      return memoryMatches && checkpoint === `${assistant.id}\n` && committed.length > 0;
+      const finalCommit = committed.at(-1);
+      const updateDone =
+        context.generation !== "v1" ||
+        (finalCommit !== undefined &&
+          logRows.rows
+            .slice(logRows.rows.indexOf(finalCommit) + 1)
+            .some(
+              (row) =>
+                row.event === "memory_update_done" &&
+                row.sessionID === context.sessionID &&
+                row.reason === finalCommit.reason,
+            ));
+      return memoryMatches && checkpoint === `${ordinaryAssistantID}\n` && committed.length > 0 && updateDone;
     },
     `automatic memory/checkpoint/commit settlement did not occur on turn ${turnIndex + 1}`,
   );
+  if (context.generation === "v1") {
+    // Active summaries append their owned pair while persistence is settling.
+    latestRaw = await context.readHistory();
+    observed.raw = latestRaw;
+    const projected = durableProjection(latestRaw, "v1");
+    assert.deepEqual(projected.slice(0, baseline.history.length), baseline.history, "V1 settled prefix changed");
+    accepted = projected.slice(baseline.history.length);
+    user = accepted.find((row) => row.role === "user" && row.text === literal);
+    assistant = accepted.find((row) => row.role === "assistant" && row.text === sharedCoreScenario.assistantText);
+    assert.ok(user && assistant && v1Completed(assistant), "V1 settled ordinary pair is incomplete");
+    assert.equal(assistant.id, ordinaryAssistantID, "V1 ordinary assistant changed during settlement");
+    telemetryRows = await jsonl(context.telemetryPath, baseline.telemetry);
+    logRows = await jsonl(context.logPath, baseline.log);
+    checkpoint = await readFile(context.checkpointPath, "utf8");
+  }
   const providerRows = context.providerLedger.slice(baseline.provider);
   (context.record.turnEvidence ??= []).push({
     turnIndex,
@@ -1591,49 +2292,29 @@ async function waitTurn(
     priorMemory: baseline.memory?.toString("utf8") ?? null,
   });
   if (context.generation === "v1") {
-    if (providerRows.length === 0) throw new Error(`V1 provider request was not observed on turn ${turnIndex + 1}`);
-    for (const row of providerRows) {
-      if (!row || typeof row !== "object" || typeof (row as Record<string, unknown>).latestUserText !== "string")
-        throw new Error(`V1 provider row lacks actual latest user text on turn ${turnIndex + 1}`);
-      const actual = row as Record<string, unknown>;
-      const latest = String(actual.latestUserText);
-      if (actual.isSummary === true) {
-        const expectedDelta = `USER:\n${literal}\n\n---\n\nASSISTANT:\n${sharedCoreScenario.assistantText}`;
-        if (
-          !latest.startsWith("<conversation_update>\n") ||
-          !latest.endsWith("\n</conversation_update>") ||
-          !latest.includes(expectedDelta)
-        )
-          throw new Error(`V1 summary framing/delta mismatch on turn ${turnIndex + 1}`);
-      } else if (latest !== literal && !latest.startsWith(SYSTEM_PREFIX))
-        throw new Error(`V1 ordinary provider latest user mismatch on turn ${turnIndex + 1}`);
-      const messages = Array.isArray(actual.messages) ? actual.messages : [];
-      for (const message of messages) {
-        if (!message || typeof message !== "object") continue;
-        const item = message as Record<string, unknown>;
-        if (item.role === "tool") throw new Error(`V1 provider contained a tool role on turn ${turnIndex + 1}`);
-        if (
-          "tool_calls" in item ||
-          "toolCalls" in item ||
-          "function_call" in item ||
-          (Array.isArray(item.content) &&
-            item.content.some(
-              (part) =>
-                part &&
-                typeof part === "object" &&
-                ["tool", "tool-call", "tool-result"].includes(String((part as LogRow).type)),
-            ))
-        )
-          throw new Error(`V1 provider contained tool metadata on turn ${turnIndex + 1}`);
-        if (
-          item.role === "user" &&
-          typeof item.content === "string" &&
-          item.content.startsWith(SYSTEM_PREFIX) &&
-          item.content !== injectedExpected()
-        )
-          throw new Error(`V1 memory injection body mismatch on turn ${turnIndex + 1}`);
-      }
-    }
+    assert.ok(context.scenario === "v1-clean" || context.scenario === "v1-active");
+    const report = validateV1TurnEvidence({
+      typedinput: literal,
+      baseline: baseline.history,
+      rawcurrentnativehistory: latestRaw,
+      actualproviderRequests: providerRows,
+      logs: logRows.rows,
+      scenario: context.scenario,
+      sessionID: context.sessionID,
+      caseID: context.caseID,
+      turnIndex,
+      literal,
+      priorMemory: baseline.memory?.toString("utf8") ?? null,
+      actualcheckpoint: checkpoint,
+    });
+    committed = report.commits;
+    (context.record.v1Validation ??= []).push({
+      turnIndex,
+      report,
+      logs: logRows.rows,
+      memory: await readFile(memoryPath, "utf8"),
+      checkpoint,
+    });
   } else {
     assert.ok(context.scenario === "v2-default-off" || context.scenario === "v2-opt-in");
     validateV2TurnEvidence({
@@ -1649,14 +2330,14 @@ async function waitTurn(
     });
   }
   context.record.history.push({ turnIndex, raw: latestRaw, projected: accepted });
-  context.record.checkpoints.push({ turnIndex, assistantID: assistant.id, rows: committed });
   context.record.providerRequests.push({
     turnIndex,
     rows:
-      context.generation === "v2"
-        ? telemetryRows.rows.filter((row) => row.event === "model.request" || row.event === "model.invocation")
-        : providerRows,
+      context.generation === "v1"
+        ? providerRows
+        : telemetryRows.rows.filter((row) => row.event === "model.request" || row.event === "model.invocation"),
   });
+  context.record.checkpoints.push({ turnIndex, assistantID: assistant.id, rows: committed });
   return {
     user,
     assistant,
@@ -1664,9 +2345,11 @@ async function waitTurn(
     log: logRows.next,
     memory: await readFile(memoryPath),
     checkpoint: Buffer.from(checkpoint),
+    history: durableProjection(latestRaw, context.generation),
   };
 }
 async function turns(context: ObservationContext) {
+  context.record.sessionID = context.sessionID;
   durableProjection(await context.readHistory(), context.generation);
   let telemetryOffset = existsSync(context.telemetryPath) ? (await readFile(context.telemetryPath)).length : 0;
   context.record.telemetryStart = telemetryOffset;
@@ -1723,12 +2406,15 @@ async function turns(context: ObservationContext) {
       throw new Error(`late model/tool/commit activity after settled turn ${turnIndex + 1}`);
     if (
       lateLog.rows.some((row) =>
-        [
-          "v2_generation_attempt_start",
-          "v2_generation_attempt_outcome",
-          "v2_memory_update_committed",
-          "memory_update_chunk_done",
-        ].includes(String(row.event)),
+        (context.generation === "v1"
+          ? V1_OPERATION_EVENTS
+          : [
+              "v2_generation_attempt_start",
+              "v2_generation_attempt_outcome",
+              "v2_memory_update_committed",
+              "memory_update_chunk_done",
+            ]
+        ).includes(String(row.event)),
       )
     )
       throw new Error(`late production generation/commit after settled turn ${turnIndex + 1}`);
@@ -1742,6 +2428,25 @@ async function turns(context: ObservationContext) {
       completed.checkpoint,
       "settled checkpoint changed during quiet period",
     );
+    if (context.generation === "v1") {
+      const raw = await context.readHistory();
+      const projected = durableProjection(raw, "v1");
+      const sideSessionsPath = join(dirname(context.memoryPath), "side-sessions.json");
+      const sideSessions = existsSync(sideSessionsPath)
+        ? (JSON.parse(await readFile(sideSessionsPath, "utf8")) as unknown)
+        : null;
+      (context.record.turnEvidence ??= []).push({
+        turnIndex,
+        quiet: true,
+        raw,
+        projected,
+        sideSessionsPath,
+        sideSessions,
+      });
+      assert.deepEqual(projected, completed.history, "V1 settled native history changed during quiet period");
+      if (context.scenario === "v1-clean" || sideSessions !== null)
+        assert.deepEqual(sideSessions, [], "V1 side-session tracking did not settle empty");
+    }
     telemetryOffset = lateTelemetry.next;
     logOffset = lateLog.next;
   }
