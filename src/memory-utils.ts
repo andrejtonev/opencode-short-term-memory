@@ -410,7 +410,7 @@ async function loadConfigFromPath(path: string) {
       disallowComments: false,
       allowEmptyContent: false,
     });
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
+    if (errors.length > 0 || !parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
     return parsed as Record<string, unknown>;
   } catch {
     return undefined;

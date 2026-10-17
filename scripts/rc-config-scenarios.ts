@@ -279,11 +279,7 @@ export function buildConfigScenario(
         rawFile(projectJsonc, '{"enabled":false,"remindEveryN":9,bad'),
         file(projectJson, { remindEveryN: 8 }),
       ];
-      expected = disabledBaseline(memory, { enabled: false, remindEveryN: 9 });
-      knownIssues = [
-        "jsonc_parser_errors_ignored",
-        "invalid_configuration_is_observational_not_strict_syntax_acceptance",
-      ];
+      expected = disabledBaseline(memory, { remindEveryN: 8 });
       break;
     case "nearest-inherits":
       launchDirectory = nested;

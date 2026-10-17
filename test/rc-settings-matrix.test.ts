@@ -1,9 +1,21 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join, relative, resolve } from "node:path";
 import { reloadConfig, type ConfigContext } from "../src/config";
 import { DEFAULT_CONFIG, readConfig, type SessionMemoryConfig } from "../src/memory-utils";
+
+const REPO_ROOT = resolve(import.meta.dir, "..");
+const BUN_PATH = "/home/dev/.bun/bin/bun";
+const CHILD_SCRIPT = `
+  const payload = JSON.parse(process.argv.at(-1));
+  const { pathToFileURL } = await import("node:url");
+  const { readConfig } = await import(pathToFileURL(payload.repoRoot + "/src/memory-utils.ts").href);
+  const actualConfig = await readConfig(undefined, payload.launchDirectory);
+  process.stdout.write(JSON.stringify({
+    actualConfig,
+    homedir: (await import("node:os")).homedir(),
+  }));
+`;
 
 const numericCases = [
   ["sideSessionRetries", 0, 10],
@@ -54,13 +66,60 @@ describe("RC public settings matrix", () => {
 
   async function configFile(name = "config.json") {
     const path = join(root, name);
+    assertOwnedPath(path);
     await writeFile(path, "{}", "utf8");
     return path;
   }
 
   async function writeJson(path: string, value: unknown) {
+    assertOwnedPath(path);
     await mkdir(join(path, ".."), { recursive: true });
     await writeFile(path, JSON.stringify(value), "utf8");
+  }
+
+  function assertOwnedPath(path: string) {
+    const rel = relative(root, path);
+    expect(isAbsolute(path)).toBe(true);
+    expect(rel.startsWith("..") || isAbsolute(rel)).toBe(false);
+  }
+
+  async function readConfigInFreshChild(expectedHome: string) {
+    const launchDirectory = join(root, "project");
+    const payload = JSON.stringify({ repoRoot: REPO_ROOT, launchDirectory });
+    const child = Bun.spawn([BUN_PATH, "-e", CHILD_SCRIPT, "--", payload], {
+      cwd: launchDirectory,
+      env: {
+        ...process.env,
+        HOME: expectedHome,
+        XDG_CONFIG_HOME: join(root, "xdg"),
+        OPENCODE_CONFIG_DIR: join(root, "env-config"),
+      },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    let settled = false;
+    try {
+      const result = await Promise.race([
+        (async () => ({
+          exitCode: await child.exited,
+          stdout: await new Response(child.stdout).text(),
+          stderr: await new Response(child.stderr).text(),
+        }))(),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error("config observer timed out after 2s")), 2000),
+        ),
+      ]);
+      settled = true;
+      expect(result.exitCode, result.stderr).toBe(0);
+      expect(result.stdout, result.stderr).not.toBe("");
+      return JSON.parse(result.stdout) as {
+        actualConfig: SessionMemoryConfig;
+        homedir: string;
+      };
+    } finally {
+      if (!settled) child.kill();
+      await child.exited;
+    }
   }
 
   test("normalizes every numeric public key at boundaries and malformed values", async () => {
@@ -134,20 +193,23 @@ describe("RC public settings matrix", () => {
 
   test("applies XDG, HOME, environment, and project precedence with file removal", async () => {
     const xdg = join(process.env.XDG_CONFIG_HOME!, "opencode", "stm.jsonc");
-    const home = join(homedir(), ".opencode", "stm.json");
+    const privateHome = join(root, "home");
+    const home = join(privateHome, ".opencode", "stm.json");
     const env = join(process.env.OPENCODE_CONFIG_DIR!, "stm.json");
     const project = join(root, "project", ".opencode", "stm.json");
+    for (const path of [xdg, home, env, project]) assertOwnedPath(path);
     await writeJson(xdg, { debug: false, maxMemoryLength: 201 });
     await writeJson(home, { debug: true, maxMemoryLength: 202 });
     await writeJson(env, { maxMemoryLength: 203 });
     await writeJson(project, { maxMemoryLength: 204 });
-    expect((await readConfig(undefined, join(root, "project"))).maxMemoryLength).toBe(204);
+    expect((await readConfigInFreshChild(privateHome)).homedir).toBe(privateHome);
+    expect((await readConfigInFreshChild(privateHome)).actualConfig.maxMemoryLength).toBe(204);
     await rm(project);
-    expect((await readConfig(undefined, join(root, "project"))).maxMemoryLength).toBe(203);
+    expect((await readConfigInFreshChild(privateHome)).actualConfig.maxMemoryLength).toBe(203);
     await rm(env);
-    expect((await readConfig(undefined, join(root, "project"))).maxMemoryLength).toBe(202);
+    expect((await readConfigInFreshChild(privateHome)).actualConfig.maxMemoryLength).toBe(202);
     await rm(home);
-    expect((await readConfig(undefined, join(root, "project"))).maxMemoryLength).toBe(201);
+    expect((await readConfigInFreshChild(privateHome)).actualConfig.maxMemoryLength).toBe(201);
   });
 
   test("handles JSONC, JSON shadowing, nearest empty project, invalid overrides, and explicit paths", async () => {
@@ -155,10 +217,16 @@ describe("RC public settings matrix", () => {
     const projectConfig = join(projectDir, ".opencode");
     const ancestorConfig = join(root, ".opencode");
     await writeJson(join(root, "xdg", "opencode", "stm.json"), { debug: true });
-    await writeFile(join(root, "xdg", "opencode", "stm.jsonc"), '{ "debug": false,', "utf8");
-    expect((await readConfig(undefined, projectDir)).debug).toBe(false);
+    const malformedPath = join(root, "xdg", "opencode", "stm.jsonc");
+    const malformedBytes = '{ "debug": false,';
+    assertOwnedPath(malformedPath);
+    await writeFile(malformedPath, malformedBytes, "utf8");
+    expect((await readConfig(undefined, projectDir)).debug).toBe(true);
+    expect(await Bun.file(malformedPath).text()).toBe(malformedBytes);
     await mkdir(projectConfig, { recursive: true });
-    await writeFile(join(projectConfig, "stm.jsonc"), '{ // jsonc\n "debug": true,\n}', "utf8");
+    const validJsoncPath = join(projectConfig, "stm.jsonc");
+    assertOwnedPath(validJsoncPath);
+    await writeFile(validJsoncPath, '{ // jsonc\n "debug": true,\n}', "utf8");
     expect((await readConfig(undefined, projectDir)).debug).toBe(true);
     await rm(projectConfig, { recursive: true, force: true });
     await rm(join(root, "xdg", "opencode"), { recursive: true, force: true });
