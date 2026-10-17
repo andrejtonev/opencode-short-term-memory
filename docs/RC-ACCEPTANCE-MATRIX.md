@@ -528,7 +528,7 @@ Mode/key typos and summarizer padding semantics are unchanged. The harness
 commit is verified as `06ca52d6d519e7e1f4b9d327375f45f3e538fe59`; it is not
 pending or invented here.
 
-## Current Keyboard Checkpoint (2026-10-17)
+## Historical Keyboard Checkpoint (2026-10-17)
 
 One bounded native V2 default-off keyboard run is retained as **FAIL**, not
 native qualification. The corrected runner has not been rerun; offline tests
@@ -600,3 +600,76 @@ off, no tool activity, and verified cleanup. Only after that qualifies should
 V2 opt-in proceed, followed by the bounded V1 gate implementation unit. No
 native rerun, build, packaged README, or version change is part of this
 harness checkpoint.
+
+## Current Qualified Keyboard Journeys (2026-10-17)
+
+**All four independent keyboard journeys PASS** against the same frozen
+development archive:
+`/home/dev/workspace/opencode-work/stm-readiness-improvements/strict-config-local-20261017.tgz`,
+SHA256 `e5590eeb71683a1712346093fd936ed61e1c8f33fcb27fc21ef27562e64c6826`.
+The historical checkpoint above describes its then-current state verbatim;
+these later runs do not reclassify earlier decoder `df91086e`, merged-SYSTEM
+`ace89db1`, or bootstrap `24140573` FAIL records.
+
+| Component/Logic Block | Current Findings/Hypothesis                                                                                          | Implications                                                           | Verification Status                         |
+| --------------------- | -------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- | ------------------------------------------- |
+| Delivery              | Each journey has three literal typed user/ordinary-assistant pairs.                                                  | Typing plus Enter, not sender API prompt delivery.                     | Four independent native PASS records.       |
+| Generation/injection  | Each has three primary calls, actual summary calls and ordinary-assistant checkpoint commits; cadence matches below. | Automatic memory and configured delivery qualified.                    | Provider/history/log/persistence evidence.  |
+| Cleanup               | Owned host/TUI processes and tmux dead, listener closed, socket absent; runtime/cache cleanup complete.              | No retained live owned runtime or cleanup refusal.                     | Verified in all four records.               |
+| Scope                 | Same development bytes, pinned hosts and distinct harness commits.                                                   | Deterministic keyboard milestone only, not release-wide qualification. | Four journeys PASS; broader matrix pending. |
+
+`wallMs` below is total run time, not the per-case duration. Harness commits
+identify the runner used for each retained execution, not a later documentation
+HEAD or the runtime commit packaged inside the archive.
+
+| Scenario         | Host     | Harness Commit                             | Run ID                                 | wallMs | Status |
+| ---------------- | -------- | ------------------------------------------ | -------------------------------------- | ------ | ------ |
+| `v1-clean`       | `1.19.3` | `385b5b2c973700aceeaca2b9e36de215c5a543bd` | `3de55cc9-7d1e-496a-bb8d-cfa8ff85a002` | 94778  | PASS   |
+| `v1-active`      | `1.19.3` | `385b5b2c973700aceeaca2b9e36de215c5a543bd` | `9d482a5f-2bbd-47c3-9b67-e2234d505608` | 65269  | PASS   |
+| `v2-default-off` | `2.0.32` | `8a1b36e55aa2129199366358f0b0270ce69c74b8` | `8add35d1-76f8-4616-93df-05d1e921fc62` | 42237  | PASS   |
+| `v2-opt-in`      | `2.0.32` | `db05ef2884de3b5d4c41c91513ef5d63c852d5b9` | `83d408fc-799c-49a5-a1e3-c7edf9c3dfd2` | 44632  | PASS   |
+
+- V1 clean, case `v1-clean-e95c9191`: `/home/dev/workspace/opencode-work/stm-readiness-improvements/keyboard-chat-NmfEup/evidence/result.json`.
+- V1 active, case `v1-active-114d304b`: `/home/dev/workspace/opencode-work/stm-readiness-improvements/keyboard-chat-1kCHBm/evidence/result.json`.
+- V2 off, case `v2-default-off-88962f39`: `/home/dev/workspace/opencode-work/stm-readiness-improvements/keyboard-chat-nZHkRm/evidence/result.json`.
+- V2 on, case `v2-opt-in-94713b69`: `/home/dev/workspace/opencode-work/stm-readiness-improvements/keyboard-chat-CQvOY6/evidence/result.json`.
+
+V1 clean completed three side sessions with final tracking `[]`. V1 active
+created zero side sessions and three generated wrapper/assistant pairs in main
+native history, with actual production-log/provider/native-parent correlation
+and no extra summary/replay. Both V1 journeys have fresh NoReply cadence
+`0,1,0`, cumulative `0,1,1`; the third provider request legitimately retains
+the second turn's tag. Source ID registration, observable lineage and absence
+of extra summary work are verified, but the private runtime ownership Set was
+not independently read or causally instrumented.
+
+V2 SYSTEM memory counts are `0,0,0` off and `0,1,0` opt-in, using corrected
+merged-SYSTEM recognition. All four have zero tool executions and no unexpected
+host or STM diagnostics. Each consumed `0` local deterministic inference cost,
+with `globalBudgetChanged: false`; no budget padding is involved.
+
+Exact retained commands, executed with their respective harness commits above:
+
+```bash
+env PATH="/home/dev/.bun/bin:$PATH" /usr/bin/timeout --kill-after=10s 300s /home/dev/.bun/bin/bun scripts/rc-keyboard-chat.ts --candidate /home/dev/workspace/opencode-work/stm-readiness-improvements/strict-config-local-20261017.tgz --scenario v1-clean --v1-host-version 1.19.3
+env PATH="/home/dev/.bun/bin:$PATH" /usr/bin/timeout --kill-after=10s 300s /home/dev/.bun/bin/bun scripts/rc-keyboard-chat.ts --candidate /home/dev/workspace/opencode-work/stm-readiness-improvements/strict-config-local-20261017.tgz --scenario v1-active --v1-host-version 1.19.3
+env PATH="/home/dev/.bun/bin:$PATH" /usr/bin/timeout --kill-after=10s 300s /home/dev/.bun/bin/bun scripts/rc-keyboard-chat.ts --candidate /home/dev/workspace/opencode-work/stm-readiness-improvements/strict-config-local-20261017.tgz --scenario v2-default-off --v2-host-version 2.0.32
+env PATH="/home/dev/.bun/bin:$PATH" /usr/bin/timeout --kill-after=10s 300s /home/dev/.bun/bin/bun scripts/rc-keyboard-chat.ts --candidate /home/dev/workspace/opencode-work/stm-readiness-improvements/strict-config-local-20261017.tgz --scenario v2-opt-in --v2-host-version 2.0.32
+```
+
+Only V1 active was executed in the qualification turn being rolled up; the
+other three passed in earlier turns. This documentation update performs no
+further native execution. Investigation:
+`/home/dev/workspace/opencode-work/stm-readiness-improvements/2026-10-17--keyboard-qualification-rollup.html`;
+V1 gates: `/home/dev/workspace/opencode-work/stm-readiness-improvements/2026-10-17--v1-keyboard-gates.html`.
+
+This qualifies the four-journey deterministic pipeline on V1 `1.19.3` and V2
+`2.0.32`, not published RC5 hash
+`d34558b13c38736315593f322bc6b5d7e16471c0301382ecc6549f73a5f69682`,
+real-provider semantic quality, universal OS support, or the full strict-parser
+installation/configuration matrix. Next milestone: the setup/configuration
+runner qualifies broader installation/configuration coverage for these strict
+bytes, starting with one bounded missing case and an exact retained result.
+The old 46-case archive was `855cebf94dd80b263bad94eab3ecab3b62931fec4ee96bbd2d875a288fa417d2`,
+not `e559`; current strict-parser focused coverage remains eight cases, not a
+full-matrix requalification. No release publication or push is authorized here.
