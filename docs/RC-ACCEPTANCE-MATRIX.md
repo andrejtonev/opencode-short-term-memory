@@ -527,3 +527,76 @@ trailing commas, and duplicate-key-last-wins behavior are unit-verified.
 Mode/key typos and summarizer padding semantics are unchanged. The harness
 commit is verified as `06ca52d6d519e7e1f4b9d327375f45f3e538fe59`; it is not
 pending or invented here.
+
+## Current Keyboard Checkpoint (2026-10-17)
+
+One bounded native V2 default-off keyboard run is retained as **FAIL**, not
+native qualification. The corrected runner has not been rerun; offline tests
+and audits cannot retroactively turn this record into PASS. Latest pinned
+baselines are V1 `1.19.3` (not run) and V2 `2.0.32` (this nonqualifying run).
+They do not rewrite historical V1 `1.19.2` / V2 `2.0.30` results above.
+
+| Component/Logic Block | Current Findings/Hypothesis                                                  | Implications                                        | Verification Status                         |
+| --------------------- | ---------------------------------------------------------------------------- | --------------------------------------------------- | ------------------------------------------- |
+| Scope                 | Development candidate; V2 default-off only.                                  | No published-release or four-journey closure claim. | One bounded native run.                     |
+| Observed run          | First typed pair and automatic memory commit succeeded; decoder timed out.   | Preserve overall FAIL and cleanup refusal.          | First-turn evidence verified; journey FAIL. |
+| Current oracles       | V2 decoding, exact call/delta/cadence and joint checkpoint checks corrected. | Offline success is not native proof.                | Reported UNIT/audit success; no rerun.      |
+| Remaining gap         | V2 needs a qualifying rerun; V1 gates remain incomplete.                     | Qualify V2 off first, then opt-in and V1 unit.      | V2 PENDING; V1 explicitly BLOCKED.          |
+
+The exact single command executed was:
+
+```bash
+env PATH="/home/dev/.bun/bin:$PATH" /usr/bin/timeout --kill-after=10s 300s /home/dev/.bun/bin/bun scripts/rc-keyboard-chat.ts --candidate /home/dev/workspace/opencode-work/stm-readiness-improvements/strict-config-local-20261017.tgz --scenario v2-default-off --v2-host-version 2.0.32
+```
+
+- Run ID: `df91086e-cedc-461a-bef7-9245f3138622`; case:
+  `v2-default-off-90a96f3e`; outcome: `FAIL`; elapsed: `180009 ms`.
+- Candidate: `/home/dev/workspace/opencode-work/stm-readiness-improvements/strict-config-local-20261017.tgz`;
+  SHA256 `e5590eeb71683a1712346093fd936ed61e1c8f33fcb27fc21ef27562e64c6826`.
+  These are development bytes, not published RC5.
+- Evidence: `/home/dev/workspace/opencode-work/stm-readiness-improvements/keyboard-chat-60qZbi/evidence/result.json`.
+  Investigation: `/home/dev/workspace/opencode-work/stm-readiness-improvements/2026-10-17--keyboard-chat.html`.
+- First literal keyboard prompt appears in native prompt history and durable
+  context; the ordinary assistant completed `STM_PROBE_STREAM_SENTINEL`.
+  Session: `ses_eb777ca14ffe05AjfKmhuSYKfO`; typed user:
+  `msg_1488841420012k0aiiQWQQReAm`; ordinary assistant/checkpoint:
+  `msg_14888416c001eFE0j9mrn3G8nX`.
+- Automatic memory has three production log events: generation start,
+  successful outcome, and commit. They are retained at
+  `/home/dev/workspace/opencode-work/stm-readiness-improvements/keyboard-chat-60qZbi/cases/v2-default-off-90a96f3e/memory/session-memory.log`.
+- The harness applied V1 history decoding to V2 `type`, `text`, and `content`
+  records, causing FAIL despite the successful first reply/update.
+  `cleanup.runtime.refused` was `shutdown-not-verified`; cache cleanup completed.
+- Cost consumed: `0`, local deterministic inference; global budget unchanged.
+  No paid inference, infrastructure budget padding, or semantic-quality claim.
+
+Subsequent runner corrections cover V2 JSON decoding, exact call cardinality,
+fresh delta, cadence, joint checkpoint/commit settlement, V1-only lineage
+checks, safe PID/socket/listener verification, and owned stable evidence.
+V1 remains explicitly blocked on incomplete split-delta unions and cumulative
+NoReply cadence gates. The second independent audit reported no remaining major
+V2 defects in the audited scope; this is not native proof.
+
+Current offline validation: **1078 pass, 0 fail, 5608 assertions,
+57 files**; the two new test files contribute **12 tests, 130 assertions**.
+Root typecheck, strict script/test TypeScript checks, and four-file formatting
+passed. A direct offline replay of the saved first turn also passed the corrected
+projection and turn validator: two durable IDs, one primary request, two provider
+invocations and one commit. This does not change the retained native FAIL.
+The corresponding validation commands are:
+
+```bash
+env PATH="/home/dev/.bun/bin:$PATH" /home/dev/.bun/bin/bun test --isolate
+env PATH="/home/dev/.bun/bin:$PATH" /home/dev/.bun/bin/bun run typecheck
+/home/dev/.bun/bin/bun node_modules/typescript/bin/tsc --noEmit --strict --target ESNext --module ESNext --moduleResolution bundler --esModuleInterop --skipLibCheck --types bun scripts/rc-keyboard-chat.ts scripts/rc-keyboard-driver.ts test/rc-keyboard-chat.test.ts test/rc-keyboard-driver.test.ts
+/home/dev/.bun/bin/bun node_modules/prettier/bin/prettier.cjs --check scripts/rc-keyboard-chat.ts scripts/rc-keyboard-driver.ts test/rc-keyboard-chat.test.ts test/rc-keyboard-driver.test.ts
+```
+
+Next milestone, in the next turn: the keyboard runner executes **one** bounded
+V2 default-off case using the exact same command/archive above with the current
+runner. Acceptance requires three literal typed user/ordinary-assistant pairs,
+three automatic summaries, three checkpoint commits, no injection with opt-in
+off, no tool activity, and verified cleanup. Only after that qualifies should
+V2 opt-in proceed, followed by the bounded V1 gate implementation unit. No
+native rerun, build, packaged README, or version change is part of this
+harness checkpoint.
