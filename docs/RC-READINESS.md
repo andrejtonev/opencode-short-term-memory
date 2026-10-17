@@ -1,37 +1,61 @@
 # RC Readiness
 
-## Latest Status: 2026-10-17, Local RC6 Preparation Pending Qualification
+## Latest Status: 2026-10-17, Local RC6 Prepared With Partial Bounded Qualification
 
-**Current status: `1.4.0-rc.6` is an UNPUBLISHED local candidate, not qualified.**
-Starting preparation base: `1577d4f58fe751efb9717aeb91018206f1aece0d`.
-Package/changelog/shipped README edits are uncommitted; preparation commit,
-final source commit, RC6 tarball path, SHA256 and fresh results are **PENDING**.
-The lead's 17 October registry observation records `rc: 1.4.0-rc.5`,
-`latest: 1.3.0` and HTTP 404 for exact RC6. RC5's dated unpublished wording below
-remains historical; later publication does not change its qualified hash/evidence.
+**Current status: `1.4.0-rc.6` is UNPUBLISHED; clean consumer and V1 clean PASS,
+not fully qualified.** Build/preparation commit:
+`bc71dc863ab5b534c6e988406c4128eaefb0e2a4` (historical preparation base
+`1577d4f58fe751efb9717aeb91018206f1aece0d`). Frozen archive:
+`/home/dev/workspace/opencode-work/stm-readiness-improvements/atonev-opencode-short-term-memory-1.4.0-rc.6-bc71dc8-20261017.tgz`,
+SHA256 `c84639d45dd93b124d28190f6a9615927547de4e49a24c85c9cdb5cb5e167316`,
+175,617 bytes, mode `0444`, 72 regular packaged files; manifest `1.4.0-rc.6`,
+`publishConfig.tag: rc`, `access: public`. Both fresh runs identify these bytes.
 
-| Component/Logic Block    | Current Findings/Hypothesis                                                                                                                                                                   | Implications                                                                                                                                                 | Verification Status                                                                                                                       |
-| ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------- |
-| Release identity         | Local manifest is `1.4.0-rc.6`; dependencies, scripts and exports unchanged; root lock has no version field or resolution changes.                                                            | New metadata and shipped README require a new exact artifact, not relabeled RC5 bytes.                                                                       | Local preparation only; commit PENDING.                                                                                                   |
-| Runtime changes          | `da960a1` fixes V1 self-generation/idle fingerprint handling; `88c938b` rejects malformed JSONC while valid comments/trailing commas, sibling/lower-layer fallback and defaults remain valid. | No broader runtime or semantic-quality claim.                                                                                                                | Source changes retained; lead reports 1,139 tests / 5,774 assertions PASS at `1577d4f`, not a new RC6 build/typecheck/consumer result.    |
-| Historical qualification | Four keyboard journeys PASS on frozen DEV SHA256 `e5590eeb71683a1712346093fd936ed61e1c8f33fcb27fc21ef27562e64c6826`, manifest RC5, unpublished; hosts V1 `1.19.3` / V2 `2.0.32`.              | Prior runtime evidence is not RC6 qualification; see [retained acceptance evidence](RC-ACCEPTANCE-MATRIX.md#current-qualified-keyboard-journeys-2026-10-17). | Historical PASS only; RC5 exact-artifact record below preserved.                                                                          |
-| New artifact             | RC6 final source commit, path, digest, file count and execution evidence are PENDING.                                                                                                         | Freeze shipped README before packing; it must remain unchanged afterward. Nonpackaged readiness may record actual identities/results later.                  | New artifact and all fresh gates PENDING.                                                                                                 |
-| Authorization            | Local preparation only; unpushed base `origin/dev` is `2b9bb226e942e7bccbd0443a8bf9eb08419b16b9`; exact Git push remains denied by execution policy.                                          | No Git push, npm publication or permission bypass.                                                                                                           | No push/publication performed here; prior conditional push approval did not override execution policy. npm publication is not authorized. |
+| Component/Logic Block       | Current Findings/Hypothesis                                                                                                                               | Implications                                                                                                                  | Verification Status                                              |
+| --------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------- |
+| Artifact                    | Normal build and exactly one prepare-enabled Bun pack succeeded; 68 dist files/source maps and README/package JSON match `bc71dc8`.                       | Frozen outside the Git tree; no source, lock, version or shipped README changes after freeze.                                 | PASS; verification manifest retained.                            |
+| Consumer                    | PASS in 32,860 ms: four imports, strict STM public/TUI declarations, seven direct children exited.                                                        | Import/declaration scope only, not full host SDK correctness or registry installation.                                        | PASS; lifecycle diagnostic unresolved below.                     |
+| Native V1 clean             | Exactly one case PASS in 74,520 ms on `1.19.3`; three typed pairs, primary/summary/ordinary-assistant commits each 3.                                     | Exact-artifact deterministic clean-mode acceptance, not other RC6 journeys or semantic quality.                               | PASS; cadence and cleanup verified.                              |
+| Source/security             | Lead records 1,139 tests / 5,774 assertions PASS (40.98 s; normal hooks 40.71 s), root typecheck PASS; packaged Gitleaks scan clean across 817,564 bytes. | `da960a1` V1 fencing and `88c938b` strict JSONC fixes retained; no dependency/script/export changes or lock resolution churn. | PASS within inspected source/package scope, not provider safety. |
+| Pending scope/authorization | RC6 V1 active and both V2 journeys remain PENDING; local preparation only, no push/publication.                                                           | Broad config/install, minimum-host compatibility and real-provider semantics remain separate; no permission bypass.           | Git push policy deny remains; npm publication not authorized.    |
 
-**Next milestone (lead-owned, planned, not executed by this documentation update):**
+Consumer evidence: `/tmp/opencode/stm-package-acceptance-ucptq9/evidence.json`;
+byte-identical durable copy:
+`/home/dev/workspace/opencode-work/stm-readiness-improvements/rc6-build-pack-bc71dc8-87CumGG2/consumer-evidence.json`.
+**Lifecycle limit:** normal Bun production install blocked one postinstall.
+`bun pm untrusted` returned exit 1, `Lockfile not found`, with intentional
+`allowNonzero: true`; blocked package identity remains unknown. No trust changes.
 
-1. Commit preparation, build and freeze RC6 outside the packaged Git tree, mode
-   `0444`; record source commit, path, SHA256, manifest `1.4.0-rc.6` and verify
-   the expected same 72 packaged files. Keep shipped README frozen thereafter.
-2. Against those exact bytes, run clean-consumer acceptance and **exactly one**
-   bounded `v1-clean` keyboard case this turn; retain actual evidence and results
-   before claiming either gate passes.
-3. Leave the other three RC6 keyboard journeys, broad configuration/install
-   coverage and real-provider semantic quality **PENDING** until separately run.
+Native evidence:
+`/home/dev/workspace/opencode-work/stm-readiness-improvements/keyboard-chat-E6SBBw/evidence/result.json`;
+run `b130380d-d40c-48b4-bf2f-72106b56d7ca`, case `v1-clean-8e903d90`, harness
+source `bc71dc8`. Fresh NoReply cadence `0,1,0`, cumulative `0,1,1`; three side
+sessions completed, tracking `[]`. No host/STM errors, unexpected warnings or
+tool executions; owned PIDs/tmux dead, listener closed, socket absent and
+runtime/cache pruning complete. Both runs: `paidInference: false`,
+`costConsumed: 0`, `globalBudgetChanged: false`. No other native case ran this turn.
 
-Investigation (preparation, not publication):
+Verification manifest:
+`/home/dev/workspace/opencode-work/stm-readiness-improvements/rc6-build-pack-bc71dc8-87CumGG2/package-verification.json`.
+The shipped README remains frozen prequalification wording; this nonpackaged
+document records current results. Prior [four DEV journey PASS records](RC-ACCEPTANCE-MATRIX.md#current-qualified-keyboard-journeys-2026-10-17)
+are not fresh RC6 qualification. The lead's 17 October registry observation
+remains `rc: 1.4.0-rc.5`, `latest: 1.3.0`, exact RC6 HTTP 404; historical RC5
+unpublished wording and qualified digest/evidence below remain unchanged.
+
+Recorded commands, **not rerun by this documentation update**:
+
+```bash
+env PATH="/home/dev/.bun/bin:$PATH" /usr/bin/timeout --kill-after=5s 190s /home/dev/.bun/bin/bun scripts/package-acceptance.ts /home/dev/workspace/opencode-work/stm-readiness-improvements/atonev-opencode-short-term-memory-1.4.0-rc.6-bc71dc8-20261017.tgz
+env PATH="/home/dev/.bun/bin:$PATH" /usr/bin/timeout --kill-after=10s 300s /home/dev/.bun/bin/bun scripts/rc-keyboard-chat.ts --candidate /home/dev/workspace/opencode-work/stm-readiness-improvements/atonev-opencode-short-term-memory-1.4.0-rc.6-bc71dc8-20261017.tgz --scenario v1-clean --v1-host-version 1.19.3
+```
+
+**Next milestone (lead-owned):** run one bounded RC6 `v1-active` case on the
+same frozen path/hash and host `1.19.3`; acceptance requires three generated
+pairs, ordinary-assistant checkpoints, matching cadence and verified cleanup.
+Then qualify V2 off/on on `2.0.32`; all three new journeys remain **PENDING**.
+Investigation (exists, inspected, not edited):
 `/home/dev/workspace/opencode-work/stm-readiness-improvements/2026-10-17--rc6-preparation.html`.
-This doc-only update runs no build, typecheck, consumer or native qualification.
 
 ## Historical Status: 2026-10-14, RC5 Bounded Exact-Artifact Qualification
 
