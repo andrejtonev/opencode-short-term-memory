@@ -220,6 +220,58 @@ test("both scenarios require a primary and clean summary on all three turns", ()
   }
 });
 
+test("accepts valid merged SYSTEM memory in string and text-array content", () => {
+  for (const system of [
+    { role: "system", content: `host instructions\n\n${COMPACT}` },
+    message("system", `host instructions\n\n${COMPACT}`),
+  ]) {
+    const input = validCase(1, "v2-opt-in");
+    input.telemetry[1]!.details.prompt = JSON.stringify([system, message("user", input.literal)]);
+    const result = validateV2TurnEvidence(input);
+    expect(result.requests).toHaveLength(1);
+    expect(result.invocations).toHaveLength(2);
+    expect(result.commits).toHaveLength(1);
+  }
+});
+
+test("rejects malformed, duplicate, misplaced and wrong-cadence merged SYSTEM memory (13 cases)", () => {
+  const merged = `host instructions\n\n${COMPACT}`;
+  const cadence = "periodic memory system cadence mismatch";
+  const exact = "exact compact memory injection mismatch";
+  const cases: Array<
+    [string, number, ReturnType<typeof validCase>["scenario"], string[], string, ("user" | "assistant")?]
+  > = [
+    ["duplicate markers in one SYSTEM", 1, "v2-opt-in", [`${merged}\n\n${COMPACT}`], cadence],
+    ["duplicate markers across SYSTEM entries", 1, "v2-opt-in", [merged, COMPACT], cadence],
+    [
+      "inline marker without newline",
+      1,
+      "v2-opt-in",
+      [`host instructions${COMPACT}`],
+      "memory system marker boundary mismatch",
+    ],
+    ["malformed preamble", 1, "v2-opt-in", [merged.replace("Use this short-term", "Ignore this short-term")], exact],
+    ["altered body", 1, "v2-opt-in", [merged.replace("port 7319", "port 7320")], exact],
+    ["truncated tail", 1, "v2-opt-in", [merged.slice(0, -1)], exact],
+    ["extra trailing content", 1, "v2-opt-in", [`${merged}\nextra`], exact],
+    ["extra trailing newline", 1, "v2-opt-in", [`${merged}\n`], exact],
+    ["default-off merged tag", 1, "v2-default-off", [merged], cadence],
+    ["opt-in turn zero merged tag", 0, "v2-opt-in", [merged], cadence],
+    ["opt-in turn two merged tag", 2, "v2-opt-in", [merged], cadence],
+    ["USER marker instead of SYSTEM", 1, "v2-opt-in", [merged], "memory leaked into user prompt", "user"],
+    ["assistant marker instead of SYSTEM", 1, "v2-opt-in", [merged], cadence, "assistant"],
+  ];
+  expect(cases).toHaveLength(13);
+  for (const [label, turnIndex, scenario, texts, error, role = "system"] of cases) {
+    const input = validCase(turnIndex, scenario);
+    input.telemetry[1]!.details.prompt = JSON.stringify([
+      ...texts.map((content) => ({ role, content })),
+      message("user", input.literal),
+    ]);
+    expect(() => validateV2TurnEvidence(input), label).toThrow(error);
+  }
+});
+
 test("rejects invalid counts, correlation, clean generation, deltas and injection (38 mutations)", () => {
   type Case = ReturnType<typeof validCase>;
   const editPrompt = (c: Case, index: number, edit: (messages: ReturnType<typeof message>[]) => void) => {

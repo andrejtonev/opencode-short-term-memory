@@ -1382,10 +1382,17 @@ export function validateV2TurnEvidence(input: {
     ),
     "memory leaked into user prompt",
   );
-  const tags = ordinaryPrompt.filter((row) => row.role === "system" && row.text.startsWith("[MEMORY_SYSTEM]"));
+  const tags = ordinaryPrompt
+    .filter((row) => row.role === "system")
+    .flatMap((row) =>
+      [...row.text.matchAll(/\[MEMORY_SYSTEM\]/gu)].map((match) => {
+        assert.ok(match.index === 0 || row.text[match.index - 1] === "\n", "memory system marker boundary mismatch");
+        return row.text.slice(match.index);
+      }),
+    );
   const expectedTags = input.scenario === "v2-opt-in" ? [0, 1, 0][input.turnIndex] : 0;
   assert.equal(tags.length, expectedTags, "periodic memory system cadence mismatch");
-  for (const tag of tags) assert.equal(tag.text, injectedExpected(), "exact compact memory injection mismatch");
+  for (const tag of tags) assert.equal(tag, injectedExpected(), "exact compact memory injection mismatch");
   const summaryPrompt = prompt(summaryDetails);
   assert.equal(summaryPrompt.length, 1, "clean summary prompt must be one standalone user wrapper");
   assert.equal(summaryPrompt[0]!.role, "user");
