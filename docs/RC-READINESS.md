@@ -12,13 +12,37 @@ the plugin instance, failed-delete recovery tracking, busy manual-update idle
 deferral, lifecycle-bound read-only bootstrap, and bounded retries for native
 V2 provider unavailability. Dependency versions and public exports remain unchanged.
 
-The preceding fixes passed formatting, root typecheck and 1,147 unit tests
-(two platform skips). RC7 build, source gates and exact-archive consumer results
-will be recorded here after preparation. Previous artifacts are historical
-evidence and do not qualify RC7 bytes.
+Preparation commit: `3aecfe188813897d164e8b2f17d8214e483d483e`.
+Frozen archive:
+`.opencode/rc7/atonev-opencode-short-term-memory-1.4.0-rc.7-3aecfe1-20261021.tgz`,
+SHA256 `bdc9de7646f7dae5af2a826673e80b88db7d5aafa1a127dc63595db0d0426625`,
+178,413 bytes, Windows read-only attribute set, 72 packaged files. The archive
+manifest identifies `1.4.0-rc.7`, public access and the `rc` dist-tag.
+The normal build and one prepare-enabled Bun pack produced these bytes.
+
+| Gate                          | RC7 result                                    | Scope                                                                                   |
+| ----------------------------- | --------------------------------------------- | --------------------------------------------------------------------------------------- |
+| Build and declarations        | PASS                                          | Source build on native Windows/Bun 1.3.13.                                              |
+| Formatting and root typecheck | PASS                                          | Preparation commit hooks.                                                               |
+| Unit suite                    | 1,147 PASS, two platform skips, zero failures | Source contracts; no live provider qualification.                                       |
+| Exact-archive clean consumer  | PASS                                          | Fresh production installation, four public imports, strict public and TUI declarations. |
+| Native V1/V2 journeys         | NOTRUN                                        | Previous artifact results do not qualify RC7 bytes.                                     |
+| npm publication               | NOTRUN                                        | RC7 remains a local candidate; registry `rc` still identifies RC6.                      |
+
+Clean-consumer evidence:
+`C:/Users/Andreja/AppData/Local/Temp/stm-package-acceptance-slW4Vu/evidence.json`;
+durable byte-identical copy `.opencode/rc7/consumer-evidence.json` and artifact
+receipt `.opencode/rc7/artifact.json`. All direct consumer child processes exited.
+The installation reported one blocked dependency postinstall, and the diagnostic
+`bun pm untrusted` returned `Lockfile not found`; its identity remains unresolved.
+No trust settings were changed. This is import/declaration acceptance, not native
+activation, registry/Git installation or full host SDK declaration validation.
+
+No shipped source, manifest or README bytes were changed after freezing the
+archive. This nonpackaged document records qualification separately.
 
 Remaining acceptance work includes V2 active summaries requesting tools, V2
-long-log dialog visibility, fresh installation and complete DeepSeek qualification.
+long-log dialog visibility, native registry/Git installation and complete DeepSeek qualification.
 The newly audited supervisor descendant-discovery and snapshot/journal-selection
 bugs remain open. Existing Windows acceptance records at
 [2026-10-20 results](WINDOWS-AZURE-RESULTS-2026-10-20.md) retain their original hashes.
