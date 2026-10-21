@@ -1,6 +1,30 @@
 # RC Readiness
 
-## Latest Status: 2026-10-17, Local RC6 Prepared With Partial Bounded Qualification
+## Latest Status: 2026-10-21, Local RC7 Preparation
+
+`1.4.0-rc.7` is an unpublished testing candidate containing committed fixes through
+`e644b30517cc27923ba7ce916e65423c8d9de828`. Registry inspection on 2026-10-21
+confirmed `rc: 1.4.0-rc.6`, `latest: 1.3.0`, and no RC7 version. No push or npm
+publication is part of this local preparation.
+
+RC7 adds V1 clean-summary tool denial, permanent internal-session identity for
+the plugin instance, failed-delete recovery tracking, busy manual-update idle
+deferral, lifecycle-bound read-only bootstrap, and bounded retries for native
+V2 provider unavailability. Dependency versions and public exports remain unchanged.
+
+The preceding fixes passed formatting, root typecheck and 1,147 unit tests
+(two platform skips). RC7 build, source gates and exact-archive consumer results
+will be recorded here after preparation. Previous artifacts are historical
+evidence and do not qualify RC7 bytes.
+
+Remaining acceptance work includes V2 active summaries requesting tools, V2
+long-log dialog visibility, fresh installation and complete DeepSeek qualification.
+The newly audited supervisor descendant-discovery and snapshot/journal-selection
+bugs remain open. Existing Windows acceptance records at
+[2026-10-20 results](WINDOWS-AZURE-RESULTS-2026-10-20.md) retain their original hashes.
+No live provider journey has been rerun for RC7.
+
+## Historical Status: 2026-10-17, Local RC6 Prepared With Partial Bounded Qualification
 
 **Current status: `1.4.0-rc.6` is UNPUBLISHED; clean consumer and V1 clean PASS,
 not fully qualified.** Build/preparation commit:

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.0-rc.7] - 2026-10-21
+
+Local prerelease preparation from committed fixes through `e644b30517cc27923ba7ce916e65423c8d9de828`; not yet published. The registry currently reports `rc: 1.4.0-rc.6` and `latest: 1.3.0`. RC7 artifact validation is recorded separately in [RC Readiness](docs/RC-READINESS.md); earlier RC6 results do not qualify the new archive.
+
 ### Fixed
 
 - Recognize native V2 `Generate.UnavailableError` as a settled transient generation failure, so provider 503 responses use the configured bounded retry budget. Unknown errors, cancellation and timeouts remain non-retryable.
@@ -15,6 +19,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Restore internal side-session identity during startup cleanup, retain it after deletion, and invalidate work admitted before side-session registration. Failed clean-session deletions remain tracked for recovery. Regression coverage checks delayed events, registration races, and absence of side-session memory files and history reads.
 - Clarify that summarizers receive the retained memory, incremental conversation and optional project context in the prompt and must return memory without tools or additional lookups.
 - V1 clean summarizer sessions now disable all tools, including plugin and MCP tools. The restriction applies only to disposable side sessions because V1 persists prompt tool settings as session permissions.
+
+### Added
+
+- Native Windows acceptance runners, portable test fixtures, keyboard-turn grouping and incremental provider-request evidence for interrupted test runs.
+
+### Known Limits
+
+- V2 active summaries requesting tools and long-log dialog visibility remain unresolved in the recorded RC6 Windows tests. Fresh installation and the full DeepSeek profile remain unqualified for RC7.
+- The Windows supervisor can miss descendants whose parent exits before discovery, and the evidence audit can ignore newer journal records when a snapshot exists. These harness issues remain open.
 
 ## [1.4.0-rc.6] - 2026-10-17
 
