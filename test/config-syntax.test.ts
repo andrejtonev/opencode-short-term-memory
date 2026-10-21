@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { DEFAULT_CONFIG, readConfig } from "../src/memory-utils";
 
-const BUN_PATH = "/home/dev/.bun/bin/bun";
+const BUN_PATH = process.execPath;
 const REPO_ROOT = resolve(import.meta.dir, "..");
 
 describe("configuration syntax boundaries", () => {
@@ -99,7 +99,12 @@ describe("configuration syntax boundaries", () => {
     await writeFile(join(project, ".opencode", "stm.jsonc"), '{ "enabled": true, "remindEveryN": 9,', "utf8");
     await writeFile(join(project, ".opencode", "stm.json"), '{ "remindEveryN": 8 }', "utf8");
 
-    const childEnv = { ...process.env, HOME: join(root, "private-home"), XDG_CONFIG_HOME: join(root, "xdg") };
+    const childEnv = {
+      ...process.env,
+      HOME: join(root, "private-home"),
+      USERPROFILE: join(root, "private-home"),
+      XDG_CONFIG_HOME: join(root, "xdg"),
+    };
     delete childEnv.OPENCODE_CONFIG_DIR;
     const script = `
       const payload = JSON.parse(process.argv.at(-1));

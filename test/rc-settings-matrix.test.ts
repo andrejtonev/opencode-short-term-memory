@@ -1,11 +1,12 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { reloadConfig, type ConfigContext } from "../src/config";
 import { DEFAULT_CONFIG, readConfig, type SessionMemoryConfig } from "../src/memory-utils";
 
 const REPO_ROOT = resolve(import.meta.dir, "..");
-const BUN_PATH = "/home/dev/.bun/bin/bun";
+const BUN_PATH = process.execPath;
 const CHILD_SCRIPT = `
   const payload = JSON.parse(process.argv.at(-1));
   const { pathToFileURL } = await import("node:url");
@@ -45,7 +46,7 @@ describe("RC public settings matrix", () => {
   let root = "";
 
   beforeEach(async () => {
-    root = await mkdtemp(join(process.env.TMPDIR || "/tmp", "stm-rc-settings-"));
+    root = await mkdtemp(join(tmpdir(), "stm-rc-settings-"));
     process.env.HOME = join(root, "home");
     process.env.XDG_CONFIG_HOME = join(root, "xdg");
     process.env.OPENCODE_CONFIG_DIR = join(root, "env-config");
@@ -91,6 +92,7 @@ describe("RC public settings matrix", () => {
       env: {
         ...process.env,
         HOME: expectedHome,
+        USERPROFILE: expectedHome,
         XDG_CONFIG_HOME: join(root, "xdg"),
         OPENCODE_CONFIG_DIR: join(root, "env-config"),
       },

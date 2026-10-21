@@ -206,7 +206,7 @@ describe("V2 reset boundary", () => {
     )(input("unreadable", [message("anchor", "user"), message("a", "assistant", "answer")]));
     expect(calls.prompts).toHaveLength(0);
     await expect(resetV2MemoryPersistence("empty-anchor", directory, "   ")).rejects.toThrow("nonempty");
-    expect(await readdir(memoryDir)).toEqual(["session-memory.log", "reset-boundaries"]);
+    expect((await readdir(memoryDir)).sort()).toEqual(["reset-boundaries", "session-memory.log"]);
   });
 
   test("second reset replaces the anchor and third-file rename failure restores every original byte", async () => {

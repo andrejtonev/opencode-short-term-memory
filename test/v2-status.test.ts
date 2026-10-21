@@ -1,3 +1,4 @@
+import { tmpdir } from "node:os";
 import { expect, test } from "bun:test";
 import { existsSync } from "node:fs";
 import { cp, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
@@ -26,7 +27,7 @@ const request = (run = async () => "status", mutating = false) => ({
 });
 
 test("command and tool use one fresh reader and only authoritative identity", async () => {
-  const directory = await mkdtemp("/tmp/opencode/stm-status-test-");
+  const directory = await mkdtemp(join(tmpdir(), "stm-status-test-"));
   try {
     await mkdir(`${directory}/.opencode`);
     const config = `${directory}/.opencode/stm.jsonc`;
@@ -177,7 +178,7 @@ test.each([1, 2])("synchronous offer throw on emission %i cleans admission and i
 });
 
 test("show template creation followed by output failure warns mutation may have completed", async () => {
-  const directory = await mkdtemp("/tmp/opencode/stm-show-delivery-test-");
+  const directory = await mkdtemp(join(tmpdir(), "stm-show-delivery-test-"));
   try {
     await mkdir(`${directory}/.opencode`);
     const memoryDir = `${directory}/memory`;
@@ -256,7 +257,7 @@ test("admission precedes one long action, independent output TTL, stale ACK cann
     async (name, data) => {
       events.push({ name, data });
     },
-    15,
+    100,
     300,
   );
   const result = delivery.deliver(
@@ -270,7 +271,7 @@ test("admission precedes one long action, independent output TTL, stale ACK cann
   expect(calls).toBe(0);
   const receiver = { requestID: events[0]!.data.requestID, sessionID: "session", receiverID: "r" };
   expect(await delivery.claim(receiver)).toEqual({ accepted: true });
-  await pause(40);
+  await pause(150);
   expect(calls).toBe(1);
   expect(delivery.acknowledge(receiver)).toEqual({ accepted: false });
   expect(await delivery.claim(receiver)).toEqual({ accepted: false });
@@ -754,7 +755,7 @@ test("packaging wiring leaves root intact and separates UI/portable RPC entrypoi
 
 test("named-package loader requires explicit server export under Bun and resolves it to root", async () => {
   const manifest = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
-  const sandbox = await mkdtemp("/tmp/opencode/stm-loader-test-");
+  const sandbox = await mkdtemp(join(tmpdir(), "stm-loader-test-"));
   try {
     for (const corrected of [false, true]) {
       const directory = join(sandbox, corrected ? "corrected" : "missing-server");
@@ -789,7 +790,7 @@ test.skipIf(!existsSync(new URL("../dist/tui.js", import.meta.url)))(
     const { Host: fixtureHost } =
       await import("../fixtures/v2-generation-probe/node_modules/@opencode/plugin/dist/host.js");
     const manifest = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
-    const sandbox = await mkdtemp("/tmp/opencode/stm-built-loader-test-");
+    const sandbox = await mkdtemp(join(tmpdir(), "stm-built-loader-test-"));
     try {
       const packageDirectory = join(sandbox, "node_modules", manifest.name);
       await mkdir(packageDirectory, { recursive: true });

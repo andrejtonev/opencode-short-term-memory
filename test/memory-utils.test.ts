@@ -278,6 +278,7 @@ describe("memory-utils general behavior", () => {
 
   test("atomic temporary files cannot enter an exact Git snapshot", async () => {
     expect((await runGit(testDir, ["init", "--quiet"])).exitCode).toBe(0);
+    expect((await runGit(testDir, ["config", "core.autocrlf", "false"])).exitCode).toBe(0);
     const memoryDir = join(testDir, ".opencode", "memory");
     const persistedPath = join(memoryDir, "session.md");
     await writeText(persistedPath, "persisted\n");
@@ -345,7 +346,7 @@ describe("memory-utils general behavior", () => {
     await rm(temporaryDirectory, { recursive: true, force: true });
     const outsideDirectory = join(testDir, "outside");
     await writeText(join(outsideDirectory, "sentinel.txt"), "outside\n");
-    await symlink(outsideDirectory, temporaryDirectory, "dir");
+    await symlink(outsideDirectory, temporaryDirectory, process.platform === "win32" ? "junction" : "dir");
     await expect(writeTextAtomic(join(memoryDir, "symlink.md"), "no outside write\n")).rejects.toThrow(
       "unsafe atomic temporary directory",
     );

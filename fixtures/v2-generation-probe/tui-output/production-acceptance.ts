@@ -196,7 +196,11 @@ export async function stageInstalledPackage(cache: string, name: string, version
   const generation = join(cache, "npm", await Npm.cacheKey(target), String(Date.now()));
   await mkdir(generation, { recursive: true });
   // Pinned Npm.add uses numeric generations, not the flat Host.resolve lookup root.
-  await symlink(join(cache, "node_modules"), join(generation, "node_modules"), "dir");
+  await symlink(
+    join(cache, "node_modules"),
+    join(generation, "node_modules"),
+    process.platform === "win32" ? "junction" : "dir",
+  );
   return { target, generation };
 }
 

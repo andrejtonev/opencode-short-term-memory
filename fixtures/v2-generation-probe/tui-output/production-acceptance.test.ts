@@ -1,3 +1,4 @@
+import { tmpdir } from "node:os";
 import { expect, test } from "bun:test";
 import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
@@ -188,7 +189,7 @@ test("actual PTY title and ordered body rows are required, including wrapped pat
 });
 
 test("file snapshots distinguish missing, empty, binary, created directories and changed bytes", async () => {
-  const sandbox = await mkdtemp("/tmp/opencode/stm-file-state-");
+  const sandbox = await mkdtemp(join(tmpdir(), "stm-file-state-"));
   const directory = join(sandbox, "memory");
   try {
     expect(await fileState([directory])).toEqual({});
@@ -204,7 +205,13 @@ test("file snapshots distinguish missing, empty, binary, created directories and
     expect(await fileState([directory])).toEqual(before);
     await writeFile(join(directory, "empty"), "changed");
     expect(await fileState([directory])).not.toEqual(before);
-    await symlink(join(directory, "binary"), join(directory, "link"));
+    if (process.platform === "win32") {
+      const outside = join(sandbox, "outside");
+      await mkdir(outside);
+      await symlink(outside, join(directory, "link"), "junction");
+    } else {
+      await symlink(join(directory, "binary"), join(directory, "link"));
+    }
     await expect(fileState([directory])).rejects.toThrow("Unexpected non-file");
   } finally {
     await rm(sandbox, { recursive: true, force: true });
@@ -484,14 +491,18 @@ test("import validator verifies descending durable projection and exact endpoint
 });
 
 test("actual pinned Npm lookup rejects flat staging and reuses a proper exact-version generation offline", async () => {
-  const sandbox = await mkdtemp("/tmp/opencode/stm-installed-contract-");
+  const sandbox = await mkdtemp(join(tmpdir(), "stm-installed-contract-"));
   try {
     const cache = join(sandbox, "cache");
     const manifest = JSON.parse(await readFile(new URL("../../../package.json", import.meta.url), "utf8"));
     const packageDir = join(cache, "node_modules", manifest.name);
     await mkdir(packageDir, { recursive: true });
     await writeFile(join(packageDir, "package.json"), JSON.stringify(manifest));
-    await symlink(resolve(import.meta.dir, "../../../dist"), join(packageDir, "dist"), "dir");
+    await symlink(
+      resolve(import.meta.dir, "../../../dist"),
+      join(packageDir, "dist"),
+      process.platform === "win32" ? "junction" : "dir",
+    );
     await writeFile(
       join(cache, "package.json"),
       JSON.stringify({ dependencies: { [manifest.name]: manifest.version } }),
@@ -794,7 +805,7 @@ test("no-TUI observations skip terminal capture; harness wires capture before sn
   expect(observation.failureScreenError).toBeUndefined();
   const source = await readFile(new URL("./production-acceptance.ts", import.meta.url), "utf8");
   const catchBlock = source.slice(source.indexOf("evidence.failure = await observeFailure"));
-  expect(catchBlock).toContain("tuiStarted\n");
+  expect(catchBlock.replaceAll("\r\n", "\n")).toContain("tuiStarted\n");
   expect(catchBlock).toContain(": undefined,");
   expect(catchBlock.indexOf('terminal("capture-pane"')).toBeLessThan(catchBlock.indexOf('snapshot("after-failure")'));
   expect(catchBlock.indexOf('snapshot("after-failure")')).toBeLessThan(catchBlock.indexOf('terminal("kill-server")'));

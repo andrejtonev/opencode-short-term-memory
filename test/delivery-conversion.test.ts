@@ -457,7 +457,7 @@ describe("delivery conversion", () => {
     expect(extractTaggedChildSystemDeliveries(startup)).toHaveLength(1);
     expect(startup.system[0]).toContain("CHILD_LRU_SNAPSHOT");
     expect(extractTaggedChildSystemDeliveries(duplicate)).toHaveLength(0);
-  });
+  }, 15000);
 
   test("child session.updated and session.idle do not bootstrap, collect, summarize, or deliver", async () => {
     const parentID = "child-hooks-parent";

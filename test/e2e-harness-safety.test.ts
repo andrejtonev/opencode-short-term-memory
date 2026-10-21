@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { createServer, type Server } from "node:net";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 
 import {
   cleanupE2EWorkspace,
@@ -55,8 +55,9 @@ beforeAll(async () => {
   chmodSync(fakeOpencode, 0o755);
   await Bun.write(simulatedConfig, configBytes);
 
-  process.env.PATH = `${fakeBin}:${originalEnv.PATH ?? ""}`;
+  process.env.PATH = `${fakeBin}${delimiter}${originalEnv.PATH ?? ""}`;
   process.env.HOME = simulatedHome;
+  process.env.USERPROFILE = simulatedHome;
   process.env.XDG_CONFIG_HOME = join(simulatedHome, ".config");
   process.env.STM_HARNESS_FAKE_SPAWN_STAMP = spawnStamp;
   delete process.env.OPENCODE_SERVER_PASSWORD;
@@ -80,7 +81,7 @@ describe("e2e harness safety", () => {
   test("rejects an occupied port before spawning and preserves the unrelated listener", async () => {
     const { port, server } = await allocatePort();
     try {
-      await expect(startServe(workspace, port, { serveTimeoutMs: 250 })).rejects.toThrow(
+      await expect(startServe(workspace, port, { command: [BUN, fakeOpencode], serveTimeoutMs: 250 })).rejects.toThrow(
         "refusing to kill or adopt its listener",
       );
       expect(existsSync(spawnStamp)).toBe(false);
@@ -103,12 +104,12 @@ describe("e2e harness safety", () => {
   test("stops and restarts the exact owned fake child", async () => {
     const { port, server } = await allocatePort();
     await new Promise<void>((resolve) => server.close(() => resolve()));
-    await startServe(workspace, port, { serveTimeoutMs: 1_500 });
+    await startServe(workspace, port, { command: [BUN, fakeOpencode], serveTimeoutMs: 1_500 });
     ownedPorts.add(port);
     await waitForServeState(port, true);
     await stopServe(port);
     expect(isServeRunning(port)).toBe(false);
-    await startServe(workspace, port, { serveTimeoutMs: 1_500 });
+    await startServe(workspace, port, { command: [BUN, fakeOpencode], serveTimeoutMs: 1_500 });
     ownedPorts.add(port);
     await waitForServeState(port, true);
     await stopServe(port);
@@ -120,7 +121,9 @@ describe("e2e harness safety", () => {
     await new Promise<void>((resolve) => server.close(() => resolve()));
     process.env.STM_HARNESS_FAKE_NO_MARKER = "1";
     try {
-      await expect(startServe(workspace, port, { serveTimeoutMs: 150 })).rejects.toThrow("did not start within 0.15s");
+      await expect(startServe(workspace, port, { command: [BUN, fakeOpencode], serveTimeoutMs: 150 })).rejects.toThrow(
+        "did not start within 0.15s",
+      );
       await waitForServeState(port, false);
       expect(readFileSync(simulatedConfig, "utf8")).toBe(configBytes);
     } finally {

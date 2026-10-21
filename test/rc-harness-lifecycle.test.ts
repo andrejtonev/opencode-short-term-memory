@@ -133,14 +133,15 @@ describe("RC lifecycle safety harness", () => {
   test("rejects root, marker, and cache-target symlinks while allowing inner symlinks", async () => {
     const outside = await freshRoot("stm-rc-outside-");
     const linkedRoot = await freshRoot();
-    await symlink(outside, join(linkedRoot, "root-link"));
+    await symlink(outside, join(linkedRoot, "root-link"), process.platform === "win32" ? "junction" : "dir");
     await expect(markOwnedRoot(join(linkedRoot, "root-link"), owner)).rejects.toThrow("real directory");
 
     const { root } = await markedRoot();
     const markerTarget = join(root, "marker-real");
-    await writeFile(markerTarget, JSON.stringify(owner));
+    if (process.platform === "win32") await mkdir(markerTarget);
+    else await writeFile(markerTarget, JSON.stringify(owner));
     await rm(join(root, OWNER_MARKER));
-    await symlink(markerTarget, join(root, OWNER_MARKER));
+    await symlink(markerTarget, join(root, OWNER_MARKER), process.platform === "win32" ? "junction" : "file");
     await expect(
       cleanupOwnedRoot({ root, owner, targets: [], childrenExited: true, portsClosed: true }),
     ).rejects.toThrow("regular file");
@@ -148,7 +149,7 @@ describe("RC lifecycle safety harness", () => {
     const safe = await markedRoot();
     const cache = join(safe.root, "xdg-cache");
     await mkdir(cache);
-    await symlink(outside, join(cache, "external-sentinel"));
+    await symlink(outside, join(cache, "external-sentinel"), process.platform === "win32" ? "junction" : "dir");
     await expect(
       cleanupOwnedRoot({
         root: safe.root,
@@ -162,7 +163,7 @@ describe("RC lifecycle safety harness", () => {
     await expect(stat(outside)).resolves.toBeTruthy();
 
     const targetLinkRoot = await markedRoot();
-    await symlink(outside, join(targetLinkRoot.root, "xdg-cache"));
+    await symlink(outside, join(targetLinkRoot.root, "xdg-cache"), process.platform === "win32" ? "junction" : "dir");
     await expect(
       cleanupOwnedRoot({
         root: targetLinkRoot.root,
@@ -280,8 +281,11 @@ describe("RC lifecycle safety harness", () => {
     expect(typeof budget.freeBytes).toBe("bigint");
     expect(typeof budget.freeInodes).toBe("bigint");
     expect(typeof budget.blockSize).toBe("bigint");
-    await expect(requireDiskBudget(root, budget.freeBytes + 1n, "rc-test")).rejects.toThrow("under budget");
-    await expect(requireDiskBudget(root, budget.freeBytes, "rc-test")).resolves.toEqual(budget);
+    // Other processes can allocate/free bytes between real statfs calls.
+    await expect(requireDiskBudget(root, 2n ** 63n, "rc-test")).rejects.toThrow("under budget");
+    const accepted = await requireDiskBudget(root, 1n, "rc-test");
+    expect(accepted.freeBytes).toBeGreaterThanOrEqual(1n);
+    expect(accepted.blockSize).toBe(budget.blockSize);
   });
 
   test("writes atomic durable evidence with decimal BigInts, replacement, mode 0600, and temp cleanup on rename failure", async () => {
@@ -289,7 +293,8 @@ describe("RC lifecycle safety harness", () => {
     const evidence = join(root, "evidence", "run.json");
     await writeDurableEvidence(evidence, { revision: 9n, nested: { bytes: 12n } });
     expect(JSON.parse(await readFile(evidence, "utf8"))).toEqual({ revision: "9", nested: { bytes: "12" } });
-    expect((await stat(evidence)).mode & 0o777).toBe(0o600);
+    // Windows uses ACLs and does not implement POSIX owner permission bits.
+    if (process.platform !== "win32") expect((await stat(evidence)).mode & 0o777).toBe(0o600);
     await writeDurableEvidence(evidence, { revision: 10n });
     expect(JSON.parse(await readFile(evidence, "utf8"))).toEqual({ revision: "10" });
 

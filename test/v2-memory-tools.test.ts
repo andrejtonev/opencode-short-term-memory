@@ -233,9 +233,9 @@ describe("V2 memory tools", () => {
             "memoryModelSelection: inherited-current-session",
             "summarizerMode: clean",
             "memoryDir: .opencode/memory",
-            "memoryPath: .opencode/memory/session_authoritative.md",
-            "checkpointPath: .opencode/memory/checkpoints/authoritative.last-message-id.txt",
-            "resetBoundaryPath: .opencode/memory/reset-boundaries/authoritative.json",
+            `memoryPath: ${join(".opencode/memory", "session_authoritative.md")}`,
+            `checkpointPath: ${join(".opencode/memory/checkpoints", "authoritative.last-message-id.txt")}`,
+            `resetBoundaryPath: ${join(".opencode/memory/reset-boundaries", "authoritative.json")}`,
             "resetBoundary: absent",
             "resetPolicy: pause if anchor absent",
             `memoryBytes: ${Buffer.byteLength(await readFile(memoryPathFor("authoritative"), "utf8"), "utf8")}`,
@@ -756,7 +756,9 @@ describe("V2 memory tools", () => {
     const projectDir = join(testDir, "project");
     await writeText(join(projectDir, ".opencode"), "not a directory");
     const [, , , , , , setupTool] = createV2MemoryTools(context(projectDir));
-    await expect(setupTool.execute({ confirm: true }, {} as ToolContext)).rejects.toMatchObject({ code: "ENOTDIR" });
+    await expect(setupTool.execute({ confirm: true }, {} as ToolContext)).rejects.toMatchObject({
+      code: process.platform === "win32" ? "ENOENT" : "ENOTDIR",
+    });
     expect(await readFile(join(projectDir, ".opencode"), "utf8")).toBe("not a directory");
     expect(await readdir(projectDir)).toEqual([".opencode"]);
   });
@@ -1097,9 +1099,9 @@ describe("V2 memory tools", () => {
         "memoryModelSelection: explicit-override",
         "summarizerMode: clean",
         "memoryDir: .opencode/memory",
-        `memoryPath: .opencode/memory/session_${sessionID}.md`,
-        `checkpointPath: .opencode/memory/checkpoints/${sessionID}.last-message-id.txt`,
-        `resetBoundaryPath: .opencode/memory/reset-boundaries/${sessionID}.json`,
+        `memoryPath: ${join(".opencode/memory", `session_${sessionID}.md`)}`,
+        `checkpointPath: ${join(".opencode/memory/checkpoints", `${sessionID}.last-message-id.txt`)}`,
+        `resetBoundaryPath: ${join(".opencode/memory/reset-boundaries", `${sessionID}.json`)}`,
         "resetBoundary: absent",
         "resetPolicy: pause if anchor absent",
         `memoryBytes: ${Buffer.byteLength(memory, "utf8")}`,
@@ -1249,7 +1251,7 @@ describe("V2 memory tools", () => {
     const [, statusTool] = createV2MemoryTools(context(testDir));
     const status = await statusTool.execute({}, toolContext(sessionID));
     const text = resultText(status);
-    expect(text).toContain(`memoryPath: ${memoryDir}/session_${sessionID}.md`);
+    expect(text).toContain(`memoryPath: ${join(memoryDir, `session_${sessionID}.md`)}`);
     const injection = createV2ContextInjection(context(testDir), testDir);
     const input = { sessionID, system: [] } as never;
     await injection(input);

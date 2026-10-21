@@ -1315,7 +1315,10 @@ describe("SessionMemoryPlugin general functionality", () => {
 
     await plugin["session.created"]({ sessionID });
     await plugin["session.updated"]({ sessionID } as any);
-    await new Promise((resolve) => setTimeout(resolve, 150));
+    const deadline = Date.now() + 2000;
+    while (!(await readText(memoryPathFor(sessionID), "")).includes("/lib/bootstrap.ts") && Date.now() < deadline) {
+      await Bun.sleep(20);
+    }
 
     const memory = await readText(memoryPathFor(sessionID), "");
     expect(memory).toContain("/lib/bootstrap.ts");

@@ -17,6 +17,7 @@ import {
   writeText,
 } from "../src/memory-utils";
 import { CLEAN_SUMMARIZER_TIMEOUT } from "../src/summarizer";
+import { supportsFileSymlinks } from "./platform-capabilities";
 import { writeLastProcessedMessageID } from "../src/message-collector";
 import type { V2CommandDefinition, V2Context, V2SessionContext } from "../src/v2-adapter";
 import { createV2MemoryUpdater, isV2MemoryUpdateInFlight, V2TransientGenerationError } from "../src/v2-memory-update";
@@ -285,28 +286,31 @@ describe("V2 fresh memory updater", () => {
     }
   });
 
-  test("does not read a symlinked location-local AGENTS.md or an existing checkpoint", async () => {
-    await writeFile(join(directory, "outside-agents.md"), "SYMLINK_SENTINEL");
-    await symlink(join(directory, "outside-agents.md"), join(directory, "AGENTS.md"));
-    await writeText(
-      join(directory, ".opencode", "stm.json"),
-      JSON.stringify({ memoryDir, includeAgentsMdOnFirstUpdate: true }),
-    );
-    await writeText(checkpointPathFor("agents-checkpoint", memoryDir), "u1\n");
-    const { context, calls } = makeContext(directory);
-    const result = await createV2MemoryUpdater(context)({
-      sessionID: "agents-checkpoint",
-      model: input("agents-checkpoint", []).model,
-      messages: [message("u1", "user", "old"), message("a1", "assistant", "new")],
-    });
+  test.skipIf(!supportsFileSymlinks)(
+    "does not read a symlinked location-local AGENTS.md or an existing checkpoint",
+    async () => {
+      await writeFile(join(directory, "outside-agents.md"), "SYMLINK_SENTINEL");
+      await symlink(join(directory, "outside-agents.md"), join(directory, "AGENTS.md"));
+      await writeText(
+        join(directory, ".opencode", "stm.json"),
+        JSON.stringify({ memoryDir, includeAgentsMdOnFirstUpdate: true }),
+      );
+      await writeText(checkpointPathFor("agents-checkpoint", memoryDir), "u1\n");
+      const { context, calls } = makeContext(directory);
+      const result = await createV2MemoryUpdater(context)({
+        sessionID: "agents-checkpoint",
+        model: input("agents-checkpoint", []).model,
+        messages: [message("u1", "user", "old"), message("a1", "assistant", "new")],
+      });
 
-    expect(result.status).toBe("committed");
-    expect(calls.clean).toHaveLength(1);
-    expect((calls.clean[0] as { input: { prompt: string } }).input.prompt).not.toContain("SYMLINK_SENTINEL");
-    expect((calls.clean[0] as { input: { prompt: string } }).input.prompt).not.toContain("<agents_md_context>");
-  });
+      expect(result.status).toBe("committed");
+      expect(calls.clean).toHaveLength(1);
+      expect((calls.clean[0] as { input: { prompt: string } }).input.prompt).not.toContain("SYMLINK_SENTINEL");
+      expect((calls.clean[0] as { input: { prompt: string } }).input.prompt).not.toContain("<agents_md_context>");
+    },
+  );
 
-  test("does not block on a FIFO location-local AGENTS.md", async () => {
+  test.skipIf(process.platform === "win32")("does not block on a FIFO location-local AGENTS.md", async () => {
     const fifoPath = join(directory, "AGENTS.md");
     await new Promise<void>((resolve, reject) => {
       const child = spawn("mkfifo", [fifoPath]);

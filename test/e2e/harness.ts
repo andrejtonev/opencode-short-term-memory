@@ -298,7 +298,7 @@ async function assertPortAvailable(port: number): Promise<void> {
 export async function startServe(
   ws: E2EWorkspace,
   port = SERVE_PORT,
-  opts?: { serveTimeoutMs?: number },
+  opts?: { serveTimeoutMs?: number; command?: readonly string[] },
 ): Promise<number> {
   await stopOwnedServe(port);
   await assertPortAvailable(port);
@@ -310,12 +310,17 @@ export async function startServe(
   writeFileSync(ws.serveLogPath, "", "utf-8"); // truncate
 
   return new Promise((resolve, reject) => {
-    const proc = spawn("opencode", ["serve", "--hostname", SERVE_HOST, "--port", String(port), "--print-logs"], {
-      cwd: ws.projectDir,
-      stdio: [SERVE_STDOUT, SERVE_STDOUT, SERVE_STDERR],
-      detached: false,
-      env: isolateServeEnv(ws),
-    });
+    const [executable, ...prefix] = opts?.command ?? ["opencode"];
+    const proc = spawn(
+      executable!,
+      [...prefix, "serve", "--hostname", SERVE_HOST, "--port", String(port), "--print-logs"],
+      {
+        cwd: ws.projectDir,
+        stdio: [SERVE_STDOUT, SERVE_STDOUT, SERVE_STDERR],
+        detached: false,
+        env: isolateServeEnv(ws),
+      },
+    );
 
     let resolveExit!: () => void;
     const exit = new Promise<void>((resolveExitPromise) => {
@@ -432,12 +437,24 @@ export function isServeRunning(port = SERVE_PORT): boolean {
   try {
     // The test serve is unsecured (we strip OPENCODE_SERVER_PASSWORD in
     // isolateServeEnv), so a plain curl to / is the right health check.
-    const resp = execSync(`curl -s -o /dev/null -w "%{http_code}" http://${SERVE_HOST}:${port}/`, {
-      stdio: "pipe",
-      encoding: "utf-8",
-      timeout: 5_000,
-    });
-    return resp.trim().startsWith("2");
+    const resp = spawnSync(
+      "curl",
+      [
+        "-s",
+        "--max-time",
+        "1",
+        "-o",
+        process.platform === "win32" ? "NUL" : "/dev/null",
+        "-w",
+        "%{http_code}",
+        `http://${SERVE_HOST}:${port}/`,
+      ],
+      {
+        encoding: "utf-8",
+        timeout: 2_000,
+      },
+    );
+    return resp.status === 0 && resp.stdout.trim().startsWith("2");
   } catch {
     return false;
   }

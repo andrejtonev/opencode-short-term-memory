@@ -11,7 +11,12 @@ export const PROBE_MODEL_REF = {
 
 export const PROBE_SERVICE_VERSION = "2.0.12";
 export const PROBE_SERVICE_BINARY = fileURLToPath(
-  new URL("./node_modules/@opencode/cli-linux-x64/bin/opencode", import.meta.url),
+  new URL(
+    process.platform === "win32"
+      ? "./node_modules/@opencode/cli-windows-x64/bin/opencode.exe"
+      : "./node_modules/@opencode/cli-linux-x64/bin/opencode",
+    import.meta.url,
+  ),
 );
 export const PROBE_HOST_TIMEOUT_MS = 10_000;
 export const PROBE_MESSAGE_PAGE_SIZE = 100;
@@ -58,6 +63,16 @@ export function isolatedServiceCommand(
     return `${key}=${value}`;
   });
   // Service.ensure merges parent variables; clear them at the actual server exec boundary.
+  if (process.platform === "win32") {
+    const childEnv = {
+      ...env,
+      PATH: `${process.env.SystemRoot}\\System32`,
+      SystemRoot: process.env.SystemRoot ?? "C:\\Windows",
+    };
+    const wrapper =
+      "const p=JSON.parse(process.argv.at(-1));const c=require('node:child_process').spawn(p.command[0],p.command.slice(1),{env:p.env,stdio:'inherit',windowsHide:true});c.on('error',()=>process.exit(1));c.on('exit',code=>process.exit(code??1));";
+    return [process.execPath, "-e", wrapper, "--", JSON.stringify({ command, env: childEnv })];
+  }
   return ["/usr/bin/env", "-i", ...assignments, "PATH=/usr/bin:/bin", ...command];
 }
 

@@ -3,7 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createPlugin, createFakeClient, extractTaggedChildSystemDeliveries } from "./test-helpers";
-import { INJECTION_PREFIX, readText, writeText, memoryPathFor } from "../src/memory-utils";
+import { INJECTION_PREFIX, readText, writeText, memoryPathFor, checkpointPathFor } from "../src/memory-utils";
 
 describe("DCP compress event integration", () => {
   const originalCwd = process.cwd();
@@ -479,8 +479,11 @@ describe("DCP compress event integration", () => {
       fakeClient,
     );
 
-    await plugin["session.created"]({ sessionID: parentSessionID });
+    // This case starts from an already summarized parent. Prevent its unrelated
+    // asynchronous bootstrap from racing the child-only call assertions.
     await writeText(memoryPathFor(parentSessionID), "## Session Memory\n\n### User Instructions\n- Parent context\n");
+    await writeText(checkpointPathFor(parentSessionID), "u1\n");
+    await plugin["session.created"]({ sessionID: parentSessionID });
 
     // Create sub-agent session
     const subCreateInput = {

@@ -22,16 +22,17 @@ test("isolated service command clears inherited secrets without changing the par
   const childEnv = JSON.parse(child.stdout);
   expect(childEnv.PROBE_PARENT_SECRET).toBeUndefined();
   expect(childEnv.PROBE_SENTINEL).toBe(supplied.PROBE_SENTINEL);
-  expect(childEnv.PATH).toBe("/usr/bin:/bin");
+  expect(childEnv.PATH).toBe(process.platform === "win32" ? `${process.env.SystemRoot}\\System32` : "/usr/bin:/bin");
   expect(process.env).toEqual(parentBefore);
-  expect(isolatedServiceCommand({})).toEqual([
-    "/usr/bin/env",
-    "-i",
-    "PATH=/usr/bin:/bin",
-    PROBE_SERVICE_BINARY,
-    "serve",
-    "--service",
-  ]);
+  if (process.platform !== "win32")
+    expect(isolatedServiceCommand({})).toEqual([
+      "/usr/bin/env",
+      "-i",
+      "PATH=/usr/bin:/bin",
+      PROBE_SERVICE_BINARY,
+      "serve",
+      "--service",
+    ]);
 });
 
 test("isolated service command rejects unsafe environment variable names", () => {

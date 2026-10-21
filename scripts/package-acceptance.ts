@@ -2,11 +2,12 @@ import assert from "node:assert/strict";
 import { lstat, mkdir, mkdtemp, readdir, realpath } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { tmpdir } from "node:os";
 
 // Explicit invocation only: bun scripts/package-acceptance.ts /absolute/path/package.tgz
 const started = Date.now();
 const deadline = started + 180_000;
-const sandbox = await mkdtemp("/tmp/opencode/stm-package-acceptance-");
+const sandbox = await mkdtemp(join(tmpdir(), "stm-package-acceptance-"));
 const failures: string[] = [];
 const commands: object[] = [];
 const evidence: Record<string, unknown> = {
@@ -68,8 +69,20 @@ try {
     TMP: join(sandbox, "tmp"),
     TEMP: join(sandbox, "tmp"),
     BUN_INSTALL_CACHE_DIR: join(sandbox, "runtime-install-cache"),
-    PATH: `${dirname(bun)}:/usr/bin:/bin`,
+    // This process tree only installs and checks package exports/types. Never
+    // propagate this cap to a native OpenCode host/TUI (it can starve its RPCs).
+    BUN_CONFIG_MAX_HTTP_REQUESTS: "2",
+    PATH:
+      process.platform === "win32"
+        ? `${dirname(bun)};${process.env.SystemRoot}\\System32`
+        : `${dirname(bun)}:/usr/bin:/bin`,
   };
+  if (process.platform === "win32") {
+    env.USERPROFILE = env.HOME!;
+    env.APPDATA = join(sandbox, "appdata");
+    env.LOCALAPPDATA = join(sandbox, "localappdata");
+    env.SystemRoot = process.env.SystemRoot!;
+  }
   for (const path of new Set(Object.values(env).filter((value) => inside(sandbox, value)))) {
     await mkdir(path, { recursive: true });
   }
@@ -178,7 +191,11 @@ try {
   }
 
   const manifest = JSON.parse(
-    await run("tarball metadata", ["/usr/bin/tar", "-xOf", tarball, "package/package.json"], sandbox),
+    await run(
+      "tarball metadata",
+      [process.platform === "win32" ? "tar.exe" : "/usr/bin/tar", "-xOf", tarball, "package/package.json"],
+      sandbox,
+    ),
   ) as {
     name: string;
     version: string;
