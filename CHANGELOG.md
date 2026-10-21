@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Recognize native V2 `Generate.UnavailableError` as a settled transient generation failure, so provider 503 responses use the configured bounded retry budget. Unknown errors, cancellation and timeouts remain non-retryable.
+- Keep V1 history bootstrap read-only and bind delayed scheduling to its original lifecycle generation, so it cannot recreate an empty memory after session deletion or cross a reset boundary.
+- Defer V1 manual tool updates until idle when active generation (or clean-to-active fallback) would prompt the same busy session. The tool reports deferral instead of waiting for a re-entrant prompt or claiming that memory was refreshed.
+- Restore internal side-session identity during startup cleanup, retain it after deletion, and invalidate work admitted before side-session registration. Failed clean-session deletions remain tracked for recovery. Regression coverage checks delayed events, registration races, and absence of side-session memory files and history reads.
+- Clarify that summarizers receive the retained memory, incremental conversation and optional project context in the prompt and must return memory without tools or additional lookups.
+- V1 clean summarizer sessions now disable all tools, including plugin and MCP tools. The restriction applies only to disposable side sessions because V1 persists prompt tool settings as session permissions.
+
 ## [1.4.0-rc.6] - 2026-10-17
 
 Unpublished local candidate preparation, not published or stable, starting from source commit `1577d4f58fe751efb9717aeb91018206f1aece0d`. The final new RC6 artifact SHA-256 and exact-artifact qualification remain **pending**; see [RC Readiness](docs/RC-READINESS.md) for upcoming exact RC6 results.

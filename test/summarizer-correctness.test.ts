@@ -23,6 +23,7 @@ type PromptCall = {
   prompt: {
     noReply?: unknown;
     model?: { providerID: string; modelID: string };
+    tools?: Record<string, boolean>;
     parts?: Array<{ text?: string }>;
   };
 };
@@ -85,6 +86,10 @@ describe("summarizer SDK envelopes", () => {
     ).resolves.toBe(VALID_SUMMARY);
 
     expect(promptCalls).toHaveLength(2);
+    expect(promptCalls[0].prompt.tools).toEqual({ "*": false });
+    // V1 persists prompt tool restrictions as session permissions. Never
+    // disable the user's tools when summarizing in the active session.
+    expect(promptCalls[1].prompt).not.toHaveProperty("tools");
     for (const call of promptCalls) {
       expect(call.prompt.parts?.[0]?.text).toBeTruthy();
       expect("noReply" in call.prompt).toBe(false);

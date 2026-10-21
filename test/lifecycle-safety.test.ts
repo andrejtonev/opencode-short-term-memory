@@ -2,7 +2,16 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { access, mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { MEMORY_HEADER, checkpointPathFor, memoryPathFor, readText, writeText } from "../src/memory-utils";
+import {
+  DEFAULT_CONFIG,
+  MEMORY_HEADER,
+  checkpointPathFor,
+  memoryPathFor,
+  readText,
+  writeText,
+} from "../src/memory-utils";
+import { maybeBootstrapSessionHistory } from "../src/memory-lifecycle";
+import type { Client } from "../src/types";
 import { createFakeClient, createPlugin } from "./test-helpers";
 import { deferred } from "./async-helpers";
 
@@ -33,6 +42,28 @@ describe("session lifecycle generation safety", () => {
     if (originalOpencodeConfigDir === undefined) delete process.env.OPENCODE_CONFIG_DIR;
     else process.env.OPENCODE_CONFIG_DIR = originalOpencodeConfigDir;
     await rm(testDir, { recursive: true, force: true });
+  });
+
+  test("a bootstrap resumed after deletion cannot recreate memory or checkpoint", async () => {
+    const sessionID = "late-bootstrap-after-delete";
+    const client = createFakeClient();
+    const { plugin } = await createPlugin({ debounceMs: 120_000 }, client);
+    await plugin["session.created"]({ sessionID });
+    await plugin["session.deleted"]({ sessionID });
+    await expectMissing(memoryPathFor(sessionID));
+
+    // Reproduce a handler that already ensured memory, yielded while logging,
+    // and resumes its bootstrap after the deletion event has completed.
+    await maybeBootstrapSessionHistory(
+      sessionID,
+      "session_updated_bootstrap",
+      DEFAULT_CONFIG,
+      client as unknown as Client,
+      () => {},
+    );
+    await expectMissing(memoryPathFor(sessionID));
+    await expectMissing(checkpointPathFor(sessionID));
+    expect(client.calls.prompt).toHaveLength(0);
   });
 
   for (const lifecycleAction of ["reset", "delete"] as const) {

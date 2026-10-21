@@ -332,7 +332,13 @@ function generateWithTimeout(
 }
 
 function isRetryableSettledGenerationError(error: unknown): boolean {
-  return error instanceof V2TransientGenerationError || error instanceof V2MalformedGenerationError;
+  return (
+    error instanceof V2TransientGenerationError ||
+    error instanceof V2MalformedGenerationError ||
+    // Native V2 generation reports a settled provider 503 with this error name.
+    // Match the host's specific category, never message text or arbitrary errors.
+    (error instanceof Error && error.name === "Generate.UnavailableError")
+  );
 }
 
 export function createV2MemoryUpdater(

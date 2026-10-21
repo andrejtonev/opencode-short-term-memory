@@ -10,7 +10,12 @@ export interface CreateToolsContext {
   globalState: { lastActiveSessionID?: string };
   client: Client;
   reloadConfigLocal: () => Promise<SessionMemoryConfig>;
-  updateMemory: (client: Client, sessionID: string, reason: string, cfg: SessionMemoryConfig) => Promise<void>;
+  updateMemory: (
+    client: Client,
+    sessionID: string,
+    reason: string,
+    cfg: SessionMemoryConfig,
+  ) => Promise<void | "deferred">;
 }
 
 export function createTools(ctx: CreateToolsContext): Record<string, unknown> {
@@ -42,7 +47,8 @@ export function createTools(ctx: CreateToolsContext): Record<string, unknown> {
       },
     }),
     stm_memory_update: tool({
-      description: "Update short-term memory for the current session, then return the resulting memory.",
+      description:
+        "Update short-term memory for the current session, then return the resulting memory. Active-session generation is deferred until idle when the session is busy.",
       args: {},
       async execute(_args: Record<string, never>, toolCtx: ToolContext) {
         return await executeAction("update", toolCtx);

@@ -1269,6 +1269,30 @@ describe("V2 fresh memory updater", () => {
     expect(calls.clean).toHaveLength(2);
   });
 
+  test("retries native V2 provider unavailability within the configured budget", async () => {
+    for (const recovers of [true, false]) {
+      let attempts = 0;
+      const { context, calls } = makeContext(directory, {
+        clean: async () => {
+          if (++attempts === 1 || !recovers) {
+            const error = new Error("Injected provider outage");
+            error.name = "Generate.UnavailableError";
+            throw error;
+          }
+          return { text: VALID_MEMORY };
+        },
+      });
+      const sessionID = `native-unavailable-${recovers}`;
+      const result = await createV2MemoryUpdater(context)(
+        input(sessionID, [message("u1", "user", "Q"), message("a1", "assistant", "A")]),
+      );
+      expect(result.status).toBe(recovers ? "committed" : "error");
+      expect(calls.clean).toHaveLength(2);
+      const checkpoint = await readRawFile(checkpointPathFor(sessionID, memoryDir));
+      expect(checkpoint?.toString() ?? null).toBe(recovers ? "a1\n" : null);
+    }
+  });
+
   test("uses one active fallback after clean retries are exhausted", async () => {
     await writeText(
       join(directory, ".opencode", "stm.json"),

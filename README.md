@@ -152,7 +152,8 @@ When `summarizerMode` is `"clean"` (the default), the plugin creates a separate 
 
 Why a separate session?
 
-- **Instruction isolation** — The side session requests an assistant-generated response with only the summarizer system prompt — never the main session's instructions, custom commands, or project rules.
+- **Summary-only request** — The side session receives the summarizer system prompt and the selected memory inputs. It shares the host's project instance, so other plugins and host-provided instructions can still apply.
+- **No tools** — Clean summary prompts disable all tools, including plugin and MCP tools, using V1's wildcard session permission. STM ignores its own side-session events rather than creating or injecting memory for them. Plugins remain loaded at the host-instance level.
 - **Clean chat** — Summarization prompts never appear in the main chat UI.
 - **Host-resolved or explicit model** — By default summary calls omit a model override and use a fresh host-resolved model; this is not guaranteed to be the originating active-session model. Set `memoryModel` to a valid `provider/model` for an explicit, often cheaper override.
 - **Auto cleanup** — Side sessions are deleted immediately after summarization completes so they don't clutter the session list.

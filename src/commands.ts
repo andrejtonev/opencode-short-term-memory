@@ -96,7 +96,12 @@ export async function executeMemoryAction(
   sessionID: string | undefined,
   ctx: CommandContext,
   client: Client,
-  updateMemoryFn: (client: Client, sessionID: string, reason: string, cfg: SessionMemoryConfig) => Promise<void>,
+  updateMemoryFn: (
+    client: Client,
+    sessionID: string,
+    reason: string,
+    cfg: SessionMemoryConfig,
+  ) => Promise<void | "deferred">,
   options: { confirm?: boolean } = {},
 ): Promise<string> {
   const { config, sessionStates } = ctx;
@@ -148,7 +153,9 @@ export async function executeMemoryAction(
     return `Reset memory for session ${sessionID}.`;
   }
   if (action === "update") {
-    await updateMemoryFn(client, sessionID, "manual_tool", config);
+    const disposition = await updateMemoryFn(client, sessionID, "manual_tool", config);
+    if (disposition === "deferred")
+      return "Memory update deferred until the current session becomes idle. This tool call has not refreshed the memory yet.";
     return await readText(
       memoryPathFor(sessionID, config.memoryDir),
       "Memory update attempted, but no memory file was found.",

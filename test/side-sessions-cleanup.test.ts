@@ -3,8 +3,12 @@ import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createPlugin, createFakeClient } from "./test-helpers";
+import { runCleanOpencodeSummarizer } from "../src/summarizer";
 import {
   DEFAULT_CONFIG,
+  SIDE_SESSION_TITLE,
+  memoryPathFor,
+  checkpointPathFor,
   readText,
   sideSessionsStatePath,
   loadActiveSideSessions,
@@ -40,6 +44,61 @@ afterEach(() => {
 });
 
 describe("Side session tracking and orphan cleanup", () => {
+  test("a clean session whose deletion fails stays tracked for restart recovery", async () => {
+    const summary = "## Session Memory\n\n### Conclusions\n- retained";
+    const result = await runCleanOpencodeSummarizer(
+      {
+        createTemporarySession: async () => ({ id: "failed-clean-delete" }),
+        deliverGeneratedPrompt: async () => ({
+          data: { info: { role: "assistant" }, parts: [{ type: "text", text: summary }] },
+        }),
+        abortTemporarySession: async () => {},
+        deleteTemporarySession: async () => {
+          throw new Error("delete unavailable");
+        },
+      },
+      "complete supplied prompt",
+      DEFAULT_CONFIG,
+    );
+    expect(result).toBe(summary);
+    expect(await loadActiveSideSessions(DEFAULT_CONFIG.memoryDir)).toEqual(["failed-clean-delete"]);
+  });
+
+  test("startup orphans remain excluded when delayed events arrive without a deletion event", async () => {
+    const ids = ["deleted-orphan", "missing-orphan", "failed-orphan", "listed-orphan"];
+    await saveActiveSideSessions(DEFAULT_CONFIG.memoryDir, ids.slice(0, 3));
+    const client = createFakeClient();
+    client.session.list = async () => ({ data: [{ id: "listed-orphan", title: SIDE_SESSION_TITLE }] });
+    client.session.delete = async (args?: unknown) => {
+      const id = (args as { path: { id: string } }).path.id;
+      if (id === "missing-orphan") return { error: { name: "NotFoundError" } };
+      if (id === "failed-orphan") return { error: { name: "InternalServerError" } };
+      return { data: true };
+    };
+    const { plugin } = await createPlugin({ debug: true, debounceMs: 1 }, client);
+    await plugin.tool.short_term_memory.execute({ action: "status" }, {});
+    try {
+      for (const sessionID of ids) {
+        await plugin.event({ event: { type: "session.created", properties: { info: { id: sessionID } } } } as never);
+        await plugin.event({ event: { type: "session.idle", properties: { sessionID } } } as never);
+        await plugin["message.updated"]({
+          sessionID,
+          message: { role: "assistant", content: "late summary" },
+        } as never);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(client.calls.messages).toHaveLength(0);
+      expect(client.calls.prompt).toHaveLength(0);
+      for (const id of ids) {
+        expect(await Bun.file(memoryPathFor(id)).exists()).toBe(false);
+        expect(await Bun.file(checkpointPathFor(id)).exists()).toBe(false);
+      }
+      expect(await loadActiveSideSessions(DEFAULT_CONFIG.memoryDir)).toEqual(["failed-orphan"]);
+    } finally {
+      for (const sessionID of ids) await plugin["session.deleted"]({ sessionID });
+    }
+  });
+
   test("clean summarizer records side session in state file and removes it on delete", async () => {
     const sessionID = `track-${Date.now()}`;
     const fakeClient = createFakeClient({
@@ -66,7 +125,8 @@ describe("Side session tracking and orphan cleanup", () => {
     };
 
     const { plugin } = await createPlugin({ summarizerMode: "clean", debug: false }, fakeClient);
-    await plugin["session.created"]({ sessionID });
+    // Manual update creates its own memory. A created event also schedules an
+    // unrelated bootstrap timer that can outlive this test's temporary cwd.
 
     // Before the update runs, the state file should not exist (or be empty)
     const before = await loadActiveSideSessions(DEFAULT_CONFIG.memoryDir);
@@ -322,22 +382,36 @@ describe("Side session tracking and orphan cleanup", () => {
 
     const { plugin } = await createPlugin({ summarizerMode: "clean", debug: false }, fakeClient);
 
-    // Slow the prompt slightly so the two summarizers overlap.
+    // Hold both prompts until both side sessions are tracked. Timing delays do
+    // not guarantee overlap on a loaded Windows host.
     const originalPrompt = fakeClient.session.prompt;
+    const entered: string[] = [];
+    let trackedTogether: string[] = [];
+    let release!: () => void;
+    const bothEntered = new Promise<void>((resolve) => {
+      release = resolve;
+    });
     fakeClient.session.prompt = async (args?: unknown) => {
-      await new Promise((r) => setTimeout(r, 20));
+      entered.push((args as { path: { id: string } }).path.id);
+      if (entered.length === 2) {
+        try {
+          trackedTogether = await loadActiveSideSessions(DEFAULT_CONFIG.memoryDir);
+        } finally {
+          release();
+        }
+      }
+      await bothEntered;
       return originalPrompt(args);
     };
 
-    await plugin["session.created"]({ sessionID: "concurrent-A" });
-    await plugin["session.created"]({ sessionID: "concurrent-B" });
-
+    // Exercise only the two manual updates, without automatic bootstrap work.
     await Promise.all([
       plugin.tool.short_term_memory.execute({ action: "update" }, { sessionID: "concurrent-A" }),
       plugin.tool.short_term_memory.execute({ action: "update" }, { sessionID: "concurrent-B" }),
     ]);
 
     // Both should have created and deleted exactly one side session.
+    expect(trackedTogether.sort()).toEqual([...entered].sort());
     expect(fakeClient.calls.create.length).toBe(2);
     expect(fakeClient.calls.delete.length).toBe(2);
 

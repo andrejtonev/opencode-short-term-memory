@@ -1,5 +1,5 @@
 import {
-  ensureMemoryFile,
+  memoryPathFor,
   logEvent,
   showToast,
   type SessionMemoryConfig,
@@ -41,7 +41,9 @@ export async function maybeBootstrapSessionHistory(
   scheduleCb: (client: Client, sessionID: string, reason: string, cfg: SessionMemoryConfig) => void,
 ): Promise<void> {
   if (!config.enabled) return;
-  const memoryPath = await ensureMemoryFile(sessionID, config);
+  // Callers create memory under their lifecycle persistence lock. A delayed
+  // bootstrap must only inspect it: creation here can race a completed delete.
+  const memoryPath = memoryPathFor(sessionID, config.memoryDir);
   const [existingMemory, lastProcessedMessageID] = await Promise.all([
     readText(memoryPath, ""),
     readLastProcessedMessageID(sessionID, config),

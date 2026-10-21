@@ -204,6 +204,75 @@ afterEach(async () => {
 });
 
 describe.serial("V1 self-generation boundaries", () => {
+  for (const config of [
+    { summarizerMode: "active" },
+    { summarizerMode: "clean", cleanFallbackToActiveSession: true, sideSessionRetries: 0 },
+  ]) {
+    test(`busy manual update defers ${config.summarizerMode} generation until idle`, async () => {
+      const sessionID = `busy-manual-${config.summarizerMode}`;
+      const { plugin, client } = await setup(
+        [row("external-user", "user", "retain this instruction", Date.now())],
+        { rejectPromptBeforePersist: config.summarizerMode === "clean" },
+        config,
+        sessionID,
+      );
+      await plugin.event({ event: { type: "session.status", properties: { sessionID, status: { type: "busy" } } } });
+      // Model a host that cannot service another prompt while its tool is running.
+      const originalPrompt = client.session.prompt;
+      client.session.prompt = async () => {
+        throw new Error("re-entrant prompt while tool is running");
+      };
+      for (const [name, args] of [
+        ["stm_memory_update", {}],
+        ["short_term_memory", { action: "update" }],
+      ] as const) {
+        const result = await plugin.tool[name].execute(args, { sessionID });
+        expect(result).toContain("deferred until the current session becomes idle");
+        expect(result).toContain("has not refreshed");
+      }
+      expect(client.calls.summarizerPrompts).toHaveLength(0);
+      expect(await readText(checkpointPathFor(sessionID), "")).toBe("");
+      client.session.prompt = originalPrompt;
+      await plugin.event(idle(sessionID));
+      const expectedAttempts = config.summarizerMode === "clean" ? 2 : 1;
+      await waitFor(() => client.calls.summarizerPrompts.length === expectedAttempts);
+      await drain();
+      expect(await readText(memoryPathFor(sessionID), "")).toContain("retained");
+      expect(await readText(checkpointPathFor(sessionID), "")).toContain("external-user");
+      await plugin.event(idle(sessionID));
+      await drain();
+      expect(client.calls.summarizerPrompts).toHaveLength(expectedAttempts);
+    });
+  }
+
+  test("side-session registration fences a title-less create event already awaiting config", async () => {
+    const sessionID = "create-registration-race";
+    const { plugin, client } = await setup(
+      [row("external-user", "user", "summarize this", Date.now())],
+      {},
+      { summarizerMode: "clean" },
+      sessionID,
+    );
+    let created: Promise<void> | undefined;
+    client.session.create = async () => {
+      created = plugin.event({
+        event: { type: "session.created", properties: { info: { id: "side-race" } } },
+      } as never);
+      return { data: { id: "side-race" } };
+    };
+    const originalPrompt = client.session.prompt;
+    client.session.prompt = async (args: unknown) => {
+      await created;
+      expect(await Bun.file(memoryPathFor("side-race")).exists()).toBe(false);
+      return originalPrompt(args);
+    };
+    await plugin.tool.short_term_memory.execute({ action: "update" }, { sessionID });
+    await created;
+    await drain();
+    expect(client.calls.messages.filter((call: any) => call.path?.id === "side-race")).toHaveLength(0);
+    expect(await readText(memoryPathFor(sessionID), "")).toContain("retained");
+  });
+
   test("malformed active response does not repeat or advance the checkpoint", async () => {
     const sessionID = "malformed-active";
     const { plugin, client } = await setup(
@@ -269,7 +338,12 @@ describe.serial("V1 self-generation boundaries", () => {
       },
       { message: { id: "external-next", role: "user" }, parts: [{ type: "text", text: "new external request" }] },
     );
-    await plugin.tool.short_term_memory.execute({ action: "update" }, { sessionID });
+    const beforeUpdate = client.calls.summarizerPrompts.length;
+    expect(await plugin.tool.short_term_memory.execute({ action: "update" }, { sessionID })).toContain("deferred");
+    expect(client.calls.summarizerPrompts).toHaveLength(beforeUpdate);
+    await plugin.event(idle(sessionID));
+    await waitFor(() => client.calls.summarizerPrompts.length > beforeUpdate);
+    await drain();
     const systems = client.calls.summarizerPrompts.map((call: any) => String(call.body?.parts?.[0]?.text ?? ""));
     expect(systems.at(-1)).toContain("new external request");
     expect(systems.at(-1)).not.toContain("summary prompt");
@@ -357,6 +431,8 @@ describe.serial("V1 self-generation boundaries", () => {
         onPrompt: async () => {
           await pluginRef?.event(idle("side-1"));
           await pluginRef?.tool.short_term_memory.execute({ action: "update" }, { sessionID: "side-1" });
+          expect(await Bun.file(memoryPathFor("side-1")).exists()).toBe(false);
+          expect(await Bun.file(checkpointPathFor("side-1")).exists()).toBe(false);
         },
       },
       { summarizerMode: "clean" },
@@ -364,6 +440,11 @@ describe.serial("V1 self-generation boundaries", () => {
     );
     pluginRef = plugin;
     await plugin.tool.short_term_memory.execute({ action: "update" }, { sessionID });
+    // Native events may arrive after the SDK deletion completes. They must
+    // not revive the internal session or leave empty memory files behind.
+    await plugin.event({
+      event: { type: "session.created", properties: { info: { id: "side-1", title: "ordinary" } } },
+    } as never);
     await plugin.event(idle("side-1"));
     await plugin["session.updated"]({
       sessionID: "side-1",
@@ -371,7 +452,10 @@ describe.serial("V1 self-generation boundaries", () => {
     } as any);
     expect(client.calls.create).toHaveLength(1);
     expect(client.calls.delete).toHaveLength(1);
+    await drain();
     expect(client.calls.messages.filter((call: any) => call.path?.id === "side-1")).toHaveLength(0);
+    expect(await Bun.file(memoryPathFor("side-1")).exists()).toBe(false);
+    expect(await Bun.file(checkpointPathFor("side-1")).exists()).toBe(false);
     expect((await readText(join(".opencode", "memory", "session-memory.log"), "")).toLowerCase()).not.toContain(
       "error",
     );

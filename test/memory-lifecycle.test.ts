@@ -103,6 +103,54 @@ describe("processMemoryChunks: chunking with realistic conversations", () => {
     rm(testDir, { recursive: true, force: true }).catch(() => {});
   });
 
+  test("clean chunks carry retained memory, conversation and optional project context without history access", async () => {
+    const config = { ...DEFAULT_CONFIG, memoryDir, summarizerMode: "clean" as const, maxUpdateInputLength: 100 };
+    const entries = [
+      { rendered: "USER:\nFIRST_DELTA " + "a".repeat(65), lastMessageID: "first" },
+      { rendered: "ASSISTANT:\nSECOND_DELTA " + "b".repeat(65), lastMessageID: "second" },
+    ];
+    const initial = `${MEMORY_HEADER}\n\n### User Instructions\n- RETAINED_CONTEXT`;
+    const firstSummary = `${initial}\n- FIRST_DELTA`;
+    await writeText(memoryPathFor("context-proof", memoryDir), initial);
+    const calls: GeneratedPromptRequest[] = [];
+    const runtime = summarizerRuntime((request) => {
+      calls.push(request);
+      return {
+        data: {
+          info: { role: "assistant" },
+          parts: [{ type: "text", text: calls.length === 1 ? firstSummary : `${firstSummary}\n- SECOND_DELTA` }],
+        },
+      };
+    });
+    // This runtime exposes no history, file, or tool APIs to the summarizer.
+    expect(
+      await processMemoryChunks(
+        minimalClient,
+        runtime,
+        "context-proof",
+        "test",
+        config,
+        memoryPathFor("context-proof", memoryDir),
+        initial,
+        entries,
+        "PROJECT_CONTEXT",
+        createRuntimeState(),
+      ),
+    ).toBe(true);
+    expect(calls).toHaveLength(2);
+    const first = promptText(calls[0]);
+    const second = promptText(calls[1]);
+    expect(first).toContain(`<existing_memory>\n${initial}\n</existing_memory>`);
+    expect(first).toContain(entries[0].rendered);
+    expect(first).toContain("<agents_md_context>\nPROJECT_CONTEXT\n</agents_md_context>");
+    expect(first).not.toContain("SECOND_DELTA");
+    expect(second).toContain(firstSummary);
+    expect(second).toContain(entries[1].rendered);
+    expect(second).not.toContain("PROJECT_CONTEXT");
+    for (const call of calls) expect(call.prompt.tools).toEqual({ "*": false });
+    expect(await readText(memoryPathFor("context-proof", memoryDir), "")).toContain("SECOND_DELTA");
+  });
+
   test("a 80-entry conversation is split into multiple chunks", async () => {
     const entries: VisibleDeltaEntry[] = [];
     for (let i = 0; i < 80; i += 1) {

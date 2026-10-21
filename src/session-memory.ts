@@ -131,9 +131,9 @@ export const SessionMemoryPlugin = async (
 
   // Sub-agent tracking
   const sessionParents = new Map<string, string>(); // childID → parentID
-  // Summarizer sessions are intentionally tracked only for the lifetime of
-  // the session.  Unlike a terminal lifecycle tombstone, this lets deletion
-  // still run its normal cleanup path.
+  // Keep internal identity for this plugin instance, including after deletion:
+  // native session IDs are unique and delayed events must not revive them.
+  // Deletion still runs its normal cleanup path independently of this set.
   const internalSessionIDs = new Set<string>();
   const ownedPromptIDs = new Map<string, Set<string>>();
   const lastActiveInputFingerprints = new Map<string, string>();
@@ -154,6 +154,15 @@ export const SessionMemoryPlugin = async (
 
   function ownsPrompt(sessionID: string, messageID: string | undefined): boolean {
     return Boolean(messageID && ownedPromptIDs.get(sessionID)?.has(messageID));
+  }
+
+  function registerInternalSession(sessionID: string): void {
+    if (internalSessionIDs.has(sessionID)) return;
+    internalSessionIDs.add(sessionID);
+    // Invalidate work that passed admission before the create response or
+    // title identified this session. Preserve an existing deletion tombstone.
+    invalidateSession(sessionID, isSessionTerminal(sessionID));
+    sessionsAwaitingIdle.delete(sessionID);
   }
 
   function parentMessageID(row: unknown): string {
@@ -208,12 +217,7 @@ export const SessionMemoryPlugin = async (
       },
       createTemporarySession: async (request) => {
         const created = await runtime.createTemporarySession(request);
-        internalSessionIDs.add(created.id);
-        const state = sessionStates.get(created.id);
-        if (state?.timer) {
-          clearTimeout(state.timer);
-          state.timer = undefined;
-        }
+        registerInternalSession(created.id);
         return created;
       },
       deliverGeneratedPrompt: async (request) => {
@@ -229,7 +233,6 @@ export const SessionMemoryPlugin = async (
       deleteTemporarySession: async (request) => {
         await runtime.deleteTemporarySession(request);
         invalidateSession(request.id, true);
-        internalSessionIDs.delete(request.id);
       },
     };
   }
@@ -301,9 +304,9 @@ export const SessionMemoryPlugin = async (
     currentConfig: SessionMemoryConfig,
   ): Promise<boolean> {
     return withPersistenceLock(sessionID, async () => {
-      if (!isCurrentGeneration(sessionID, generation)) return false;
+      if (!isCurrentGeneration(sessionID, generation) || isInternalSession(sessionID)) return false;
       await ensureMemoryFile(sessionID, currentConfig);
-      return isCurrentGeneration(sessionID, generation);
+      return isCurrentGeneration(sessionID, generation) && !isInternalSession(sessionID);
     });
   }
 
@@ -400,6 +403,7 @@ export const SessionMemoryPlugin = async (
     let orphans: string[];
     try {
       orphans = await loadActiveSideSessions(config.memoryDir);
+      for (const id of orphans) registerInternalSession(id);
     } catch (error) {
       await logEvent(config, "orphan_side_sessions_load_error", {
         error: (error as Error).message || String(error || ""),
@@ -417,6 +421,7 @@ export const SessionMemoryPlugin = async (
         const r = row as Record<string, unknown>;
         if (typeof r?.id !== "string") continue;
         if (r?.title === SIDE_SESSION_TITLE) {
+          registerInternalSession(r.id);
           liveOrphans.push(r.id);
         }
       }
@@ -503,7 +508,7 @@ export const SessionMemoryPlugin = async (
     config: SessionMemoryConfig,
     schedulingGeneration = lifecycleFor(sessionID).generation,
   ) {
-    if (!isCurrentGeneration(sessionID, schedulingGeneration)) return;
+    if (!isCurrentGeneration(sessionID, schedulingGeneration) || isInternalSession(sessionID)) return;
     const s = ensureSessionState(sessionID, sessionStates, sessionStatesOrder, MAX_SESSION_STATES);
     if (s.timer) clearTimeout(s.timer);
     s.timer = setTimeout(() => {
@@ -643,7 +648,7 @@ export const SessionMemoryPlugin = async (
       // Outer try/catch to record any unexpected error
       try {
         const prepared = await withPersistenceLock(sessionID, async () => {
-          if (!isCurrentGeneration(sessionID, operationGeneration)) return undefined;
+          if (!isCurrentGeneration(sessionID, operationGeneration) || isInternalSession(sessionID)) return undefined;
           const memoryPath = await ensureMemoryFile(sessionID, config);
           if (!isCurrentGeneration(sessionID, operationGeneration)) return undefined;
           return { memoryPath, existing: await readText(memoryPath, "") };
@@ -779,6 +784,19 @@ export const SessionMemoryPlugin = async (
     client,
     reloadConfigLocal,
     updateMemory: async (toolClient, sessionID, reason, toolConfig) => {
+      // An active-session prompt cannot finish while its calling tool is still
+      // executing in that session. Let the existing idle path perform the update.
+      // Clean mode with active fallback has the same risk if clean generation fails.
+      if (
+        toolConfig.enabled &&
+        (toolConfig.summarizerMode === "active" || toolConfig.cleanFallbackToActiveSession) &&
+        sessionsAwaitingIdle.has(sessionID) &&
+        !isInternalSession(sessionID) &&
+        !isSessionTerminal(sessionID)
+      ) {
+        await logEvent(toolConfig, "memory_update_deferred", { sessionID, reason, detail: "awaiting_session_idle" });
+        return "deferred";
+      }
       await updateMemory(toolClient, sessionID, reason, toolConfig);
     },
   };
@@ -873,7 +891,7 @@ export const SessionMemoryPlugin = async (
         return;
       }
       if (name === "session.updated") {
-        if (nativeSessionID && info?.title === SIDE_SESSION_TITLE) internalSessionIDs.add(nativeSessionID);
+        if (nativeSessionID && info?.title === SIDE_SESSION_TITLE) registerInternalSession(nativeSessionID);
         await plugin["session.updated"]({
           sessionID: nativeSessionID,
           event: { properties: { info } },
@@ -1011,11 +1029,12 @@ export const SessionMemoryPlugin = async (
       const info = input?.event?.properties?.info;
       const parentID = info?.parentID;
 
+      if ((info as { title?: unknown } | undefined)?.title === SIDE_SESSION_TITLE) registerInternalSession(sessionID);
+      if (isInternalSession(sessionID)) return;
+
       const lifecycle = lifecycleFor(sessionID);
       const generationBeforeReload = lifecycle.generation;
       const wasTerminal = lifecycle.terminal;
-      const isInternal = (info as { title?: unknown } | undefined)?.title === SIDE_SESSION_TITLE;
-      if (isInternal) internalSessionIDs.add(sessionID);
 
       // Direct-hook consumers may recreate a terminal session. Advance that
       // generation synchronously so the barrier is attached to the new life.
@@ -1029,7 +1048,7 @@ export const SessionMemoryPlugin = async (
       const childGeneration = lifecycle.generation;
       let resolveChildInitialization: (() => void) | undefined;
       let childInitialization: Promise<void> | undefined;
-      if (parentID && !isInternal) {
+      if (parentID) {
         // Install child identity and the barrier before the first await. Native
         // hooks can run concurrently with session.created.
         childInitialization = new Promise<void>((resolve) => {
@@ -1056,7 +1075,7 @@ export const SessionMemoryPlugin = async (
         // revive that generation merely because config reload yielded.
         if (lifecycle.generation !== generationBeforeReload + (wasTerminal ? 1 : 0)) return;
         if (!isCurrentGeneration(sessionID, childGeneration)) return;
-        if (isInternal) return;
+        if (isInternalSession(sessionID)) return;
         globalState.lastActiveSessionID = sessionID;
         if (!(await ensureMemoryFileForGeneration(sessionID, childGeneration, config))) return;
 
@@ -1082,10 +1101,10 @@ export const SessionMemoryPlugin = async (
           "session_created_bootstrap",
           config,
           client,
-          scheduleMemoryUpdate,
+          (client, id, reason, cfg) => scheduleMemoryUpdate(client, id, reason, cfg, childGeneration),
         );
       } finally {
-        if (parentID && !isInternal) {
+        if (parentID) {
           if (childInitialization && pendingChildInitializations.get(sessionID)?.promise === childInitialization) {
             pendingChildInitializations.delete(sessionID);
           }
@@ -1103,19 +1122,24 @@ export const SessionMemoryPlugin = async (
       const generation = lifecycleFor(sessionID).generation;
       const title = (input as SessionUpdatedInput & { event?: { properties?: { info?: { title?: unknown } } } }).event
         ?.properties?.info?.title;
-      if (title === SIDE_SESSION_TITLE) internalSessionIDs.add(sessionID);
+      if (title === SIDE_SESSION_TITLE) registerInternalSession(sessionID);
       if (isInternalSession(sessionID)) return;
       globalState.lastActiveSessionID = sessionID;
       if (!(await ensureMemoryFileForGeneration(sessionID, generation, config))) return;
       await logEvent(config, "session_updated", { sessionID });
       if (sessionParents.has(sessionID)) return;
-      await maybeBootstrapSessionHistory(sessionID, "session_updated_bootstrap", config, client, scheduleMemoryUpdate);
+      await maybeBootstrapSessionHistory(
+        sessionID,
+        "session_updated_bootstrap",
+        config,
+        client,
+        (client, id, reason, cfg) => scheduleMemoryUpdate(client, id, reason, cfg, generation),
+      );
     },
 
     "session.deleted": async (input: SessionDeletedInput) => {
       const sessionID = getSessionID(input);
       if (!sessionID) return;
-      internalSessionIDs.delete(sessionID);
       ownedPromptIDs.delete(sessionID);
       lastActiveInputFingerprints.delete(sessionID);
       sessionsAwaitingIdle.delete(sessionID);
