@@ -117,6 +117,17 @@ isolated native V1/V2 tarball runners (`scripts/published-v1-e2e.ts` and
 journey; it is not equivalent to a completed acceptance run. The checkout
 suite and the tarball runners therefore answer different questions.
 
+Both SDK generations must satisfy the [shared acceptance coverage requirement](../../docs/RC-ACCEPTANCE-MATRIX.md#required-coverage-for-both-sdk-generations-2026-10-20),
+including settings, literal keyboard journeys, commands, model-issued tools,
+lifecycle recovery, and edge cases. Record SDK/plugin versions separately from
+host versions, and retain a result for each generation. API smoke tests do not
+replace keyboard coverage; a V1 PASS does not qualify V2.
+
+For native Windows testing with real Azure Luna and DeepSeek deployments,
+see [Windows Azure acceptance](../../docs/WINDOWS-AZURE-ACCEPTANCE.md).
+That runner uses ConPTY and a separate configuration, database, and memory
+directory for every SDK/model case.
+
 For the V1 release acceptance procedure, see
 [`docs/V1-MANUAL-ACCEPTANCE.md`](../../docs/V1-MANUAL-ACCEPTANCE.md). A runner
 `PASS` is not an error-free guarantee: inspect the full host logs, the finite

@@ -8,6 +8,52 @@
 > does not provide the capability. A row is not `PASS` merely because a related
 > runner passed.
 
+## Required coverage for both SDK generations (2026-10-20)
+
+V1 and V2 identify the OpenCode SDK/plugin API generations targeted by STM.
+Record the SDK/plugin package versions and the native host executable version
+separately in each result. Both generations must receive the same breadth of
+product acceptance testing against the same candidate package. A successful
+V1 run does not qualify V2, and a host version number alone does not establish
+which SDK integration was exercised.
+
+| Required area                | Cases required for each SDK generation                                                                                                                                                                                                                          | Existing entry points                                                                                                                                                                                                                        |
+| ---------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Installation and isolation   | Public package loading, fresh config/data/cache, project/global setup, missing or invalid installation, repeat setup without overwriting user settings, owned-process cleanup.                                                                                  | `scripts/package-acceptance.ts`, `scripts/rc-setup-acceptance.ts`, both `scripts/published-v*-e2e.ts` runners.                                                                                                                               |
+| Settings                     | All 17 fields; defaults, each config layer, JSON/JSONC precedence, malformed syntax, invalid values, clamps, model selection, hot reload, and observable behavior after a setting changes.                                                                      | The 16 shared cases in `scripts/rc-config-scenarios.ts`, executed for both generations by `scripts/rc-setup-acceptance.ts`; generation-specific behavioral tests.                                                                            |
+| Ordinary keyboard use        | Literal typing and Enter; multiple user/assistant turns; clean and active generation; injection enabled/disabled; cadence; busy turns; follow-up context and visible output.                                                                                    | `scripts/rc-keyboard-chat.ts` and `scripts/rc-keyboard-driver.ts`. The four existing scenarios do not cover every required combination.                                                                                                      |
+| Commands and tool calls      | Every `/stm` action, all eight public tool entry points and compatibility actions; read/status/settings/logs, update, setup, reset; confirmation refusal/acceptance, invalid arguments and missing session identity.                                            | Both `scripts/published-v*-e2e.ts` runners, shared tool cases in `fixtures/v2-generation-probe/index.ts`, command/TUI fixtures and adapter tests. Keyboard command evidence and model-issued tool-call evidence must be recorded separately. |
+| Summary inputs and isolation | Retained memory plus incremental visible conversation and optional project context are supplied in the prompt; no additional lookup or delegation is required. Verify the provider tool surface, no recursive STM generation, and no internal memory artifacts. | V1 side-session lifecycle tests and native provider capture; V2 standalone/session generation tests and generation probe.                                                                                                                    |
+| Lifecycle and persistence    | Idle/busy transitions, concurrent updates, late results, reset/delete during generation, restart, child inheritance, compaction, checkpoint advancement, failed persistence and recovery.                                                                       | Both native runners plus `test/lifecycle-safety.test.ts`, `test/v1-self-generation.test.ts`, `test/side-sessions-cleanup.test.ts`, and the corresponding `test/v2-*.test.ts` suites.                                                         |
+| Model and input edge cases   | Empty/malformed output, transport errors, timeout/cancellation, retry/fallback, explicit/invalid model, empty history, missing/stale checkpoint, Unicode, large/chunked input and self-generated-message filtering.                                             | Shared memory/collector tests, V1 summarizer tests, V2 updater/history tests, and native fault scenarios where supported.                                                                                                                    |
+
+The expected product invariant is shared; the API-specific assertion may differ.
+For example, V1 clean generation uses disposable side sessions while V2 clean
+generation uses standalone text generation. Test isolation and non-recursion
+for both, without inventing a V2 side session. Similarly, model overrides,
+confirmation rules, injection defaults, and reset behavior have documented
+generation-specific semantics. Unsupported combinations require an explicit
+refusal/skip assertion and a reason; they must not silently count as PASS.
+
+For every required case, record V1 and V2 independently as PASS, FAIL, NOTRUN,
+or UNSUPPORTED with a reason. Keep unit, native API, literal keyboard, and
+real-model semantic evidence distinct. Capture the candidate hash, exact
+SDK/plugin and host versions, settings, provider requests/tool calls, visible
+output where applicable, memory/checkpoints, diagnostics, and cleanup outcome.
+Deterministic provider tests establish integration behavior, not model quality.
+
+The original native acceptance runners contain Linux dev-box paths and
+dependencies (`tmux`, `/proc`, Linux host packages). The separate
+[Windows Azure runner](WINDOWS-AZURE-ACCEPTANCE.md) now exercises a common
+V1/V2 setup, settings, literal keyboard, model-tool, and clean-summary subset
+in isolated roots. Transport health and the full settings/lifecycle matrix
+remain separate gates; a functional journey does not qualify every row.
+See the [2026-10-20 Windows findings](WINDOWS-AZURE-RESULTS-2026-10-20.md)
+for the tested candidate and the retained failures.
+Historical records below remain tied to their original artifacts; none qualify
+the current uncommitted guard fixes. This section defines required coverage,
+not a claim that the complete matrix has passed.
+
 ## Release identity and evidence rules
 
 The comparison targets are V1 OpenCode `1.19.2` and V2 CLI `2.0.30`, resolved
@@ -292,6 +338,12 @@ or local plugin route and a singular `plugin` configuration key. V2 uses
 separately. V2 configured source-file loading warns/skips where a directory is
 required; autodiscovered standalone plugin files may be possible. Do not add a
 compatibility adapter to make an unsupported route pass.
+
+Windows OpenCode 2.0.32 verification (2026-10-20): a checkout directory loads
+through server `opencode.json`, but `plugin add` rejects local directories and
+files and requires an npm registry or Git package specifier. `--global` is also
+rejected. These native negative CLI checks do not qualify registry installation;
+see the [Windows results](WINDOWS-AZURE-RESULTS-2026-10-20.md).
 
 | ID      | Dimensions / setup                                                                   | Action                                        | Expected result, persistence and negative case                                                                                                                                                                                                                                | Evidence               |
 | ------- | ------------------------------------------------------------------------------------ | --------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------- |
