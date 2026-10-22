@@ -19,6 +19,7 @@ import {
   type SummarizerRuntime,
 } from "./summarizer";
 import type { Client } from "./types";
+import { generationErrorMessage, isPermanentGenerationError } from "./provider-error";
 
 export function shouldBootstrapFromHistory(
   existingMemory: string,
@@ -69,6 +70,7 @@ export async function processMemoryChunks(
     nextMemory: string,
     checkpointID: string,
   ) => Promise<"committed" | "stale" | "concurrent_change">,
+  onFailure?: (detail: string, partial: boolean) => void,
 ): Promise<boolean> {
   const separator = "\n\n---\n\n";
   let index = 0;
@@ -113,11 +115,19 @@ export async function processMemoryChunks(
 
     let raw = "";
     if (config.summarizerMode === "active") {
-      raw = await runActiveSessionSummarizer(runtime, sessionID, prompt, config);
+      try {
+        raw = await runActiveSessionSummarizer(runtime, sessionID, prompt, config);
+      } catch (error) {
+        onFailure?.(generationErrorMessage(error), wroteMemory);
+        throw error;
+      }
     } else {
       const maxAttempts = 1 + Math.max(0, Math.trunc(config.sideSessionRetries || 0));
       let lastCleanError = "";
+      let permanentFailure = false;
+      let attempts = 0;
       for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+        attempts = attempt;
         try {
           raw = await runCleanOpencodeSummarizer(runtime, prompt, config);
           if (attempt > 1) {
@@ -125,7 +135,9 @@ export async function processMemoryChunks(
           }
           break;
         } catch (cleanError) {
-          lastCleanError = (cleanError as Error).message || String(cleanError || "");
+          lastCleanError = generationErrorMessage(cleanError);
+          permanentFailure = isPermanentGenerationError(cleanError);
+          if (permanentFailure) break;
           if (attempt < maxAttempts) {
             await logEvent(config, "memory_update_clean_retry_failed", {
               sessionID,
@@ -139,13 +151,14 @@ export async function processMemoryChunks(
         }
       }
       if (!raw.trim()) {
-        if (!config.cleanFallbackToActiveSession) {
+        if (permanentFailure || !config.cleanFallbackToActiveSession) {
           globalState.lastError = lastCleanError || "Clean summarizer produced empty output";
-          showToast(client, "Session Memory", "Summarization failed — check /stm logs for details.");
+          onFailure?.(globalState.lastError, wroteMemory);
+          showToast(client, "Session Memory", globalState.lastError);
           await logEvent(config, "memory_update_clean_failed_no_fallback", {
             sessionID,
             reason,
-            attempts: maxAttempts,
+            attempts,
             error: globalState.lastError,
           });
           return wroteMemory;
@@ -159,9 +172,10 @@ export async function processMemoryChunks(
         try {
           raw = await runActiveSessionSummarizer(runtime, sessionID, prompt, config);
         } catch (fallbackError) {
-          const fallbackMessage = (fallbackError as Error).message || String(fallbackError || "");
+          const fallbackMessage = generationErrorMessage(fallbackError);
           globalState.lastError = fallbackMessage;
-          showToast(client, "Session Memory", "Summarization failed — check /stm logs for details.");
+          onFailure?.(fallbackMessage, wroteMemory);
+          showToast(client, "Session Memory", fallbackMessage);
           await logEvent(config, "memory_update_fallback_error", { sessionID, reason, error: fallbackMessage });
           return wroteMemory;
         }
@@ -170,6 +184,7 @@ export async function processMemoryChunks(
 
     if (!raw.trim()) {
       globalState.lastError = "Summarizer returned empty output";
+      onFailure?.(globalState.lastError, wroteMemory);
       showToast(client, "Session Memory", "Summarization failed — empty output. Check /stm logs.");
       await logEvent(config, "memory_update_skipped", { sessionID, reason, detail: "empty_summarizer_output" });
       return wroteMemory;
@@ -178,6 +193,7 @@ export async function processMemoryChunks(
     const next = normalizeMemory(raw, config);
     if (!next.includes(MEMORY_HEADER) || !next.includes("### ")) {
       globalState.lastError = "Summarizer returned malformed memory output";
+      onFailure?.(globalState.lastError, wroteMemory);
       showToast(client, "Session Memory", "Summarization failed — malformed output. Check /stm logs.");
       await logEvent(config, "memory_update_skipped", {
         sessionID,
@@ -205,8 +221,17 @@ export async function processMemoryChunks(
         }
         return "committed" as const;
       });
-    const commitResult = await commit(currentExisting, next, checkpointID);
+    let commitResult: "committed" | "stale" | "concurrent_change";
+    try {
+      commitResult = await commit(currentExisting, next, checkpointID);
+    } catch (error) {
+      onFailure?.(generationErrorMessage(error), wroteMemory);
+      throw error;
+    }
     if (commitResult === "concurrent_change") {
+      const detail = "Memory changed during generation; the update did not complete.";
+      globalState.lastError = detail;
+      onFailure?.(detail, wroteMemory);
       await logEvent(config, "memory_update_concurrent_change_detected", {
         sessionID,
         reason,

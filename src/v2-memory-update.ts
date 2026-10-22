@@ -30,6 +30,7 @@ import {
   tryAcquireV2MemoryUpdate,
 } from "./v2-mutation-coordination";
 import { parseV2ResetBoundary } from "./v2-reset-boundary";
+import { generationErrorMessage, providerGenerationError } from "./provider-error";
 import { taskChildUpdaterSkip } from "./v2-child-memory";
 
 export { isV2MemoryUpdateInFlight } from "./v2-mutation-coordination";
@@ -109,7 +110,7 @@ type ChunkUnit = {
 };
 
 function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error ?? "");
+  return generationErrorMessage(error);
 }
 
 async function safeLog(config: SessionMemoryConfig, event: string, data: Record<string, unknown>): Promise<void> {
@@ -332,6 +333,8 @@ function generateWithTimeout(
 }
 
 function isRetryableSettledGenerationError(error: unknown): boolean {
+  const classified = providerGenerationError(error);
+  if (classified) return classified.retryable;
   return (
     error instanceof V2TransientGenerationError ||
     error instanceof V2MalformedGenerationError ||
@@ -661,14 +664,15 @@ export function createV2MemoryUpdater(
       }
       return { status: "committed", ...progress };
     } catch (error) {
+      const classified = providerGenerationError(error);
       await safeLog(config ?? DEFAULT_CONFIG, "v2_memory_update_error", {
         sessionID,
-        reason: "operational_failure",
+        reason: classified?.kind ?? "operational_failure",
         detail: errorMessage(error),
       });
       return {
         status: "error",
-        reason: "operational_failure",
+        reason: classified?.kind ?? "operational_failure",
         detail: errorMessage(error),
         ...(rollback ? { rollback } : {}),
         ...progress,

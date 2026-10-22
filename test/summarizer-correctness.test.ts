@@ -74,6 +74,31 @@ describe("summarizer SDK envelopes", () => {
     await rm(testDir, { recursive: true, force: true });
   });
 
+  test("guarded host tools retain definitions, approval permissions and isolated cleanup", async () => {
+    const calls: PromptCall[] = [];
+    const runtime = { ...runtimeFor(assistantEnvelope(VALID_SUMMARY), calls), cleanSessionToolGuard: true as const };
+    const created: unknown[] = [];
+    runtime.createTemporarySession = async (request) => {
+      created.push(request);
+      return { id: "side-summarizer-1" };
+    };
+    const deleted: string[] = [];
+    runtime.deleteTemporarySession = async ({ id }) => {
+      deleted.push(id);
+    };
+    await expect(
+      runCleanOpencodeSummarizer(runtime, "supplied conversation only", config(testDir, "clean")),
+    ).resolves.toBe(VALID_SUMMARY);
+    expect(calls[0]!.prompt).not.toHaveProperty("tools");
+    expect(calls[0]!.prompt.system).toContain("clean short-term memory summarizer");
+    expect(deleted).toEqual(["side-summarizer-1"]);
+    expect(created).toEqual([
+      {
+        options: { title: "Session Memory Summarizer", permission: [{ permission: "*", pattern: "*", action: "ask" }] },
+      },
+    ]);
+  });
+
   test("both summarizers accept an assistant envelope and omit noReply from generated-summary prompts", async () => {
     const memoryDir = join(testDir, "memory");
     const promptCalls: PromptCall[] = [];
@@ -206,6 +231,252 @@ describe("summarizer SDK envelopes", () => {
     expect(log).toContain('"event":"memory_update_clean_failed_no_fallback"');
     expect(log).not.toContain('"event":"side_session_summarize_done"');
   });
+
+  for (const failureCase of [
+    { status: 403, type: "FreeTierError", message: "FreeTierError (403)" },
+    { status: 401, type: "api_key_expired", message: "api_key_expired" },
+  ]) {
+    test(`preserves native ${failureCase.type} and never accepts accompanying text`, async () => {
+      const response = {
+        data: {
+          info: {
+            role: "assistant",
+            error: {
+              name: "APIError",
+              data: {
+                statusCode: failureCase.status,
+                isRetryable: false,
+                responseBody: JSON.stringify({ error: { type: failureCase.type } }),
+              },
+            },
+          },
+          parts: [{ type: "text", text: VALID_SUMMARY }],
+        },
+      };
+      const runtime = runtimeFor(response);
+      const cfg = config(join(testDir, failureCase.type), "clean");
+      await expect(runCleanOpencodeSummarizer(runtime, "prompt", cfg)).rejects.toThrow(failureCase.message);
+      await expect(runActiveSessionSummarizer(runtime, "active", "prompt", cfg)).rejects.toThrow(failureCase.message);
+    });
+
+    test(`permanent ${failureCase.type} makes one clean attempt with no active fallback or memory change`, async () => {
+      const memoryDir = join(testDir, `permanent-${failureCase.type}`);
+      const sessionID = "permanent-rejection";
+      const memoryPath = memoryPathFor(sessionID, memoryDir);
+      const checkpointPath = checkpointPathFor(sessionID, memoryDir);
+      await writeText(memoryPath, "original memory");
+      await writeText(checkpointPath, "original checkpoint");
+      const calls: PromptCall[] = [];
+      let deleted = 0;
+      const runtime = runtimeFor(
+        {
+          data: {
+            info: {
+              role: "assistant",
+              error: {
+                name: "APIError",
+                data: {
+                  statusCode: failureCase.status,
+                  isRetryable: false,
+                  responseBody: JSON.stringify({ error: { type: failureCase.type } }),
+                },
+              },
+            },
+            parts: [],
+          },
+        },
+        calls,
+      );
+      runtime.deleteTemporarySession = async () => {
+        deleted++;
+      };
+      const failures: string[] = [];
+      const wrote = await processMemoryChunks(
+        uiClient(),
+        runtime,
+        sessionID,
+        "manual",
+        {
+          ...config(memoryDir, "clean"),
+          sideSessionRetries: 3,
+          cleanFallbackToActiveSession: true,
+        },
+        memoryPath,
+        "original memory",
+        [{ rendered: "new input", lastMessageID: "new-message" }],
+        "",
+        runtimeState(),
+        undefined,
+        (detail) => failures.push(detail),
+      );
+      expect(wrote).toBe(false);
+      expect(calls).toHaveLength(1);
+      expect(calls[0]?.sessionId).toBe("side-summarizer-1");
+      expect(calls[0]?.prompt.tools).toEqual({ "*": false });
+      expect(deleted).toBe(1);
+      expect(failures[0]).toContain(failureCase.message);
+      expect(await readFile(memoryPath, "utf8")).toBe("original memory");
+      expect(await readFile(checkpointPath, "utf8")).toBe("original checkpoint");
+    });
+  }
+
+  test("explicitly retryable provider 503 still retries and commits a successful summary", async () => {
+    const memoryDir = join(testDir, "transient-provider");
+    const calls: PromptCall[] = [];
+    const runtime = runtimeFor(undefined, calls);
+    runtime.deliverGeneratedPrompt = async (request) => {
+      calls.push(request as PromptCall);
+      return calls.length === 1
+        ? {
+            data: {
+              info: { role: "assistant", error: { name: "APIError", data: { statusCode: 503, isRetryable: true } } },
+              parts: [],
+            },
+          }
+        : assistantEnvelope(VALID_SUMMARY);
+    };
+    const wrote = await processMemoryChunks(
+      uiClient(),
+      runtime,
+      "transient",
+      "manual",
+      { ...config(memoryDir, "clean"), sideSessionRetries: 1 },
+      memoryPathFor("transient", memoryDir),
+      "",
+      [{ rendered: "new input", lastMessageID: "new-message" }],
+      "",
+      runtimeState(),
+    );
+    expect(wrote).toBe(true);
+    expect(calls).toHaveLength(2);
+    expect(await readFile(checkpointPathFor("transient", memoryDir), "utf8")).toContain("new-message");
+  });
+
+  test("a later permanent rejection reports partial progress and preserves the earlier checkpoint", async () => {
+    const memoryDir = join(testDir, "partial-provider-failure");
+    let attempts = 0;
+    const runtime = runtimeFor(undefined);
+    runtime.deliverGeneratedPrompt = async () =>
+      ++attempts === 1
+        ? assistantEnvelope(VALID_SUMMARY)
+        : {
+            data: {
+              info: {
+                role: "assistant",
+                error: {
+                  name: "APIError",
+                  data: {
+                    statusCode: 403,
+                    isRetryable: false,
+                    responseBody: JSON.stringify({ error: { type: "FreeTierError" } }),
+                  },
+                },
+              },
+              parts: [],
+            },
+          };
+    const failures: { detail: string; partial: boolean }[] = [];
+    const wrote = await processMemoryChunks(
+      uiClient(),
+      runtime,
+      "partial",
+      "manual",
+      { ...config(memoryDir, "clean"), maxUpdateInputLength: 100 },
+      memoryPathFor("partial", memoryDir),
+      "",
+      [
+        { rendered: "A".repeat(90), lastMessageID: "first-message" },
+        { rendered: "B".repeat(90), lastMessageID: "second-message" },
+      ],
+      "",
+      runtimeState(),
+      undefined,
+      (detail, partial) => failures.push({ detail, partial }),
+    );
+    expect(wrote).toBe(true);
+    expect(failures).toHaveLength(1);
+    expect(failures[0]?.partial).toBe(true);
+    expect(failures[0]?.detail).toContain("FreeTierError (403)");
+    expect(await readFile(checkpointPathFor("partial", memoryDir), "utf8")).toBe("first-message\n");
+    expect(attempts).toBe(2);
+  });
+
+  test("a concurrent edit after an earlier commit reports partial failure and preserves that edit", async () => {
+    const memoryDir = join(testDir, "partial-concurrent-edit");
+    const memoryPath = memoryPathFor("concurrent", memoryDir);
+    const checkpointPath = checkpointPathFor("concurrent", memoryDir);
+    let commits = 0;
+    const failures: { detail: string; partial: boolean }[] = [];
+    const wrote = await processMemoryChunks(
+      uiClient(),
+      runtimeFor(assistantEnvelope(VALID_SUMMARY)),
+      "concurrent",
+      "manual",
+      { ...config(memoryDir, "clean"), maxUpdateInputLength: 100 },
+      memoryPath,
+      "",
+      [
+        { rendered: "A".repeat(90), lastMessageID: "first-message" },
+        { rendered: "B".repeat(90), lastMessageID: "second-message" },
+      ],
+      "",
+      runtimeState(),
+      async (_previous, next, checkpointID) => {
+        if (++commits === 1) {
+          await writeText(memoryPath, next);
+          await writeText(checkpointPath, `${checkpointID}\n`);
+          return "committed";
+        }
+        await writeText(memoryPath, "manual concurrent edit");
+        return "concurrent_change";
+      },
+      (detail, partial) => failures.push({ detail, partial }),
+    );
+    expect(wrote).toBe(true);
+    expect(failures).toEqual([
+      { detail: "Memory changed during generation; the update did not complete.", partial: true },
+    ]);
+    expect(await readFile(memoryPath, "utf8")).toBe("manual concurrent edit");
+    expect(await readFile(checkpointPath, "utf8")).toBe("first-message\n");
+  });
+
+  for (const failureKind of ["active generation", "commit I/O"] as const) {
+    test(`a later ${failureKind} error preserves partial progress for the caller`, async () => {
+      const memoryDir = join(testDir, `partial-${failureKind.replaceAll(" ", "-").replaceAll("/", "-")}`);
+      let generations = 0;
+      let commits = 0;
+      const runtime = runtimeFor(undefined);
+      runtime.deliverGeneratedPrompt = async () => {
+        if (++generations === 2 && failureKind === "active generation") throw new Error("second generation failed");
+        return assistantEnvelope(VALID_SUMMARY);
+      };
+      const failures: { detail: string; partial: boolean }[] = [];
+      await expect(
+        processMemoryChunks(
+          uiClient(),
+          runtime,
+          "partial",
+          "manual",
+          { ...config(memoryDir, "active"), maxUpdateInputLength: 100 },
+          memoryPathFor("partial", memoryDir),
+          "",
+          [
+            { rendered: "A".repeat(90), lastMessageID: "first-message" },
+            { rendered: "B".repeat(90), lastMessageID: "second-message" },
+          ],
+          "",
+          runtimeState(),
+          async () => {
+            if (++commits === 2) throw new Error("second commit failed");
+            return "committed";
+          },
+          (detail, partial) => failures.push({ detail, partial }),
+        ),
+      ).rejects.toThrow(failureKind === "active generation" ? "second generation failed" : "second commit failed");
+      expect(failures).toHaveLength(1);
+      expect(failures[0]?.partial).toBe(true);
+    });
+  }
 
   test("a rejected active response preserves memory and checkpoint and emits a failure event", async () => {
     const memoryDir = join(testDir, "active-lifecycle");

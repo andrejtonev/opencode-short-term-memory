@@ -366,6 +366,51 @@ describe("SessionMemoryPlugin general functionality", () => {
     expect(client.calls.prompt[0]?.path?.id).toBe(sessionID);
   });
 
+  test("a native free-tier failure reaches tool output and status without claiming refreshed memory", async () => {
+    const sessionID = "free-tier-tool-failure";
+    const fakeClient = createFakeClient({
+      messagesRows: [
+        { id: "u1", role: "user", content: "Remember this" },
+        { id: "a1", role: "assistant", content: "Acknowledged" },
+      ],
+    });
+    fakeClient.session.prompt = async (args) => {
+      fakeClient.calls.prompt.push(args);
+      return {
+        data: {
+          info: {
+            role: "assistant",
+            error: {
+              name: "APIError",
+              data: {
+                statusCode: 403,
+                isRetryable: false,
+                responseBody: JSON.stringify({ error: { type: "FreeTierError" } }),
+              },
+            },
+          },
+          parts: [],
+        },
+      };
+    };
+    const { plugin } = await createPlugin({ summarizerMode: "clean", sideSessionRetries: 3 }, fakeClient);
+    await plugin["session.created"]({ sessionID });
+    await writeText(memoryPathFor(sessionID), "original memory bytes");
+    await writeText(checkpointPathFor(sessionID), "original checkpoint\n");
+
+    const result = String(await plugin.tool.stm_memory_update.execute({}, { sessionID }));
+    expect(result).toContain("Memory update failed:");
+    expect(result).toContain("FreeTierError (403)");
+    expect(result).not.toContain("original memory bytes");
+    expect(fakeClient.calls.prompt).toHaveLength(1);
+    expect(fakeClient.calls.delete).toHaveLength(1);
+    expect(await readText(memoryPathFor(sessionID))).toBe("original memory bytes");
+    expect(await readText(checkpointPathFor(sessionID))).toBe("original checkpoint\n");
+    const status = String(await plugin.tool.stm_memory_status.execute({}, { sessionID }));
+    expect(status).toContain("- lastError: OpenCode rejected this memory request with FreeTierError (403)");
+    expect(status).toContain("- updateCount: 0");
+  });
+
   test("memory update includes AGENTS.md only on first update when enabled", async () => {
     const sessionID = `agents-first-${Date.now()}`;
     await writeText(

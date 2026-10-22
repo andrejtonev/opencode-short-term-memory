@@ -4,6 +4,7 @@ import { getSessionID } from "./memory-utils";
 import type { CommandContext } from "./commands";
 import { executeMemoryAction } from "./commands";
 import type { Client, ToolContext } from "./types";
+import type { MemoryUpdateDisposition } from "./memory-update-result";
 
 export interface CreateToolsContext {
   cmdCtx: CommandContext;
@@ -15,7 +16,7 @@ export interface CreateToolsContext {
     sessionID: string,
     reason: string,
     cfg: SessionMemoryConfig,
-  ) => Promise<void | "deferred">;
+  ) => Promise<MemoryUpdateDisposition>;
 }
 
 export function createTools(ctx: CreateToolsContext): Record<string, unknown> {

@@ -15,6 +15,7 @@ import type {
   RuntimeTemporarySessionCreate,
   RuntimeTemporarySessionQuery,
 } from "./runtime-contract";
+import { providerGenerationError } from "./provider-error";
 
 type SummarizerPrompt = {
   readonly model?: ReturnType<typeof parseModel>;
@@ -24,9 +25,18 @@ type SummarizerPrompt = {
 };
 
 export interface SummarizerRuntime {
+  /** The hosting V1 plugin rejects tool execution for every owned side session. */
+  readonly cleanSessionToolGuard?: true;
   deliverGeneratedPrompt(request: RuntimeGeneratedPrompt<SummarizerPrompt>): Promise<unknown>;
   createTemporarySession(
-    request: RuntimeTemporarySessionCreate<{ readonly title: string }>,
+    request: RuntimeTemporarySessionCreate<{
+      readonly title: string;
+      readonly permission?: readonly {
+        readonly permission: string;
+        readonly pattern: string;
+        readonly action: "ask";
+      }[];
+    }>,
   ): Promise<RuntimeSessionMetadata>;
   abortTemporarySession(request: RuntimeTemporarySessionQuery): Promise<void>;
   deleteTemporarySession(request: RuntimeTemporarySessionQuery): Promise<void>;
@@ -167,6 +177,10 @@ function extractValidatedSummary(result: unknown, context: string): string {
 
   const response = row as Record<string, unknown>;
   const info = response.info;
+  const nativeError = info && typeof info === "object" ? (info as Record<string, unknown>).error : undefined;
+  if (nativeError !== undefined) {
+    throw providerGenerationError(nativeError) ?? new Error(`${context} reported a generation error`);
+  }
   const role = info && typeof info === "object" ? (info as Record<string, unknown>).role : undefined;
   if (role !== "assistant") {
     throw new Error(`${context} returned a response without assistant role`);
@@ -240,7 +254,12 @@ export async function runCleanOpencodeSummarizer(
   let abortTimer: ReturnType<typeof setTimeout> | undefined;
   try {
     const createResult = await runtime.createTemporarySession({
-      options: { title: SIDE_SESSION_TITLE },
+      options: {
+        title: SIDE_SESSION_TITLE,
+        ...(runtime.cleanSessionToolGuard
+          ? { permission: [{ permission: "*", pattern: "*", action: "ask" as const }] }
+          : {}),
+      },
     });
     sessionID = createResult.id;
     if (!sessionID) {
@@ -267,6 +286,10 @@ export async function runCleanOpencodeSummarizer(
     }
 
     // 2. Execute the summarization prompt in the fresh session
+    // Keep definitions visible to OpenCode's free-tier classifier only when
+    // the hosting plugin enforces the execution fence. Standalone runtimes
+    // without that fence must still remove tools from the model's surface.
+    const useHostTools = runtime.cleanSessionToolGuard === true;
     abortController = new AbortController();
     abortTimer = setTimeout(() => abortController?.abort(), CLEAN_SUMMARIZER_TIMEOUT.ms);
     let result;
@@ -279,7 +302,7 @@ export async function runCleanOpencodeSummarizer(
           // also removes plugin and MCP tools from the model's tool surface.
           // Only use it on disposable clean sessions: active-mode prompts
           // share the user's session and must preserve its permissions.
-          tools: { "*": false },
+          ...(useHostTools ? {} : { tools: { "*": false } }),
           system: "You are a clean short-term memory summarizer. Return only the updated Session Memory markdown.",
           parts: [{ type: "text" as const, text: prompt }],
         },

@@ -12,6 +12,8 @@ const legacyHookKeys = [
   "config",
   "event",
   "tool",
+  "tool.execute.before",
+  "permission.ask",
   "command.execute.before",
   "session.created",
   "session.updated",

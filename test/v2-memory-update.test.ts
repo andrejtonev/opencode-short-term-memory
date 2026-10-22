@@ -1269,6 +1269,48 @@ describe("V2 fresh memory updater", () => {
     expect(calls.clean).toHaveLength(2);
   });
 
+  for (const failureCase of [
+    { status: 403, type: "FreeTierError", reason: "model_restricted", detail: "FreeTierError (403)" },
+    { status: 401, type: "api_key_expired", reason: "authentication_failed", detail: "opencode console login" },
+  ]) {
+    test(`preserves ${failureCase.type} with no retry, fallback, or checkpoint advance`, async () => {
+      await writeText(
+        join(directory, ".opencode", "stm.json"),
+        JSON.stringify({
+          memoryDir,
+          sideSessionRetries: 3,
+          cleanFallbackToActiveSession: true,
+        }),
+      );
+      const sessionID = `provider-${failureCase.type}`;
+      const memoryPath = memoryPathFor(sessionID, memoryDir);
+      await writeText(memoryPath, "original memory bytes");
+      const { context, calls } = makeContext(directory, {
+        clean: async () => {
+          throw {
+            name: "APIError",
+            data: {
+              statusCode: failureCase.status,
+              isRetryable: false,
+              responseBody: JSON.stringify({ error: { type: failureCase.type, message: "secret-body-value" } }),
+              responseHeaders: { authorization: "secret-header-value" },
+            },
+          };
+        },
+      });
+      const result = await createV2MemoryUpdater(context)(
+        input(sessionID, [message("u1", "user", "Q"), message("a1", "assistant", "A")]),
+      );
+      expect(result).toMatchObject({ status: "error", reason: failureCase.reason, checkpointedChunks: 0 });
+      if (result.status === "error") expect(result.detail).toContain(failureCase.detail);
+      expect(calls.clean).toHaveLength(1);
+      expect(calls.active).toHaveLength(0);
+      expect(await readText(memoryPath)).toBe("original memory bytes");
+      expect(await readRawFile(checkpointPathFor(sessionID, memoryDir))).toBeNull();
+      expect(await readText(logPath(memoryDir))).not.toContain("secret-");
+    });
+  }
+
   test("retries native V2 provider unavailability within the configured budget", async () => {
     for (const recovers of [true, false]) {
       let attempts = 0;

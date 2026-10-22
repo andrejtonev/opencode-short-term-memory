@@ -13,6 +13,7 @@ import {
   checkpointPathFor,
 } from "./memory-utils";
 import { resetSessionDeliveryState, type SessionRuntimeState } from "./session-state";
+import type { MemoryUpdateDisposition } from "./memory-update-result";
 
 export function parseMemoryActionFromCommandArgument(argument: unknown): string {
   const raw = String(argument || "")
@@ -105,7 +106,7 @@ export async function executeMemoryAction(
     sessionID: string,
     reason: string,
     cfg: SessionMemoryConfig,
-  ) => Promise<void | "deferred">,
+  ) => Promise<MemoryUpdateDisposition>,
   options: { confirm?: boolean } = {},
 ): Promise<string> {
   const { config, sessionStates } = ctx;
@@ -159,8 +160,11 @@ export async function executeMemoryAction(
   }
   if (action === "update") {
     const disposition = await updateMemoryFn(client, sessionID, "manual_tool", config);
-    if (disposition === "deferred")
+    if (disposition === "deferred" || disposition?.status === "deferred")
       return "Memory update deferred until the current session becomes idle. This tool call has not refreshed the memory yet.";
+    if (disposition?.status === "error")
+      return `Memory update failed: ${disposition.detail}${disposition.partial ? " Some earlier chunks were saved; the update did not complete." : ""}`;
+    if (disposition?.status === "skipped") return `Memory update skipped: ${disposition.reason}.`;
     return await readText(
       memoryPathFor(sessionID, config.memoryDir),
       "Memory update attempted, but no memory file was found.",

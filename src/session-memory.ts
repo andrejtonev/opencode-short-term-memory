@@ -54,6 +54,8 @@ import {
 import { parseMemoryActionFromCommandArgument, executeMemoryAction, type CommandContext } from "./commands";
 import { appendChildMemoryToSystem, deliverMemoryViaNoReply, injectMemoryIntoSystemTransform } from "./injection";
 import { createTools, type CreateToolsContext } from "./tools";
+import type { MemoryUpdateResult } from "./memory-update-result";
+import { generationErrorMessage } from "./provider-error";
 import type { SummarizerRuntime } from "./summarizer";
 
 import {
@@ -209,6 +211,7 @@ export const SessionMemoryPlugin = async (
   function wrapperSummarizerRuntime(sessionID: string, onActivePromptDispatch?: () => void): SharedRuntime {
     return {
       ...runtime,
+      cleanSessionToolGuard: true,
       readSessionMessages: async (readSessionID, options) => {
         const rows = await runtime.readSessionMessages(readSessionID, options);
         return rows.filter((row) => {
@@ -610,11 +613,11 @@ export const SessionMemoryPlugin = async (
     reason: string,
     config: SessionMemoryConfig,
     schedulingGeneration?: number,
-  ): Promise<boolean> {
-    if (!config.enabled) return false;
+  ): Promise<MemoryUpdateResult> {
+    if (!config.enabled) return { status: "skipped", reason: "disabled" };
     const operationGeneration = schedulingGeneration ?? lifecycleFor(sessionID).generation;
-    if (!isCurrentGeneration(sessionID, operationGeneration)) return false;
-    if (isInternalSession(sessionID)) return false;
+    if (!isCurrentGeneration(sessionID, operationGeneration)) return { status: "skipped", reason: "stale_session" };
+    if (isInternalSession(sessionID)) return { status: "skipped", reason: "internal_session" };
 
     const isAutomaticUpdate =
       reason === "session_idle" ||
@@ -631,27 +634,29 @@ export const SessionMemoryPlugin = async (
         reason,
         detail: "awaiting_session_idle",
       });
-      return false;
+      return { status: "deferred" };
     }
 
     // Sub-agent sessions never update memory
     if (sessionParents.has(sessionID)) {
       await logEvent(config, "subagent_update_skipped", { sessionID, reason });
-      return false;
+      return { status: "skipped", reason: "subagent_session" };
     }
 
     if (isSessionTerminal(sessionID)) {
       await logEvent(config, "memory_update_skipped", { sessionID, reason, detail: "session_deleted" });
-      return false;
+      return { status: "skipped", reason: "session_deleted" };
     }
 
     if (updateInFlight.has(sessionID)) {
       pendingUpdateAfterInFlight.set(sessionID, operationGeneration);
       await logEvent(config, "memory_update_skipped", { sessionID, reason, detail: "update_in_flight" });
-      return false;
+      return { status: "deferred" };
     }
     updateInFlight.add(sessionID);
     let wroteMemory = false;
+    let failure: string | undefined;
+    let partiallyUpdated = false;
 
     try {
       // Outer try/catch to record any unexpected error
@@ -662,7 +667,7 @@ export const SessionMemoryPlugin = async (
           if (!isCurrentGeneration(sessionID, operationGeneration)) return undefined;
           return { memoryPath, existing: await readText(memoryPath, "") };
         });
-        if (!prepared) return false;
+        if (!prepared) return { status: "skipped", reason: "stale_session" };
         const { memoryPath, existing } = prepared;
         const isFirstUpdateForSession = !(await readLastProcessedMessageID(sessionID, config));
         const agentsMdContextRaw =
@@ -670,13 +675,15 @@ export const SessionMemoryPlugin = async (
             ? await readText(join(directory || ".", "AGENTS.md"), "")
             : "";
         const agentsMdContext = sanitizeMessage(agentsMdContextRaw).slice(0, config.maxUpdateInputLength);
-        if (!isCurrentGeneration(sessionID, operationGeneration) || isInternalSession(sessionID)) return false;
+        if (!isCurrentGeneration(sessionID, operationGeneration) || isInternalSession(sessionID))
+          return { status: "skipped", reason: "stale_session" };
         let inputFingerprint = "";
         const wrapperRuntime = wrapperSummarizerRuntime(sessionID, () => {
           lastActiveInputFingerprints.set(sessionID, inputFingerprint);
         });
         const recent = await collectRecentVisibleMessages(wrapperRuntime, client, sessionID, config, globalState);
-        if (!isCurrentGeneration(sessionID, operationGeneration) || isInternalSession(sessionID)) return false;
+        if (!isCurrentGeneration(sessionID, operationGeneration) || isInternalSession(sessionID))
+          return { status: "skipped", reason: "stale_session" };
         inputFingerprint = activeInputFingerprint(
           {
             entries: recent.entries,
@@ -694,11 +701,11 @@ export const SessionMemoryPlugin = async (
             reason,
             detail: "unchanged_active_summary_input",
           });
-          return false;
+          return { status: "skipped", reason: "unchanged_active_summary_input" };
         }
         if (!recent.entries.length) {
           await logEvent(config, "memory_update_skipped", { sessionID, reason, detail: "no_visible_recent_messages" });
-          return false;
+          return { status: "skipped", reason: "no_visible_recent_messages" };
         }
         await logEvent(config, "memory_update_start", {
           sessionID,
@@ -714,7 +721,7 @@ export const SessionMemoryPlugin = async (
             reason,
             detail: "stale_generation_after_collection",
           });
-          return false;
+          return { status: "skipped", reason: "stale_session" };
         }
 
         // I13 – delegate chunk processing to extracted helper
@@ -750,6 +757,10 @@ export const SessionMemoryPlugin = async (
               }
               return isCurrentGeneration(sessionID, operationGeneration) ? "committed" : "stale";
             }),
+          (detail, partial) => {
+            failure = detail;
+            partiallyUpdated = partial;
+          },
         );
         if (!isCurrentGeneration(sessionID, operationGeneration) || isInternalSession(sessionID)) wroteMemory = false;
         if (wroteMemory) {
@@ -757,8 +768,13 @@ export const SessionMemoryPlugin = async (
           bumpMemoryRevision(s);
         }
       } catch (error) {
-        globalState.lastError = (error as Error).message;
-        showToast(client, "Session Memory", "Summarization failed — check /stm logs for details.");
+        failure = generationErrorMessage(error);
+        if (partiallyUpdated && isCurrentGeneration(sessionID, operationGeneration) && !isInternalSession(sessionID)) {
+          const state = ensureSessionState(sessionID, sessionStates, sessionStatesOrder, MAX_SESSION_STATES);
+          bumpMemoryRevision(state);
+        }
+        globalState.lastError = failure;
+        showToast(client, "Session Memory", failure);
         await logEvent(config, "memory_update_error", { sessionID, reason, error: globalState.lastError });
       }
     } finally {
@@ -783,7 +799,8 @@ export const SessionMemoryPlugin = async (
         notifySessionIdle(sessionID, idleWaiters);
       }
     }
-    return wroteMemory;
+    if (failure) return { status: "error", detail: failure, partial: wroteMemory || partiallyUpdated };
+    return wroteMemory ? { status: "updated" } : { status: "skipped", reason: "no_memory_committed" };
   }
 
   // ── Tool context ───────────────────────────────────────
@@ -804,9 +821,9 @@ export const SessionMemoryPlugin = async (
         !isSessionTerminal(sessionID)
       ) {
         await logEvent(toolConfig, "memory_update_deferred", { sessionID, reason, detail: "awaiting_session_idle" });
-        return "deferred";
+        return { status: "deferred" };
       }
-      await updateMemory(toolClient, sessionID, reason, toolConfig);
+      return await updateMemory(toolClient, sessionID, reason, toolConfig);
     },
   };
   const tools = createTools(toolCtx);
@@ -1013,6 +1030,25 @@ export const SessionMemoryPlugin = async (
 
     tool: tools,
 
+    "tool.execute.before": async (input: { tool: string; sessionID: string; callID: string }) => {
+      // Created IDs are fenced before the summarization prompt is dispatched.
+      // Recover title-identified sessions too, including startup orphans whose
+      // lifecycle event has not yet reached this plugin instance.
+      if (!isInternalSession(input.sessionID) && !sessionStates.has(input.sessionID)) {
+        const session = await runtime.getTemporarySession({ id: input.sessionID });
+        if (session.title === SIDE_SESSION_TITLE) registerInternalSession(input.sessionID);
+      }
+      if (isInternalSession(input.sessionID)) {
+        throw new Error(
+          "STM clean summarizer sessions cannot execute tools. Summarize the supplied conversation only.",
+        );
+      }
+    },
+
+    "permission.ask": async (input: { sessionID: string }, output: { status: "ask" | "deny" | "allow" }) => {
+      if (isInternalSession(input.sessionID)) output.status = "deny";
+    },
+
     "command.execute.before": async (input: CommandExecuteBeforeInput, output: CommandExecuteBeforeOutput) => {
       await reloadConfigLocal();
       if (input.command.toLowerCase() !== "stm") return;
@@ -1027,7 +1063,7 @@ export const SessionMemoryPlugin = async (
         cmdCtx,
         client,
         async (commandClient, commandSessionID, reason, commandConfig) => {
-          await updateMemory(commandClient, commandSessionID, reason, commandConfig);
+          return await updateMemory(commandClient, commandSessionID, reason, commandConfig);
         },
         { confirm: setupConfirmed },
       );
