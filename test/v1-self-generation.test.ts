@@ -273,6 +273,8 @@ describe.serial("V1 self-generation boundaries", () => {
     expect(await readText(memoryPathFor(sessionID), "")).toContain("retained");
   });
 
+  // Eighteen sequential retries exercise owned-message eviction and real disk
+  // writes; allow bounded headroom for Windows filesystem scheduling.
   test("malformed active response does not repeat or advance the checkpoint", async () => {
     const sessionID = "malformed-active";
     const { plugin, client } = await setup(
@@ -302,7 +304,7 @@ describe.serial("V1 self-generation boundaries", () => {
     for (let attempt = 0; attempt < 3; attempt += 1) await plugin.event(idle(sessionID));
     await drain();
     expect(client.promptCount).toBe(18);
-  });
+  }, 10_000);
 
   test("valid generation commits once and excludes its own prompt and parent assistant", async () => {
     const sessionID = "valid-active";

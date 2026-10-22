@@ -3,8 +3,15 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { INJECTION_PREFIX, memoryPathFor, readText, writeText, checkpointPathFor } from "../src/memory-utils";
-import { createFakeClient, createPlugin } from "./test-helpers";
+import { createFakeClient, createPlugin as createPluginFixture } from "./test-helpers";
 import SessionMemoryPlugin from "../src/v1-adapter";
+
+// Background work can outlive a test's cwd. Keep its disk writes in the
+// original fixture instead of the next test's relative memory directory.
+const createPlugin = (
+  configOverrides: Parameters<typeof createPluginFixture>[0] = {},
+  client?: Parameters<typeof createPluginFixture>[1],
+) => createPluginFixture({ memoryDir: join(process.cwd(), ".opencode", "memory"), ...configOverrides }, client);
 
 function commandResult(
   output: { parts: { type: string; text?: string; synthetic?: boolean }[] },
@@ -1221,7 +1228,12 @@ describe("SessionMemoryPlugin general functionality", () => {
     const { plugin } = await createPlugin({ summarizerMode: "active", debug: false }, fakeClient);
     await plugin["session.created"]({ sessionID });
     await plugin.tool.short_term_memory.execute({ action: "update" }, { sessionID });
-    const logText = await readText(join(".opencode", "memory", "session-memory.log"), "");
+    // Other fixtures can still finish background updates in this shared log.
+    // This assertion concerns the malformed session, not their successful work.
+    const logText = (await readText(join(".opencode", "memory", "session-memory.log"), ""))
+      .split("\n")
+      .filter((line) => line.trim() && JSON.parse(line).sessionID === sessionID)
+      .join("\n");
     expect(logText).toContain('"event":"active_session_summarizer_error"');
     expect(logText).toContain('"error":"Active session summarizer returned output without ## Session Memory"');
     expect(logText).toContain('"event":"memory_update_error"');
