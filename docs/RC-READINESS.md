@@ -1,11 +1,74 @@
 # RC Readiness
 
-## Latest Status: 2026-10-21, Local RC7 Preparation
+## Latest Status: 2026-10-22, Local RC8 Qualified
 
-`1.4.0-rc.7` is an unpublished testing candidate containing committed fixes through
-`e644b30517cc27923ba7ce916e65423c8d9de828`. Registry inspection on 2026-10-21
-confirmed `rc: 1.4.0-rc.6`, `latest: 1.3.0`, and no RC7 version. No push or npm
-publication is part of this local preparation.
+`1.4.0-rc.8` is a local, unpublished testing candidate. The user requested local
+preparation only: no npm publication or Git push. Live registry inspection still
+reports `rc: 1.4.0-rc.7`, `latest: 1.3.0`, and RC8 is absent.
+
+Reviewed implementation commits:
+
+- `9ea1de6`: create sparse `stm.json` at the native V1 installation scope and
+  expose config discovery/bootstrap diagnostics, preserving existing settings.
+- `05f5c00`: preserve provider failures and truthful manual-update outcomes;
+  retain clean-session tool definitions with approval permissions while blocking
+  every owned or title-identified side-session tool invocation before execution.
+- `d70e7f8`: native V1 read dialogs and guidance for legacy server reads; preserve
+  the V2 receiver. Review additionally fixed long logs losing their newest text
+  at the display limit, with a regression test.
+
+Test-only follow-up `8802608` pins background fixture writes to their original absolute
+directory, scopes malformed-response log assertions by session, and gives the
+18-retry regression a bounded ten-second deadline. The initial release hook
+failed on shared-log contamination and a five-second timeout; the corrected
+focused run passed all 74 tests. These changes do not alter packaged bytes.
+Original failure and corrected-run output are retained under `.opencode/rc8/`.
+
+Frozen archive:
+`.opencode/rc8/atonev-opencode-short-term-memory-1.4.0-rc.8-d70e7f8-20261022.tgz`.
+SHA-256: `bf3b075276d3df560b9039918cc1e2240c6d6a7c2465ae17c20315289c1a5979`.
+208,989 bytes, 78 regular packaged files, Windows read-only attribute set.
+Manifest: `1.4.0-rc.8`, public access, `rc` dist-tag. Archive source, declarations,
+README and manifest match this release checkout; `d70e7f8` in the filename
+identifies the implementation base before the RC8 version/documentation changes.
+The local annotated release tag is `v1.4.0-rc.8`.
+
+| Gate                      | RC8 result | Scope                                                                                                                                                                        |
+| ------------------------- | ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Review                    | PASS       | Config, provider outcomes, execution guard and native dialogs; latest-log display regression corrected.                                                                      |
+| Repository commit hooks   | PASS       | Formatting, typecheck and isolated suite: 1,196 pass, 3 platform/privilege skips, 0 fail; 1,199 tests across 64 files.                                                       |
+| Build and pack            | PASS       | Native Windows/Bun 1.3.13; normal prepare-enabled pack.                                                                                                                      |
+| Fresh production consumer | PASS       | Exact archive installation, all four public imports, strict public/TUI declaration consumers; 43,944 ms.                                                                     |
+| Native V1 clean safety    | PASS       | OpenCode 1.18.35, exact installed archive; forced built-in read/write and plugin tool rejected before execution; valid memory saved; primary-session tool control succeeded. |
+| Native MiniMax Free       | PASS       | Exact installed archive and authenticated Console account; `opencode/minimax-m3.1-flash-free` created memory through native `/stm update`, without an environment override.  |
+| Native V1 read dialog     | PASS       | Exact installed archive, OpenCode 1.18.35 real PTY; `/stm-logs` displayed a literal sentinel, zero session messages, zero provider requests.                                 |
+| Publication               | NOT RUN    | Local preparation only; npm RC7 and stable tags unchanged.                                                                                                                   |
+
+Durable local receipts are under `.opencode/rc8/`: `artifact.json`,
+`consumer-evidence.json`, `forced-tools-evidence.json`,
+`live-minimax-evidence.json`, `live-minimax-memory.md`, and
+`native-v1-tui-evidence.json`. Native tests used the production installation at
+`C:/Users/Andreja/AppData/Local/Temp/stm-package-acceptance-aWzUvd/runtime/node_modules/@atonev/opencode-short-term-memory`,
+not checkout imports. The normal dependency installation blocked one postinstall;
+the blocked package identity remains unestablished by Bun's lockfile diagnostic.
+No dependency trust changes were made.
+
+Limits: Windows OpenCode 1.18.35 and MiniMax Free are the current native scope.
+Ubuntu/Lima, a fresh native registry installer, and V2 generation were not
+qualified for this archive. Native safety forced read/write/plugin tools; MCP,
+shell, question, STM tools, orphan recovery and late-call rejection additionally
+have source-level coverage. V1 config creation occurs on first activation when
+native installation provenance is available, not at npm install time; local
+tarball/file origins without that provenance require explicit config. Known
+remote TUI transports are refused; loopback tunnels cannot establish shared
+filesystem identity. V2 active-tool and long-log visibility issues remain open.
+
+## Historical Status: 2026-10-21, RC7 Published
+
+`1.4.0-rc.7` was published under `rc` on 2026-10-21, containing committed fixes through
+`e644b30517cc27923ba7ce916e65423c8d9de828`. Registry inspection on 2026-10-22
+confirmed `rc: 1.4.0-rc.7` and `latest: 1.3.0`; the published tarball matched the
+frozen qualified archive. The preparation evidence below retains its original scope.
 
 RC7 adds V1 clean-summary tool denial, permanent internal-session identity for
 the plugin instance, failed-delete recovery tracking, busy manual-update idle

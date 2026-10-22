@@ -1,6 +1,6 @@
 # OpenCode Short-Term Memory Plugin
 
-Automatically summarizes conversation context into structured session memory and supports injecting it back into the system prompt — aiming to preserve user instructions, project context, decisions, and active references across long chats and compactions, without guaranteeing semantic preservation. This preparation snapshot describes local, unpublished `1.4.0-rc.7` as of 2026-10-21. Update and injection timing differ between OpenCode generations; V2 system injection is opt-in and disabled by default, independently of automatic memory updates.
+Automatically summarizes conversation context into structured session memory and supports injecting it back into the system prompt — aiming to preserve user instructions, project context, decisions, and active references across long chats and compactions, without guaranteeing semantic preservation. This package is the local testing candidate `1.4.0-rc.8`; it has not been published. Update and injection timing differ between OpenCode generations; V2 system injection is opt-in and disabled by default, independently of automatic memory updates.
 
 > **Unofficial plugin:** This is an independent project and is not affiliated with, endorsed by, or maintained by the opencode team.
 
@@ -8,10 +8,10 @@ Automatically summarizes conversation context into structured session memory and
 
 See the [feature matrix](https://github.com/andrejtonev/opencode-short-term-memory/blob/dev/docs/FEATURE-MATRIX.md) for the repository's feature, configuration and validation comparison, including historical evidence and its version scope. This feature-matrix document is not included in the npm package; this README is shipped.
 
-- **Version scope:** The current candidate is **`1.4.0-rc.7`, not yet published**. The 2026-10-21 registry check found `rc: 1.4.0-rc.6` and `latest: 1.3.0`; RC7 was absent. Installation examples use published RC6; the RC7 command is only for use after publication. Provider APIs remain pinned to V1 plugin/SDK `1.14.25` and V2 plugin `2.0.8`. RC7 archive, clean-consumer and native qualification are recorded separately in repository [RC Readiness](https://github.com/andrejtonev/opencode-short-term-memory/blob/dev/docs/RC-READINESS.md), which is not included in the npm package.
+- **Version scope:** **`1.4.0-rc.8` is a local, unpublished candidate.** Registry inspection on 2026-10-22 still reports `rc: 1.4.0-rc.7` and `latest: 1.3.0`. Provider APIs remain pinned to V1 plugin/SDK `1.14.25` and V2 plugin `2.0.8`. Exact archive and native qualification are recorded separately in repository [RC Readiness](https://github.com/andrejtonev/opencode-short-term-memory/blob/dev/docs/RC-READINESS.md), which is not included in the npm package.
 - **V1:** Provides `/stm` commands and eight tools: seven `stm_memory_*` tools plus legacy `short_term_memory`. Uses idle/pre-compaction updates, periodic injection and a separate side session in clean mode, as described below.
 - **RC6 V1 fixes:** Filters the plugin's own generated prompt messages and assistant replies to those prompts from update input. Automatic unchanged-input fingerprint suppression, real-user busy-turn idle waiting and internal temporary-session skipping remain in place; these process-local fences do not ban manual retries.
-- **RC7 fixes:** Clean V1 summaries disable tools, side-session registration fences delayed work, failed side-session deletions remain tracked for recovery, busy manual updates defer until idle, and delayed history bootstrap cannot recreate deleted memory. Native V2 provider unavailability uses the configured bounded retry budget. Recorded V2 active-summary tool requests and long-log dialog visibility failures remain unresolved; RC7 is a testing candidate.
+- **RC8 fixes:** V1 clean summaries keep tool definitions visible for OpenCode free-model access while rejecting tool execution before it runs. First activation creates `stm.json` in the native installation scope, and read dialogs show local files without model output. Provider failures remain visible and failed manual updates no longer display old memory as refreshed. RC7 lifecycle fencing, cleanup recovery, idle deferral and native V2 retry bounds are retained. Recorded V2 active-summary tool requests and long-log dialog visibility failures remain unresolved.
 - **V1 delivery behavior:** Preserves the no-reply delivery path, originating agent/model routing, and all existing memory tools. Native bus lifecycle and child snapshot fixes are prior RC5 behavior, not new RC6 features. DCP handling preserves the originating agent and skips reinjection when origin metadata is missing or stale; memory updates remain allowed, avoiding an unintended default-agent reinjection.
 - **V2 updates:** Native execution terminal events schedule an idle update after `debounceMs`, reading fresh settled durable history; the context hook also catches up from new visible conversation text. Updates require an assistant message in the delta and respect checkpoints and forward reset boundaries. Execution start, deletion, move and shutdown invalidate scheduled idle work. There is no DCP-compress trigger.
 - **V2 injection (introduced in RC3; also in published RC5):** Native context/system transform injection is supported but disabled by default. Set `enableLegacyPeriodicSystemTransform: true` to enable primary-session, task-child and compaction memory injection. When opted in, primary sessions inject on literally every N admitted user turns (`remindEveryN`), retaining that turn's eligibility across tool continuations. Cadence is process-local and bounded, not reconstructed from old history; restart or eviction can restart counting. Compaction attempts a refresh from settled durable history independently of injection opt-in; when opted in, it injects stored memory as fallback even if refresh skips, fails or is busy. Compaction injection bypasses reminder cadence and does not wait for an already-running update to drain.
@@ -26,11 +26,11 @@ See the [feature matrix](https://github.com/andrejtonev/opencode-short-term-memo
 
 **V2 configuration:** Both generations read the shared config files and defaults below, but the table's behavioral descriptions remain V1-specific. The current candidate applies the options described above, along with `enabled`, `maxMemoryLength`, `maxUpdateInputLength`, `maxDeltaMessages` (per-chunk message bound) and `memoryDir`. Native injection is opt-in and defaults to `false`; this behavior originated in RC3 and is also present in published RC5. Set `enableLegacyPeriodicSystemTransform: true` in the shared STM config to opt into all V2 system memory injection, including compaction. Automatic memory updates remain enabled independently when `enabled: true`. Use `stm_memory_settings` to inspect effective behavior in the installed version; these V2 behaviors are not new RC6 features.
 
-**V2 TUI loading:** On the pinned host, add the same package entry to both the server's `opencode.json` and the CLI/TUI's global `cli.json` `plugins` lists, preserving existing entries. The example below installs published RC6. For a minimal global configuration, put the following in each of `~/.config/opencode/opencode.json` and `~/.config/opencode/cli.json` (or the corresponding `$XDG_CONFIG_HOME/opencode/` paths):
+**V2 TUI loading:** On the pinned V2 host, add the same package entry to both the server's `opencode.json` and the CLI/TUI's global `cli.json` `plugins` lists, preserving existing entries. For a minimal global configuration, put the following in each of `~/.config/opencode/opencode.json` and `~/.config/opencode/cli.json` (or the corresponding `$XDG_CONFIG_HOME/opencode/` paths):
 
 ```json
 {
-  "plugins": ["@atonev/opencode-short-term-memory@1.4.0-rc.6"]
+  "plugins": ["@atonev/opencode-short-term-memory@1.4.0-rc.7"]
 }
 ```
 
@@ -44,37 +44,53 @@ The packaged plugin supplies separate server, `/tui` and `/rpc` exports resolved
 
 ### V2
 
-The [pinned authoritative CLI specification](https://github.com/anomalyco/opencode/blob/2670273ff17da96f85c5826ced57aa1b368754fa/packages/cli/src/commands/commands.ts) defines `plugin add <package>` as installing a plugin and adding it to global configuration, with no `--global` flag. Install the currently published prerelease explicitly:
-
-```bash
-opencode plugin add '@atonev/opencode-short-term-memory@1.4.0-rc.6'
-```
-
-Only after `1.4.0-rc.7` is published, replace the package version in the command and both configuration entries above with `1.4.0-rc.7`:
+The [pinned authoritative CLI specification](https://github.com/anomalyco/opencode/blob/2670273ff17da96f85c5826ced57aa1b368754fa/packages/cli/src/commands/commands.ts) defines `plugin add <package>` as installing a plugin and adding it to global configuration, with no `--global` flag. RC8 remains local; the registry installation below installs RC7:
 
 ```bash
 opencode plugin add '@atonev/opencode-short-term-memory@1.4.0-rc.7'
 ```
 
-Verify both server and TUI configuration against [V2 TUI loading](#v1--v2-support) above, preserving existing entries. Installing published RC6 does not validate the unpublished candidate or include its new fixes.
+Verify both server and TUI configuration against [V2 TUI loading](#v1--v2-support) above, preserving existing entries. Installing published RC7 does not include the RC8 fixes.
 
 ### V1
 
-Use config-based installation; V1 CLI installation syntax is not verified here. Add the published prerelease to the singular `plugin` list in project `opencode.json` or global `~/.config/opencode/opencode.json` (or `$XDG_CONFIG_HOME/opencode/opencode.json`), preserving existing entries:
+The [V1 CLI documentation](https://opencode.ai/docs/cli/#plugin) and hosts `1.14.25`, `1.18.23`, and `1.18.35` support a local install by default and `--global` for a user-wide install. RC8 remains local; these registry commands install RC7. Run the local command from the project:
+
+```bash
+opencode plugin '@atonev/opencode-short-term-memory@1.4.0-rc.7' --force
+# Or install globally:
+opencode plugin '@atonev/opencode-short-term-memory@1.4.0-rc.7' --global --force
+```
+
+Local installation writes OpenCode configuration under `<git-worktree>/.opencode/`, or `<directory>/.opencode/` outside Git. Global installation uses OpenCode's global configuration directory, normally `~/.config/opencode/`, respecting XDG configuration. `--force` replaces the plugin version; it does not reset STM memory or overwrite STM configuration. V2's `plugin add` syntax is a different command.
+
+For manual V1 configuration, add the published prerelease to the singular `plugin` list in project `opencode.json` or global `~/.config/opencode/opencode.json` (or `$XDG_CONFIG_HOME/opencode/opencode.json`), preserving existing entries:
 
 ```json
 {
-  "plugin": ["@atonev/opencode-short-term-memory@1.4.0-rc.6"]
+  "plugin": ["@atonev/opencode-short-term-memory@1.4.0-rc.7"]
 }
 ```
 
-V1 installs configured npm plugins automatically using Bun at startup. Packages and their dependencies are cached in `~/.cache/opencode/node_modules/`. The singular key is also used by the repository's V1 host-load fixture; it is distinct from V2's `plugins` key. Only after RC7 publication, replace the version in this entry with `1.4.0-rc.7`.
+V1 installs configured npm plugins automatically at startup. Package-cache layout varies by host version; use `opencode debug paths` and inspect the installed package version rather than assuming a cached package is the active plugin. The singular key is also used by the repository's V1 host-load fixture; it is distinct from V2's `plugins` key.
+
+For OpenCode Console authentication, use `opencode console login` and complete browser/device authorization. Older hosts that require a URL accept `opencode console login https://opencode.ai/console`. A Console account is separate from a legacy API key in `auth.json`; successful login must be followed by a real model request. The known free-tier rejection of tool-disabled clean summaries can remain after normal model access succeeds.
+
+RC8 keeps OpenCode's normal tool definitions visible in V1 clean side sessions, with approval permissions. STM rejects every tool invocation from its owned or title-identified summarizer sessions in the native pre-execution hook. This permits free-tier generation without filesystem, shell, plugin or MCP tool execution. Standalone runtimes without the execution guard continue to disable tools in the request. No environment variable or setup step is required. Published RC7 does not include this fix.
 
 ### Post-install
 
-Run `/stm setup` for confirmation guidance, then `/stm setup confirm true` to create a project-local `.opencode/stm.jsonc` example. In V2, first configure and connect the TUI companion above; unconfirmed setup only displays refusal/guidance and runs no setup action. Headless users can ask the agent to call `stm_memory_setup` with `confirm: true`. Both generations create the shared example only in the project, never write global config and refuse to overwrite an existing `stm.jsonc` or `stm.json`. In V2, check `/stm settings` or `stm_memory_settings` for effective settings rather than assuming all example keys apply. You can also copy `stm.example.jsonc` manually, then restart OpenCode.
+In RC8 V1, the first plugin activation creates a minimal `stm.json` beside the host configuration that installed STM: project `.opencode/stm.json` for local installs, or the OpenCode global config directory for global installs. Existing `stm.json` and `stm.jsonc` files are preserved, including invalid files. No setup command is required. This runs on activation, not when the installer exits; unknown installation provenance is reported without guessing a destination. Settings diagnostics show the searched and selected paths.
+
+Published RC7 still requires manual config creation or `/stm setup confirm true`. The optional setup command creates a project-local `.opencode/stm.jsonc` example and refuses to overwrite existing config. V2 does not expose installation provenance, so it still uses manual configuration or confirmed setup with its connected TUI companion. Headless users can call `stm_memory_setup` with `confirm: true`.
 
 Restart OpenCode after setup or configuration edits before checking settings or testing behavior. V1 caches resolved configuration for up to 60 seconds, so an immediate check without restarting can still show the previous settings.
+
+### Native V1 read dialogs (RC8)
+
+Enable the same STM package in the singular `plugin` array in `tui.json`, as well as the server's `opencode.json`. Select `/stm` from autocomplete to open the native menu, or use `/stm-show`, `/stm-logs`, `/stm-settings`, and `/stm-status` directly. These dialogs read local files without requesting a model response. Large logs retain their newest text within the display limit. Status shows local configuration and files; live server counters are unavailable. Known remote connections are refused, and missing memory is displayed without creating a file.
+
+Legacy typed `/stm show`, `logs`, `settings`, and `status` return guidance to these native commands. V1 still runs a model response after a legacy server command; STM now withholds the read contents from that response. Agent tools remain available for deliberate model access to memory. V2 retains its existing native command behavior below.
 
 ## Configuration (V1 behavior)
 
@@ -110,17 +126,17 @@ In V1, memory summarization and injection is fully automated — the plugin watc
 
 | Command                   | Description                                                                                                                                                                                 |
 | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `/stm` or `/stm status`   | V1: enabled state, counters, paths and mode. V2: authoritative session, configured/effective model, paths, memory bytes, checkpoint, reset boundary/policy and updater busy state.          |
-| `/stm show`               | Read current session memory; creates the standard template if absent.                                                                                                                       |
+| `/stm` or `/stm status`   | V1: select `/stm` from autocomplete for the native menu; legacy typed status gives `/stm-status` guidance. V2: authoritative session, configured/effective model, paths and updater state.  |
+| `/stm show`               | V1: guidance to `/stm-show`, which reads local memory without creating a file. V2: read current session memory.                                                                             |
 | `/stm update`             | V1: attempt immediate summarization and return memory. V2: same outcome/reason and cumulative progress as `stm_memory_update`, not memory; use `/stm show` or `stm_memory_read` to read it. |
 | `/stm reset`              | V1: clear memory and checkpoint without confirmation (existing syntax). V2: display confirmation guidance/refusal only; no reset action runs.                                               |
 | `/stm reset confirm true` | V2: reset through the latest settled durable snapshot boundary, subject to the safe refusals above.                                                                                         |
-| `/stm logs`               | Read the latest ~120 log lines shared across sessions using the memory directory. Logs may contain sensitive context; review before sharing and do not disclose secrets.                    |
-| `/stm settings`           | V1: resolved configuration as JSON. V2: resolved config, effective behavior and inactive settings.                                                                                          |
+| `/stm logs`               | V1: guidance to `/stm-logs`, which shows bounded recent local logs. V2: read recent logs shared across sessions using the memory directory.                                                 |
+| `/stm settings`           | V1: guidance to `/stm-settings`, which shows local configuration and paths. V2: resolved config, effective behavior and inactive settings.                                                  |
 | `/stm setup`              | Show safe project-local confirmation guidance; no config is created.                                                                                                                        |
 | `/stm setup confirm true` | Create `.opencode/stm.jsonc`; never overwrite existing config.                                                                                                                              |
 
-In V1 rc.2, `/stm` executes the action before the model runs, then supplies the completed result to the model for display. The visible response is model-mediated, is not guaranteed verbatim and may consume inference even for read-only commands. The `stm_memory_*` tools are the headless alternative for structured action results; an agent's subsequent reply can still be model-mediated.
+In V1 RC8, native read commands display local file dialogs. Legacy typed server reads supply only fixed guidance to the model. Mutating server commands still execute before the model runs, then supply their completed result for display; that response is model-mediated and may consume inference. The `stm_memory_*` tools are the headless alternative for structured action results; an agent's subsequent reply can still be model-mediated.
 
 All V2 commands, including reads and unconfirmed guidance, require TUI receiver admission before execution. `/stm setup confirm true` and `/stm reset confirm true` require the exact literal `confirm true`; unconfirmed V2 setup/reset never invoke their actions. V2 read-only commands do not generate model output; `/stm update` can invoke the summarizer.
 

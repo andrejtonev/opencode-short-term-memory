@@ -7,9 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.0-rc.8] - 2026-10-22
+
+Local prerelease preparation only; no npm publication or Git push. RC7 remains the registry's `rc` release. Exact RC8 archive qualification is recorded separately in [RC Readiness](docs/RC-READINESS.md).
+
+### Fixed
+
+- Preserve provider errors returned inside native session responses instead of replacing authentication or free-tier rejections with "empty output." Permanent failures stop clean retries and active fallback; transient failures retain bounded retries.
+- Report failed manual memory updates as failures rather than displaying unchanged memory as a refreshed result.
+- Restore automatic V1 `stm.json` creation on first activation in the selected global or local installation scope, using OpenCode's plugin origin metadata. Preserve existing JSON/JSONC and inherited settings, and expose config paths and bootstrap diagnostics.
+
+### Added
+
+- V1 clean-session execution fencing: retain tool definitions with approval permissions so OpenCode free models can generate summaries, while rejecting every native tool invocation from STM side sessions before execution. Unguarded standalone runtimes retain request-level tool denial. Supersedes the temporary environment override.
+- A native V1 STM action menu and bounded dialogs for local settings, logs, and stored memory, keeping read results out of model prompts. The packaged TUI companion also retains its existing V2 receiver.
+- Large V1 log dialogs retain the newest log text when the display limit is reached.
+
+### Documentation
+
+- Document V1's local/global `opencode plugin` installation paths and `opencode console login` authentication flow. Local RC8 fixes remain separate from published RC7.
+
 ## [1.4.0-rc.7] - 2026-10-21
 
-Local prerelease preparation from committed fixes through `e644b30517cc27923ba7ce916e65423c8d9de828`; not yet published. The registry currently reports `rc: 1.4.0-rc.6` and `latest: 1.3.0`. RC7 artifact validation is recorded separately in [RC Readiness](docs/RC-READINESS.md); earlier RC6 results do not qualify the new archive.
+Published under `rc` on 2026-10-21 from committed fixes through `e644b30517cc27923ba7ce916e65423c8d9de828`, with `latest` left at `1.3.0`. The registry tarball matched the frozen qualified archive. RC7 artifact validation is recorded separately in [RC Readiness](docs/RC-READINESS.md); earlier RC6 results do not qualify this archive, and later source changes do not alter its published bytes.
 
 ### Fixed
 
