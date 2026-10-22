@@ -291,7 +291,7 @@ import { fileURLToPath } from "node:url";
 import { relative, isAbsolute, sep } from "node:path";
 import root, { SessionMemoryPlugin } from "${manifest.name}";
 import server, { SessionMemoryPlugin as serverPlugin } from "${manifest.name}/server";
-import tui, { receiveStatus } from "${manifest.name}/tui";
+import tui, { receiveStatus, setupV1Tui } from "${manifest.name}/tui";
 import rpc, { statusOutputDefinition } from "${manifest.name}/rpc";
 const paths = [];
 for (const specifier of ${JSON.stringify(specifiers)}) {
@@ -310,6 +310,8 @@ assert.equal(server.server, serverPlugin);
 assert.equal(tui.id, "opencode-short-term-memory");
 assert.equal(typeof tui.setup, "function");
 assert.equal(tui.setup, receiveStatus);
+assert.equal(typeof tui.tui, "function");
+assert.equal(tui.tui, setupV1Tui);
 assert.equal(rpc, statusOutputDefinition);
 assert.equal(rpc.id, "stm.status-output");
 assert.deepEqual(Object.keys(rpc.methods).sort(), ["acknowledge", "cancel", "claim"]);
@@ -389,11 +391,12 @@ console.log(JSON.stringify({ gate: "public imports only, no hooks called", paths
   }
   await Bun.write(
     join(runtime, "tui-consumer.ts"),
-    `import tui, { receiveStatus, type StatusTuiContext } from "${manifest.name}/tui";
-const tuiShape: { id: string; setup(context: StatusTuiContext): () => void } = tui;
+    `import tui, { receiveStatus, setupV1Tui, type StatusTuiContext, type V1TuiContext } from "${manifest.name}/tui";
+const tuiShape: { id: string; setup(context: StatusTuiContext): () => void; tui(context: V1TuiContext): Promise<void> } = tui;
 const receiver: typeof tuiShape.setup = receiveStatus;
+const native: typeof tuiShape.tui = setupV1Tui;
 const id: string = tui.id;
-void [tuiShape, receiver, id];
+void [tuiShape, receiver, native, id];
 `,
   );
   const tuiConfig = { ...tsconfig, files: ["tui-consumer.ts"] };

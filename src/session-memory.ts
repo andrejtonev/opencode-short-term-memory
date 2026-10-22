@@ -1056,6 +1056,21 @@ export const SessionMemoryPlugin = async (
       const sessionID = input.sessionID;
       const rawArgument = input.arguments;
       const action = parseMemoryActionFromCommandArgument(rawArgument);
+      if (["show", "logs", "settings", "status"].includes(action)) {
+        // V1's server command hook cannot stop the host's subsequent model
+        // request. Keep local read contents out of that request entirely.
+        const guidance =
+          `Use /stm-${action} in the native STM TUI, or select /stm from autocomplete. ` +
+          "If the native commands are missing, enable the STM plugin in tui.json and restart OpenCode. " +
+          "This legacy command did not read or send STM files to the model.";
+        showToast(client, "Session Memory", `Use /stm-${action} for a native read dialog.`);
+        output.parts.splice(0, output.parts.length, {
+          type: "text",
+          synthetic: true,
+          text: "Display this STM command guidance without calling tools:\n" + JSON.stringify(guidance),
+        } as CommandExecuteBeforeOutput["parts"][number]);
+        return;
+      }
       const setupConfirmed = /^setup\s+confirm\s+true$/i.test(String(rawArgument).trim());
       const result = await executeMemoryAction(
         action,

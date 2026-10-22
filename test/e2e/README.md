@@ -78,7 +78,7 @@ still has to be free for the run.
 | `events.test.ts`            | Live plugin load plus synthetic event dispatch and filesystem/log assertions.                                     | **No**; uses a fake client for direct hook work.                                                                |
 | `hooks.test.ts`             | Direct hook contracts, including command/chat hooks, deduplication, counters, and path safety.                    | **No**; synthetic payloads and a fake client.                                                                   |
 | `wireup.test.ts`            | Live plugin hook surface and input/output wiring.                                                                 | **No**; handlers are exercised with a fake client.                                                              |
-| `commands.test.ts`          | `/stm` command actions through the live server; command hook short-circuits the agent.                            | **Model-mediated** command runs may consume inference; the action result is verified, not its semantic quality. |
+| `commands.test.ts`          | `/stm` command actions through the live server; legacy hook returns native read guidance or action results.       | **Model-mediated** command runs may consume inference; the action result is verified, not its semantic quality. |
 | `include-agents-md.test.ts` | Project `AGENTS.md` inclusion in the first summarizer prompt.                                                     | **No real model**; captures the prompt with a fake client.                                                      |
 
 All six suites require `OPENCODE_E2E=1` and an `opencode` binary, even when

@@ -10,6 +10,8 @@ import {
   type StatusOutput,
   type StatusReceiver,
 } from "./v2-status-output";
+import { setupV1Tui } from "./v1-tui";
+export { setupV1Tui, type V1TuiContext } from "./v1-tui";
 
 export type StatusTuiContext = {
   client: {
@@ -163,4 +165,6 @@ export function receiveStatus(context: StatusTuiContext) {
   return dispose;
 }
 
-export default { id: "opencode-short-term-memory", setup: receiveStatus };
+// The V1 loader selects tui(); the V2 loader selects setup(). Both entrypoints
+// remain native, and the existing V2 receiver contract is unchanged.
+export default { id: "opencode-short-term-memory", setup: receiveStatus, tui: setupV1Tui };

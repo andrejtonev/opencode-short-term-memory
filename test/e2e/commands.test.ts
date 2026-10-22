@@ -1,9 +1,8 @@
 // ── /stm command e2e tests ───────────────────────────────────────────
-// Drives /stm actions through the live opencode instance and verifies
-// the plugin's command.execute.before handler short-circuits the LLM and
-// returns the expected text. We use `opencode run --attach ... "/stm <action>"`
-// directly so the agent is bypassed (the command hook sets stop=true and
-// returns the result, no chat completion required).
+// Exercises legacy server commands through a live OpenCode instance.
+// The host still generates model output after the hook; read commands
+// return fixed native-command guidance without forwarding local file contents.
+// Native dialogs are verified separately in test/v1-tui.test.ts.
 //
 // Skipped unless OPENCODE_E2E=1 is set and the opencode binary is on $PATH.
 
@@ -65,63 +64,16 @@ afterAll(async () => {
   }
 });
 
-describe("/stm show returns the memory file contents", () => {
-  test("show returns the memory markdown for the current session", async () => {
-    if (!ENABLED) return;
-    // The plugin's command.execute.before sets output.stop=true and
-    // output.message=<memory contents>. The agent echoes that back.
-    // We assert on the agent's text response (extracted from events),
-    // not on the raw NDJSON stream.
-    const result = runStmCommand(ws, "show", SERVE_PORT, { timeoutMs: 60_000 });
-    expect(result.sessionID).toBeTruthy();
-    // The session the agent ran in is a fresh session, so its memory
-    // file is the default skeleton: contains "## Session Memory" and
-    // "None captured yet". The agent should echo that.
-    expect(result.agentText).toContain("## Session Memory");
+for (const action of ["show", "settings", "logs", "status"]) {
+  describe(`/stm ${action} redirects to the native read dialog`, () => {
+    test("returns native-command guidance through the legacy model response", async () => {
+      if (!ENABLED) return;
+      const result = runStmCommand(ws, action, SERVE_PORT, { timeoutMs: 60_000 });
+      expect(result.sessionID).toBeTruthy();
+      expect(result.agentText).toContain(`/stm-${action}`);
+    });
   });
-});
-
-describe("/stm settings returns the config JSON", () => {
-  test("settings contains the seeded values", async () => {
-    if (!ENABLED) return;
-    const result = runStmCommand(ws, "settings", SERVE_PORT, { timeoutMs: 60_000 });
-    expect(result.sessionID).toBeTruthy();
-    // The plugin returns a JSON dump of the config; the agent echoes
-    // it back. The agent may add a sentence, so we just check for
-    // the key fields.
-    expect(result.agentText).toContain("memoryModel");
-    expect(result.agentText).toContain("maxMemoryLength");
-  });
-});
-
-describe("/stm logs returns log lines from session-memory.log", () => {
-  test("logs contains the plugin_loaded entry", async () => {
-    if (!ENABLED) return;
-    const result = runStmCommand(ws, "logs", SERVE_PORT, { timeoutMs: 60_000 });
-    expect(result.sessionID).toBeTruthy();
-    // Soft pass: the plugin's log file is the source of truth, and the
-    // /stm logs command hook is verified to be wired by `runStmCommand`
-    // creating a session. The agent's echo of the log content is a
-    // nice-to-have — the model can paraphrase or trim the content.
-    const log = readLog(ws);
-    expect(log).toContain("plugin_loaded");
-    if (!result.agentText.includes("plugin_loaded")) {
-      console.log(
-        "  (warn) /stm logs chat round-trip: agent did not echo log content; " + "soft pass via direct log read.",
-      );
-    }
-  });
-});
-
-describe("/stm status reports plugin state", () => {
-  test("status contains the plugin name and core fields", async () => {
-    if (!ENABLED) return;
-    const result = runStmCommand(ws, "status", SERVE_PORT, { timeoutMs: 60_000 });
-    expect(result.sessionID).toBeTruthy();
-    expect(result.agentText).toMatch(/Session Memory Plugin Status/i);
-    expect(result.agentText).toContain("summarizerMode");
-  });
-});
+}
 
 describe("/stm reset clears the memory file", () => {
   test("reset creates the default skeleton for the current session", async () => {
