@@ -1,8 +1,8 @@
 import { mkdir, readFile, writeFile, appendFile, rm, stat, lstat, rename, open } from "node:fs/promises";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { parse } from "jsonc-parser";
-import type { Client } from "./types";
+import type { Client, OpencodePluginOrigin } from "./types";
 
 export type SessionMemoryConfig = {
   enabled: boolean;
@@ -462,7 +462,7 @@ export type ExampleConfigResult = {
 
 async function pathExists(path: string): Promise<boolean> {
   try {
-    await stat(path);
+    await lstat(path);
     return true;
   } catch (error: unknown) {
     if ((error as { code?: string })?.code === "ENOENT") return false;
@@ -561,6 +561,144 @@ function candidateGlobalConfigDirs() {
 
 export function resolveGlobalOpencodeDir() {
   return candidateGlobalConfigDirs()[0];
+}
+
+export type ConfigBootstrapResult = {
+  status: "created" | "existing" | "skipped" | "error";
+  scope?: "global" | "local";
+  configPath?: string;
+  message: string;
+};
+
+export type ConfigDiagnostics = {
+  configPaths: string[];
+  configFiles: string[];
+  configSources: Array<{
+    scope: "global" | "environment" | "project";
+    directory: string;
+    selectedPath?: string;
+  }>;
+  installation?: ConfigBootstrapResult;
+};
+
+/** Report configuration discovery without creating files or directories. */
+export async function readConfigDiagnostics(baseDir?: string): Promise<ConfigDiagnostics> {
+  const configSources: ConfigDiagnostics["configSources"] = candidateGlobalConfigDirs().map((directory) => ({
+    scope: "global",
+    directory,
+  }));
+  if (process.env.OPENCODE_CONFIG_DIR) {
+    configSources.push({ scope: "environment", directory: process.env.OPENCODE_CONFIG_DIR });
+  }
+  configSources.push({ scope: "project", directory: await resolveProjectOpencodeDir(baseDir) });
+  const configPaths: string[] = [];
+  const configFiles: string[] = [];
+  for (const source of configSources) {
+    for (const fileName of CONFIG_FILE_CANDIDATES) {
+      const path = join(source.directory, fileName);
+      configPaths.push(path);
+      if (await pathExists(path).catch(() => false)) configFiles.push(path);
+      if (!source.selectedPath && (await loadConfigFromPath(path))) source.selectedPath = path;
+    }
+  }
+  return { configPaths: [...new Set(configPaths)], configFiles: [...new Set(configFiles)], configSources };
+}
+
+function sameDirectory(left: string, right: string): boolean {
+  const normalize = (path: string) => (process.platform === "win32" ? resolve(path).toLowerCase() : resolve(path));
+  return normalize(left) === normalize(right);
+}
+
+/**
+ * Create a sparse starter at the winning native installation's scope.
+ * npm installation has no workspace provenance; only the host config hook does.
+ */
+export async function bootstrapInstalledConfig(origins: unknown): Promise<ConfigBootstrapResult> {
+  const origin = Array.isArray(origins)
+    ? ([...origins].reverse().find((candidate: unknown) => {
+        if (!candidate || typeof candidate !== "object") return false;
+        const value = candidate as Partial<OpencodePluginOrigin>;
+        const spec = Array.isArray(value.spec) ? value.spec[0] : value.spec;
+        return typeof spec === "string" && /^@atonev\/opencode-short-term-memory(?:@[^\s]+)?$/.test(spec);
+      }) as OpencodePluginOrigin | undefined)
+    : undefined;
+  if (!origin || (origin.scope !== "local" && origin.scope !== "global")) {
+    return { status: "skipped", message: "No native STM installation scope was supplied; no config file created." };
+  }
+  const scope = origin.scope;
+  if (typeof origin.source !== "string" || !isAbsolute(origin.source)) {
+    return { status: "skipped", scope, message: "The STM config origin is not a local file; no config file created." };
+  }
+  const globalDirs = candidateGlobalConfigDirs();
+  if (process.env.OPENCODE_CONFIG_DIR) globalDirs.push(process.env.OPENCODE_CONFIG_DIR);
+  // Native global config merges identify their source by directory, whereas
+  // project config merges identify the declaring file.
+  let configDir =
+    scope === "global" && globalDirs.some((directory) => sameDirectory(origin.source, directory))
+      ? origin.source
+      : dirname(origin.source);
+  if (scope === "local") {
+    if (basename(configDir) !== ".opencode") configDir = join(configDir, ".opencode");
+  } else {
+    if (sameDirectory(configDir, homedir()) && /^\.opencode\.jsonc?$/.test(basename(origin.source))) {
+      configDir = join(configDir, ".opencode");
+    }
+    if (!globalDirs.some((directory) => sameDirectory(configDir, directory))) {
+      return {
+        status: "skipped",
+        scope,
+        message: "The STM global origin is outside the configured STM search paths; no config file created.",
+      };
+    }
+  }
+  const configPath = join(configDir, "stm.json");
+  try {
+    return await withPathWriteLock(`installed-config:${resolve(configDir)}`, async () => {
+      for (const fileName of CONFIG_FILE_CANDIDATES) {
+        const existingPath = join(configDir, fileName);
+        if (await pathExists(existingPath)) {
+          return {
+            status: "existing" as const,
+            scope,
+            configPath: existingPath,
+            message: `Preserved existing STM config at ${existingPath}.`,
+          };
+        }
+      }
+      await ensureDir(configDir);
+      let handle: Awaited<ReturnType<typeof open>>;
+      try {
+        handle = await open(configPath, "wx");
+      } catch (error: unknown) {
+        if ((error as { code?: string })?.code !== "EEXIST") throw error;
+        return {
+          status: "existing" as const,
+          scope,
+          configPath,
+          message: `Preserved existing STM config at ${configPath}.`,
+        };
+      }
+      try {
+        await handle.writeFile("{}\n", "utf8");
+      } finally {
+        await handle.close();
+      }
+      return {
+        status: "created" as const,
+        scope,
+        configPath,
+        message: `Created ${scope} STM config at ${configPath}. Settings are inherited until overridden.`,
+      };
+    });
+  } catch (error: unknown) {
+    const code = (error as { code?: string })?.code;
+    return {
+      status: "error",
+      scope,
+      configPath,
+      message: `Could not create STM config at ${configPath}${code ? ` (${code})` : ""}. Existing settings and defaults remain available.`,
+    };
+  }
 }
 
 export async function readConfig(

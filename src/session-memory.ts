@@ -1,5 +1,5 @@
-import type { Config as OpencodeConfig } from "@opencode-ai/plugin";
 import type {
+  OpencodeConfig,
   Client,
   SessionCreatedInput,
   SessionUpdatedInput,
@@ -22,6 +22,7 @@ import { join } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import {
   createRuntimeState,
+  bootstrapInstalledConfig,
   ensureMemoryFile,
   getMessageRole,
   getMessageText,
@@ -340,6 +341,10 @@ export const SessionMemoryPlugin = async (
   };
   let backgroundInitPromise: Promise<void> | undefined;
   let backgroundInitDone = false;
+  let finishInitialConfigRead!: () => void;
+  const initialConfigRead = new Promise<void>((resolve) => {
+    finishInitialConfigRead = resolve;
+  });
 
   async function runBackgroundInit() {
     if (backgroundInitDone) return;
@@ -347,6 +352,8 @@ export const SessionMemoryPlugin = async (
       await reloadConfig(configCtx, true);
       config = configCtx.config;
       cmdCtx.config = config;
+      cmdCtx.configuration = configCtx.configuration;
+      finishInitialConfigRead();
       await mkdir(config.memoryDir, { recursive: true });
       await logEvent(config, "plugin_loaded", { model: config.memoryModel, mode: config.summarizerMode });
 
@@ -371,6 +378,7 @@ export const SessionMemoryPlugin = async (
         });
       } catch {}
     } finally {
+      finishInitialConfigRead();
       // Set the flag only after the work actually completes (or fails).
       // Setting it earlier would race with concurrent reloadConfigLocal()
       // calls, which check this flag to decide whether to wait.
@@ -393,6 +401,7 @@ export const SessionMemoryPlugin = async (
     await reloadConfig(configCtx, force);
     config = configCtx.config;
     cmdCtx.config = config;
+    cmdCtx.configuration = configCtx.configuration;
     return config;
   }
 
@@ -818,6 +827,18 @@ export const SessionMemoryPlugin = async (
   // ── Return the plugin object ─────────────────────────────
   const plugin = {
     config: async (opencodeConfig: OpencodeConfig) => {
+      // Scope is only available here. Do not wait for unrelated orphan cleanup
+      // (which can call the host API) while registering the plugin's commands.
+      await initialConfigRead;
+      const installation = await bootstrapInstalledConfig(opencodeConfig.plugin_origins);
+      configCtx.configuration = { ...configCtx.configuration!, installation };
+      await reloadConfig(configCtx, true);
+      config = configCtx.config;
+      cmdCtx.config = config;
+      cmdCtx.configuration = configCtx.configuration;
+      if (installation.status === "error") {
+        await logEvent(config, "config_installation_error", { ...installation });
+      }
       opencodeConfig.command ??= {};
       opencodeConfig.command.stm ??= {
         template: "/stm $ARGUMENTS",

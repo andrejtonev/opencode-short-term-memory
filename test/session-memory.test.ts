@@ -114,7 +114,7 @@ describe("SessionMemoryPlugin general functionality", () => {
     });
   }
 
-  test("startup does not seed global STM config", async () => {
+  test("startup without installation provenance does not guess a global STM config", async () => {
     const { plugin } = await createPlugin({ debug: false });
     await plugin.tool.stm_memory_status.execute({}, {});
 

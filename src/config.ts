@@ -1,4 +1,10 @@
-import { type SessionMemoryConfig, type RuntimeState, readConfig } from "./memory-utils";
+import {
+  type SessionMemoryConfig,
+  type RuntimeState,
+  type ConfigDiagnostics,
+  readConfig,
+  readConfigDiagnostics,
+} from "./memory-utils";
 
 export interface ConfigContext {
   config: SessionMemoryConfig;
@@ -6,6 +12,7 @@ export interface ConfigContext {
   lastWarning: string;
   globalState: RuntimeState;
   baseDir?: string;
+  configuration?: ConfigDiagnostics;
 }
 
 const CONFIG_CACHE_TTL_MS = 60_000;
@@ -17,6 +24,8 @@ export async function reloadConfig(ctx: ConfigContext, force = false) {
     return ctx.config;
   }
   ctx.config = await readConfig(undefined, ctx.baseDir);
+  const installation = ctx.configuration?.installation;
+  ctx.configuration = { ...(await readConfigDiagnostics(ctx.baseDir)), ...(installation ? { installation } : {}) };
   ctx.cache = { config: ctx.config, at: now };
   return ctx.config;
 }

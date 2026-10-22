@@ -1,4 +1,4 @@
-import type { SessionMemoryConfig, RuntimeState } from "./memory-utils";
+import type { SessionMemoryConfig, RuntimeState, ConfigDiagnostics } from "./memory-utils";
 import type { Client } from "./types";
 import {
   createProjectExampleConfig,
@@ -25,6 +25,7 @@ export function parseMemoryActionFromCommandArgument(argument: unknown): string 
 export interface CommandContext {
   config: SessionMemoryConfig;
   baseDir?: string;
+  configuration?: ConfigDiagnostics;
   sessionStates: Map<string, SessionRuntimeState>;
   globalState: RuntimeState;
   clearSessionDeliveryMetadata?: (sessionID: string) => void;
@@ -71,6 +72,9 @@ export async function statusText(sessionID: string | undefined, ctx: CommandCont
     `- remindEveryN: ${config.remindEveryN}`,
     `- maxDeltaMessages: ${config.maxDeltaMessages}`,
     `- memoryDir: ${config.memoryDir}`,
+    `- configPaths: ${ctx.configuration?.configPaths.join(", ") || "unavailable"}`,
+    `- configFiles: ${ctx.configuration?.configFiles.join(", ") || "none"}`,
+    `- configInstallation: ${ctx.configuration?.installation?.message || "not reported"}`,
     `- debug: ${config.debug}`,
     `- memoryBytes: ${memory.length}`,
     `- updateCount: ${globalState.updateCount}`,
@@ -113,6 +117,7 @@ export async function executeMemoryAction(
     return JSON.stringify(
       {
         ...config,
+        ...(ctx.configuration ? { configuration: ctx.configuration } : {}),
         memoryModelSelection: modelSelection.memoryModelSelection,
         effectiveDeliveryMode: config.enableLegacyPeriodicSystemTransform ? "legacySystemTransform" : "promptNoReply",
       },

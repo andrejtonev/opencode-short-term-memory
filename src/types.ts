@@ -1,8 +1,19 @@
-import type { PluginInput, Config as OpencodeConfig, ToolContext } from "@opencode-ai/plugin";
+import type { PluginInput, Config as HostOpencodeConfig, ToolContext } from "@opencode-ai/plugin";
 import type { Part } from "@opencode-ai/sdk";
 
 export type Client = PluginInput["client"];
-export type { OpencodeConfig, ToolContext };
+export type { ToolContext };
+
+/** Runtime provenance supplied to config hooks by OpenCode 1.14.25 and 1.18.x. */
+export interface OpencodePluginOrigin {
+  spec: string | readonly [string, Readonly<Record<string, unknown>>];
+  source: string;
+  scope: "global" | "local";
+}
+
+export type OpencodeConfig = HostOpencodeConfig & {
+  plugin_origins?: readonly OpencodePluginOrigin[];
+};
 
 export interface UserExecutionMetadata {
   agent?: string;
