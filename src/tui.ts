@@ -10,10 +10,11 @@ import {
   type StatusOutput,
   type StatusReceiver,
 } from "./v2-status-output";
+import { loadReaderRuntime, renderV2TextReader, type ReaderRuntime, type V2ReaderHost } from "./v2-text-reader";
 import { setupV1Tui } from "./v1-tui";
 export { setupV1Tui, type V1TuiContext } from "./v1-tui";
 
-export type StatusTuiContext = {
+export type StatusTuiContext = Pick<V2ReaderHost, "renderer" | "keymap"> & {
   client: {
     rpc(definition: typeof statusOutputDefinition): {
       [Method in "claim" | "acknowledge" | "cancel"]: (
@@ -34,13 +35,13 @@ export type StatusTuiContext = {
   ui: {
     router: { current(): { type: string; sessionID?: string } };
     dialog: {
-      alert(options: { title: string; message: string }): Promise<void>;
+      show(render: () => any, onClose?: () => void): void;
       set(options: { size: "large"; centered: boolean }): void;
     };
   };
 };
 
-export function receiveStatus(context: StatusTuiContext) {
+export function receiveStatus(context: StatusTuiContext, options: { loadRuntime?: () => Promise<ReaderRuntime> } = {}) {
   const receiverID = crypto.randomUUID();
   const rpc = context.client.rpc(statusOutputDefinition);
   const controller = new AbortController();
@@ -119,22 +120,83 @@ export function receiveStatus(context: StatusTuiContext) {
             return;
           claim = undefined;
           clearTimeout(reservationTimer);
+          displaying = true;
+          let closed = false;
           try {
-            // The promise ends at dismissal, not rendering; ACK only witnesses the request.
-            const dismissed = context.ui.dialog.alert({ title: output.title, message: output.message });
-            displaying = true;
-            void dismissed
-              .catch(() => undefined)
-              .finally(() => {
-                displaying = false;
-              });
-            context.ui.dialog.set({ size: "large", centered: true });
-            await rpc.acknowledge(
-              { requestID: output.requestID, sessionID: output.sessionID, receiverID },
-              { location: context.location, signal: controller.signal },
-            );
+            let loadTimer: ReturnType<typeof setTimeout> | undefined;
+            const runtime = await Promise.race([
+              (options.loadRuntime ?? loadReaderRuntime)(),
+              new Promise<never>((_, reject) => {
+                loadTimer = setTimeout(
+                  () => reject(new Error("STM reader runtime load expired")),
+                  Math.max(1, output.expiresAt - Date.now()),
+                );
+              }),
+            ]).finally(() => clearTimeout(loadTimer));
+            // Runtime loading can outlive the output deadline or a route change.
+            const current = () =>
+              !controller.signal.aborted &&
+              statusTargets(
+                { ...output, expiresAt: Number.MAX_SAFE_INTEGER },
+                event.location,
+                context.location,
+                context.ui.router.current(),
+              );
+            if (!current() || output.expiresAt <= Date.now()) {
+              displaying = false;
+              return;
+            }
+            let ready!: () => void;
+            const rendered = new Promise<void>((resolve) => {
+              ready = resolve;
+            });
+            let timer: ReturnType<typeof setTimeout> | undefined;
+            const unavailable = new Promise<never>((_, reject) => {
+              timer = setTimeout(
+                () => {
+                  closed = true;
+                  reject(new Error("STM dialog did not render before delivery expired"));
+                },
+                Math.max(1, output.expiresAt - Date.now()),
+              );
+            });
+            try {
+              context.ui.dialog.show(
+                () => {
+                  if (closed || !current()) {
+                    ready();
+                    return null;
+                  }
+                  return renderV2TextReader(
+                    context,
+                    runtime,
+                    output.title,
+                    output.message,
+                    () => !closed && current(),
+                    ready,
+                  );
+                },
+                () => {
+                  closed = true;
+                  displaying = false;
+                  ready();
+                },
+              );
+              context.ui.dialog.set({ size: "large", centered: true });
+              await Promise.race([rendered, unavailable]);
+              if (closed || !current() || output.expiresAt <= Date.now()) return;
+              await rpc.acknowledge(
+                { requestID: output.requestID, sessionID: output.sessionID, receiverID },
+                { location: context.location, signal: controller.signal },
+              );
+            } finally {
+              clearTimeout(timer);
+            }
           } catch {
-            // Delivery failure never clears an unrelated dialog or enqueues model input.
+            closed = true;
+            displaying = false;
+            // A render failure is not acknowledged; server delivery expires honestly.
+            // Never clear a replacement/unrelated dialog or enqueue model input.
           }
         },
         { signal: controller.signal },
@@ -166,5 +228,5 @@ export function receiveStatus(context: StatusTuiContext) {
 }
 
 // The V1 loader selects tui(); the V2 loader selects setup(). Both entrypoints
-// remain native, and the existing V2 receiver contract is unchanged.
+// remain native; V2 renders custom results with the host-owned UI runtime.
 export default { id: "opencode-short-term-memory", setup: receiveStatus, tui: setupV1Tui };

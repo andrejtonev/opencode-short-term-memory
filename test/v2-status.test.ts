@@ -11,7 +11,23 @@ import { createStatusCommand, createStatusDelivery, setupStatusCommand } from ".
 import { createV2MemoryActions, createV2MemoryTools, readV2MemoryStatus } from "../src/v2-memory-tools";
 import type { V2MemoryCommandActions } from "../src/v2-memory-command";
 import { createV2Adapter, type V2Context } from "../src/v2-adapter";
-import { receiveStatus } from "../src/tui";
+import { receiveStatus as receiveProductionStatus } from "../src/tui";
+import type { ReaderRuntime } from "../src/v2-text-reader";
+const runtime: ReaderRuntime = {
+  jsx: (type, props) => ({ type, props }),
+  createSignal: (initial) => {
+    let value = initial;
+    return [
+      () => value,
+      (next) => {
+        value = next;
+      },
+    ];
+  },
+  onCleanup: () => {},
+};
+const receiveStatus = (context: Parameters<typeof receiveProductionStatus>[0]) =>
+  receiveProductionStatus(context, { loadRuntime: async () => runtime });
 import Root from "../src";
 import { memoryPathFor } from "../src/memory-utils";
 import { STATUS_MAX_CHARS, statusTargets, type StatusOffer, type StatusOutput } from "../src/v2-status-output";
@@ -548,6 +564,8 @@ function tuiContext(failSecond = false) {
   let route = { type: "session", sessionID: "session" };
   const context = {
     location,
+    renderer: { height: 45, width: 140, on() {}, off() {} },
+    keymap: { layer() {} },
     client: {
       rpc: () => ({
         events: {
@@ -573,11 +591,13 @@ function tuiContext(failSecond = false) {
     ui: {
       router: { current: () => route },
       dialog: {
-        alert: (value: unknown) => {
-          dialogs.push(value);
-          return new Promise<void>((resolve) => {
-            dismiss = resolve;
+        show: (render: () => any, onClose: () => void) => {
+          const view = render();
+          dialogs.push({
+            title: view.props.children[0].props.children[0].props.children,
+            message: view.props.children[1].props.children.props.children,
           });
+          dismiss = onClose;
         },
         set: () => undefined,
         clear: () => {
@@ -737,6 +757,61 @@ test("output routing is rechecked after claim and stale output is not displayed"
   await tui.handlers.output!({ data: { ...output, expiresAt: 0 }, location: tui.location });
   expect(tui.dialogs).toHaveLength(0);
   expect(tui.calls).toHaveLength(1);
+  off();
+});
+
+test.each(["show throws", "render throws", "dismisses before render"])(
+  "custom dialog failure is not acknowledged: %s",
+  async (failure) => {
+    const tui = tuiContext();
+    tui.context.ui.dialog.show = (render, onClose) => {
+      if (failure === "show throws") throw new Error("show failed");
+      if (failure === "dismisses before render") {
+        onClose?.();
+        return;
+      }
+      render();
+    };
+    const off = receiveProductionStatus(tui.context, {
+      loadRuntime: async () => ({
+        ...runtime,
+        jsx: () => {
+          throw new Error("render failed");
+        },
+      }),
+    });
+    const offer = { requestID: "failed-dialog", sessionID: "session", expiresAt: Date.now() + 1000 };
+    await tui.handlers.offer!({ data: offer, location: tui.location });
+    await tui.handlers.output!({
+      data: { ...offer, receiverID: tui.calls[0]!.input.receiverID, title: "STM show", message: "protected result" },
+      location: tui.location,
+    });
+    expect(tui.calls.map((call) => call.method)).toEqual(["claim"]);
+    expect(tui.cleared()).toBe(0);
+    off();
+  },
+);
+
+test("slow runtime loading rechecks session scope before showing or acknowledging a result", async () => {
+  const tui = tuiContext();
+  let loaded!: (runtime: ReaderRuntime) => void;
+  const off = receiveProductionStatus(tui.context, {
+    loadRuntime: () =>
+      new Promise((resolve) => {
+        loaded = resolve;
+      }),
+  });
+  const offer = { requestID: "slow-load", sessionID: "session", expiresAt: Date.now() + 1000 };
+  await tui.handlers.offer!({ data: offer, location: tui.location });
+  const output = tui.handlers.output!({
+    data: { ...offer, receiverID: tui.calls[0]!.input.receiverID, title: "STM show", message: "old session result" },
+    location: tui.location,
+  });
+  tui.setRoute({ type: "session", sessionID: "other" });
+  loaded(runtime);
+  await output;
+  expect(tui.dialogs).toEqual([]);
+  expect(tui.calls.map((call) => call.method)).toEqual(["claim"]);
   off();
 });
 
