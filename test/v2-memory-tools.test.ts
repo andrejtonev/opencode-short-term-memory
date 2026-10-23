@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import type { Info as ToolDefinition, ToolContext } from "@opencode/plugin/promise/tool";
 import Root from "../src/index";
 import {
@@ -246,7 +246,7 @@ describe("V2 memory tools", () => {
       ],
     });
     expect(resultText(statusResult)).toContain("authoritative sessionID: authoritative");
-    expect(resultText(await definitions[4]!.execute({}, toolContext("authoritative")))).toBe("No logs yet.");
+    expect(resultText(await definitions[4]!.execute({}, toolContext("authoritative")))).toBe(resolve(logPath()));
     expect(JSON.parse(resultText(await definitions[5]!.execute({}, toolContext("authoritative"))))).toMatchObject({
       generation: "v2",
       resolvedConfig: DEFAULT_CONFIG,
@@ -476,7 +476,7 @@ describe("V2 memory tools", () => {
     expect(await readFile(resetBoundaryPathFor(sessionID), "utf8")).toBe('{"version":1,"anchorID":"msg_new"}\n');
   });
 
-  test("logs return the actual shared 120-line tail from freshly configured storage without mutations", async () => {
+  test("logs return only the freshly configured shared file path without reading or mutating storage", async () => {
     const projectDir = join(testDir, "project");
     const configPath = join(projectDir, ".opencode", "stm.json");
     const memoryDir = join(testDir, "shared-memory");
@@ -501,9 +501,8 @@ describe("V2 memory tools", () => {
     const before = await snapshot();
     const h = updateHost(projectDir, "actual", []);
     const [, , , , logsTool] = createV2MemoryTools(h.pluginContext);
-    expect(logsTool.description).toContain("shared by all sessions");
-    expect(logsTool.description).toContain("sensitive");
-    const expected = lines.slice(-120).join("\n");
+    expect(logsTool.description).toContain("Does not read log contents");
+    const expected = logPath(memoryDir);
     expect(resultText(await logsTool.execute({}, toolContext("actual")))).toBe(expected);
     expect(resultText(await logsTool.execute({ sessionID: "other-session" }, toolContext("other-session")))).toBe(
       expected,
@@ -516,23 +515,23 @@ describe("V2 memory tools", () => {
     const nextMemoryDir = join(testDir, "next-memory");
     await writeText(configPath, JSON.stringify({ memoryDir: nextMemoryDir }));
     await writeText(logPath(nextMemoryDir), "fresh config log\n");
-    expect(resultText(await logsTool.execute({}, toolContext("actual")))).toBe("fresh config log");
+    expect(resultText(await logsTool.execute({}, toolContext("actual")))).toBe(logPath(nextMemoryDir));
     expect(await snapshot()).toEqual(before);
   });
 
-  test("missing, empty and unreadable logs use the fallback without creating memory files or directories", async () => {
+  test("missing, empty and unreadable logs return their path without reading or creating storage", async () => {
     const memoryDir = join(testDir, "missing-memory");
     await writeText(join(testDir, ".opencode", "stm.json"), JSON.stringify({ memoryDir }));
     const [, , , , logsTool] = createV2MemoryTools(context(testDir));
-    expect(resultText(await logsTool.execute({}, toolContext("actual")))).toBe("No logs yet.");
+    expect(resultText(await logsTool.execute({}, toolContext("actual")))).toBe(resolve(logPath(memoryDir)));
     await expect(stat(memoryDir)).rejects.toMatchObject({ code: "ENOENT" });
     await writeText(logPath(memoryDir), "");
-    expect(resultText(await logsTool.execute({}, toolContext("actual")))).toBe("No logs yet.");
+    expect(resultText(await logsTool.execute({}, toolContext("actual")))).toBe(resolve(logPath(memoryDir)));
     expect(await readdir(memoryDir)).toEqual(["session-memory.log"]);
     expect(await readFile(logPath(memoryDir), "utf8")).toBe("");
     await rm(logPath(memoryDir));
     await mkdir(logPath(memoryDir));
-    expect(resultText(await logsTool.execute({}, toolContext("actual")))).toBe("No logs yet.");
+    expect(resultText(await logsTool.execute({}, toolContext("actual")))).toBe(resolve(logPath(memoryDir)));
     expect(await readdir(memoryDir)).toEqual(["session-memory.log"]);
     expect(await readdir(logPath(memoryDir))).toEqual([]);
   });
@@ -1248,7 +1247,8 @@ describe("V2 memory tools", () => {
     await writeText(join(testDir, ".opencode", "stm.json"), JSON.stringify({ memoryDir }));
     const memory = "relative memory";
     await writeText(memoryPathFor(sessionID, memoryDir), memory);
-    const [, statusTool] = createV2MemoryTools(context(testDir));
+    const [, statusTool, , , logsTool] = createV2MemoryTools(context(testDir));
+    expect(resultText(await logsTool.execute({}, toolContext(sessionID)))).toBe(resolve(logPath(memoryDir)));
     const status = await statusTool.execute({}, toolContext(sessionID));
     const text = resultText(status);
     expect(text).toContain(`memoryPath: ${join(memoryDir, `session_${sessionID}.md`)}`);

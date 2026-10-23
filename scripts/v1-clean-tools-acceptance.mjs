@@ -1,6 +1,7 @@
 // Explicit native acceptance only: node this-file NATIVE_EXE INSTALLED_PACKAGE_ROOT [--live]
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, writeFile, readFile, access } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { mkdtemp, mkdir, writeFile, readFile, access, cp } from "node:fs/promises";
 import { tmpdir, homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -69,7 +70,9 @@ try {
         const clean = JSON.stringify(body.messages).includes("You are a clean short-term memory summarizer.");
         const names = (body.tools ?? []).map((tool) => tool.function?.name);
         const toolResults = (body.messages ?? []).filter((m) => m.role === "tool").map((m) => m.content);
-        evidence.providerRequests.push({ clean, names, toolResults });
+        const injectedCopySeen = JSON.stringify(body.messages).includes("NATIVE_INJECTED_COPY_SENTINEL");
+        evidence.providerRequests.push({ clean, names, toolResults, injectedCopySeen });
+        if (clean) assert.equal(injectedCopySeen, false, "Injected memory must be excluded from clean input");
         const canary = names.find((name) => name?.endsWith("guard_canary"));
         if (clean && cleanFirst) {
           cleanFirst = false;
@@ -143,6 +146,12 @@ try {
     );
     plugins.push(pathToFileURL(canaryFile).href);
   }
+  if (process.env.STM_NATIVE_SDK_SEED) {
+    for (const item of ["package.json", "package-lock.json", "node_modules"]) {
+      await cp(join(process.env.STM_NATIVE_SDK_SEED, item), join(config, item), { recursive: true, dereference: true });
+    }
+    evidence.hostSdkSeed = process.env.STM_NATIVE_SDK_SEED;
+  }
   const model = live ? "opencode/minimax-m3.1-flash-free" : "fixture/test";
   await writeFile(
     join(config, "opencode.json"),
@@ -187,6 +196,7 @@ try {
     HOME: root,
     USERPROFILE: root,
     OPENCODE_TEST_HOME: root,
+    OPENCODE_DISABLE_PROJECT_CONFIG: "true",
     XDG_CONFIG_HOME: join(root, "config"),
     XDG_CACHE_HOME: join(root, "cache"),
     XDG_STATE_HOME: join(root, "state"),
@@ -227,9 +237,34 @@ try {
       },
     ],
   });
-  await api(`/session/${primaryID}/command`, { command: "stm", arguments: "update", model });
+  await api(`/session/${primaryID}/message`, {
+    noReply: true,
+    model: { providerID: model.split("/")[0], modelID: model.split("/")[1] },
+    parts: [{ type: "text", text: "[MEMORY_SYSTEM]\n## Session Memory\nNATIVE_INJECTED_COPY_SENTINEL" }],
+  });
+  // Exercise the native event action: no legacy server command or model echo.
+  await api("/tui/publish", {
+    type: "tui.command.execute",
+    properties: {
+      command:
+        "stm.native.request:" +
+        JSON.stringify({
+          requestID: randomUUID(),
+          directory: project,
+          sessionID: primaryID,
+          action: "update",
+          createdAt: Date.now(),
+        }),
+    },
+  });
   const memoryPath = join(project, ".opencode", "memory", `session_${primaryID}.md`);
-  evidence.memory = await readFile(memoryPath, "utf8");
+  const updateDeadline = Date.now() + 90_000;
+  while (true) {
+    evidence.memory = await readFile(memoryPath, "utf8").catch(() => "");
+    if (evidence.memory.includes("stm.json") && evidence.memory.includes("### User Instructions")) break;
+    assert.ok(Date.now() < updateDeadline, "Native memory update deadline");
+    await sleep(200);
+  }
   evidence.memoryPath = memoryPath;
   assert.ok(evidence.memory.includes("stm.json") && evidence.memory.includes("### User Instructions"));
   assert.ok(await missing(marker));
@@ -239,6 +274,13 @@ try {
     const results = evidence.providerRequests.filter((r) => r.clean).flatMap((r) => r.toolResults);
     assert.equal(results.filter((s) => String(s).includes("cannot execute tools")).length, 3);
     assert.ok(results.every((s) => !String(s).includes("PRIVATE_INPUT_SENTINEL")));
+    assert.equal(
+      evidence.providerRequests.filter((r) => !r.clean).length,
+      0,
+      "Native Update must not echo through the main model",
+    );
+    evidence.nativeUpdateNoMainModelEcho = true;
+    evidence.injectionExcluded = true;
     evidence.blockedAttempts = 3;
     await api(`/session/${primaryID}/message`, {
       model: { providerID: "fixture", modelID: "test" },

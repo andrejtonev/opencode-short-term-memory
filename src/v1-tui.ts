@@ -1,14 +1,21 @@
-import { open, realpath } from "node:fs/promises";
-import { isAbsolute, resolve } from "node:path";
-import { logPath, memoryPathFor, readConfig, readConfigDiagnostics } from "./memory-utils";
+import { isAbsolute } from "node:path";
+import { openTextReader, type ReaderHost } from "./tui-text-reader";
+import {
+  decodeV1Response,
+  newV1Request,
+  V1_REQUEST_PREFIX,
+  V1_ACTION_TIMEOUT_MS,
+  type V1Action,
+  type V1Request,
+} from "./v1-native-protocol";
 
 export const V1_VIEW_MAX_CHARS = 16_384;
-const FILE_MAX_BYTES = 65_536;
-export type V1ReadAction = "show" | "logs" | "settings" | "status";
 export type V1LocalTarget = { directory: string; sessionID?: string };
-export type V1MenuOption = { title: string; value: V1ReadAction };
+export type V1MenuOption = { title: string; value: V1Action };
 /** Structural native V1 API subset, keeping the packaged TUI declaration closure portable. */
 export type V1TuiContext<Node = unknown> = {
+  renderer: ReaderHost<Node>["renderer"];
+  event: { on(type: "tui.command.execute", handler: (event: { properties: { command: string } }) => void): () => void };
   state: { ready: boolean; path: { directory: string } };
   route: { current: { name: string; params?: Record<string, unknown> } };
   command: {
@@ -18,37 +25,26 @@ export type V1TuiContext<Node = unknown> = {
   };
   lifecycle: { onDispose(callback: () => void): unknown };
   client: {
+    tui: {
+      publish(
+        input: { directory: string; body: { type: "tui.command.execute"; properties: { command: string } } },
+        options?: { signal: AbortSignal },
+      ): Promise<{ error?: unknown }>;
+    };
     path: {
       get(
         input: { directory: string },
         options?: { signal: AbortSignal },
       ): Promise<{ data?: { directory: string }; error?: unknown; request: Request }>;
     };
-    session: {
-      get(
-        input: { sessionID: string; directory: string },
-        options?: { signal: AbortSignal },
-      ): Promise<{ data?: { id: string; directory: string }; error?: unknown }>;
-    };
   };
   ui: {
     DialogAlert(input: { title: string; message: string }): Node;
+    DialogConfirm(input: { title: string; message: string; onConfirm(): void; onCancel?(): void }): Node;
     DialogSelect(input: { title: string; options: V1MenuOption[]; onSelect(option: V1MenuOption): void }): Node;
     dialog: { replace(render: () => Node, onClose?: () => void): void; setSize(size: "large"): void };
   };
 };
-
-export function isLocalV1Transport(url: string): boolean {
-  try {
-    const parsed = new URL(url);
-    return (
-      ["http:", "https:"].includes(parsed.protocol) &&
-      ["localhost", "127.0.0.1", "[::1]", "opencode.internal"].includes(parsed.hostname)
-    );
-  } catch {
-    return false;
-  }
-}
 
 function target<Node>(api: V1TuiContext<Node>): V1LocalTarget | undefined {
   const directory = api.state.path.directory;
@@ -70,139 +66,152 @@ export function limitV1View(text: string): string {
   return text.slice(0, V1_VIEW_MAX_CHARS - suffix.length) + suffix;
 }
 
-async function readBounded(path: string, tail: boolean) {
-  try {
-    const file = await open(path, "r");
-    try {
-      const info = await file.stat();
-      if (!info.isFile()) throw new Error("The requested path is not a regular file.");
-      const size = Math.min(info.size, FILE_MAX_BYTES);
-      const buffer = Buffer.alloc(size);
-      const result = await file.read(buffer, 0, size, tail ? Math.max(0, info.size - size) : 0);
-      let text = buffer.subarray(0, result.bytesRead).toString("utf8");
-      if (tail) {
-        if (info.size > size) text = text.slice(text.indexOf("\n") + 1);
-        text = text.split("\n").slice(-120).join("\n");
-      }
-      if (info.size > size) text += "\n[File read limited to 65,536 bytes.]";
-      return text || "The file is empty.";
-    } finally {
-      await file.close();
-    }
-  } catch (error) {
-    if ((error as { code?: string }).code === "ENOENT") return "No local file exists yet.";
-    throw error;
-  }
-}
-
-/** A local file view, deliberately not a claim about an attached server's disk or runtime state. */
-export async function readV1LocalView(action: V1ReadAction, location: V1LocalTarget): Promise<string> {
-  const directory = await realpath(location.directory);
-  if (location.sessionID && !/^[a-zA-Z0-9_-]+$/.test(location.sessionID)) throw new Error("Invalid session identity.");
-  const config = await readConfig(undefined, directory);
-  const memoryDir = resolve(directory, config.memoryDir);
-  const diagnostics = await readConfigDiagnostics(directory);
-  const scope = `Local files in ${directory}\nAttached remote servers may use different files. Live server counters are unavailable.\n`;
-  if (action === "settings")
-    return limitV1View(scope + JSON.stringify({ ...config, memoryDir, ...diagnostics }, null, 2));
-  if (action === "status")
-    return limitV1View(
-      scope +
-        JSON.stringify(
-          { sessionID: location.sessionID ?? null, memoryDir, logPath: logPath(memoryDir), ...diagnostics },
-          null,
-          2,
-        ),
-    );
-  if (action === "show" && !location.sessionID) return scope + "Open a session to view its local memory file.";
-  const path = action === "logs" ? logPath(memoryDir) : memoryPathFor(location.sessionID!, memoryDir);
-  const content = await readBounded(path, action === "logs");
-  const prefix = `${scope}\nFile: ${path}\n\n`;
-  if (action === "logs" && prefix.length + content.length > V1_VIEW_MAX_CHARS) {
-    const notice = "[Earlier log text omitted; inspect the file for the full contents.]\n";
-    const budget = Math.max(0, V1_VIEW_MAX_CHARS - prefix.length - notice.length);
-    return limitV1View(prefix + notice + (budget ? content.slice(-budget) : ""));
-  }
-  return limitV1View(prefix + content);
-}
-
 export async function setupV1Tui<Node>(api: V1TuiContext<Node>, _options?: unknown, _meta?: unknown): Promise<void> {
   let generation = 0;
   let disposed = false;
+  let replacing = false;
+  let closeReader = () => {};
+  let pending: { request: V1Request; generation: number } | undefined;
+  let timer: ReturnType<typeof setTimeout> | undefined;
   const controller = new AbortController();
-  api.lifecycle.onDispose(() => {
-    disposed = true;
+  const cancelView = () => {
     generation++;
-    controller.abort();
-  });
-  const alert = (title: string, message: string) => {
-    api.ui.dialog.replace(() => api.ui.DialogAlert({ title, message: limitV1View(message) }));
-    api.ui.dialog.setSize("large");
+    pending = undefined;
+    clearTimeout(timer);
+    closeReader();
   };
-  const show = async (action: V1ReadAction) => {
-    const location = target(api);
-    if (!location) return alert("STM local files", "The current project is not ready. No files were read.");
+  const alert = (title: string, message: string, location?: V1LocalTarget) => {
+    closeReader();
+    const currentGeneration = generation;
+    replacing = true;
+    try {
+      closeReader = openTextReader(
+        api,
+        title,
+        limitV1View(message),
+        () => !disposed && generation === currentGeneration && (!location || sameTarget(api, location)),
+      );
+    } finally {
+      replacing = false;
+    }
+  };
+  const off = api.event.on("tui.command.execute", (event) => {
+    const response = decodeV1Response(event.properties.command);
+    const current = pending;
+    if (
+      !response ||
+      !current ||
+      disposed ||
+      current.generation !== generation ||
+      response.requestID !== current.request.requestID ||
+      response.directory !== current.request.directory ||
+      response.sessionID !== current.request.sessionID ||
+      !sameTarget(api, current.request)
+    )
+      return;
+    pending = undefined;
+    clearTimeout(timer);
+    alert(`STM ${current.request.action}`, response.message, current.request);
+  });
+  const show = async (action: V1Action, location: V1LocalTarget, confirm?: boolean) => {
+    if (disposed || !sameTarget(api, location)) return;
+    cancelView();
+    // Dismissing the waiting dialog abandons display only; an admitted action may finish.
     api.ui.dialog.replace(
-      () => api.ui.DialogAlert({ title: `STM ${action}`, message: "Reading local files…" }),
+      () =>
+        api.ui.DialogAlert({
+          title: `STM ${action}`,
+          message: action === "update" ? "Updating memory with the memory model..." : "Running STM action...",
+        }),
       () => {
-        generation++;
+        if (!replacing) cancelView();
       },
     );
-    const request = ++generation;
+    api.ui.dialog.setSize("large");
+    const currentGeneration = ++generation;
+    const request = newV1Request(location, action, confirm);
     try {
       const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(5_000)]);
       const paths = await api.client.path.get({ directory: location.directory }, { signal });
-      if (paths.error || paths.data?.directory !== location.directory || !isLocalV1Transport(paths.request.url))
-        throw new Error(
-          "Local STM file views are unavailable for this remote or mismatched workspace. View STM files on the machine running the server. No local files were read.",
+      if (paths.error || paths.data?.directory !== location.directory)
+        throw new Error("The selected project does not match the server. No action was requested.");
+      if (disposed || currentGeneration !== generation || !sameTarget(api, location)) return;
+      // Publish travels to the attached server; never read a remote server's files locally.
+      pending = { request, generation: currentGeneration };
+      timer = setTimeout(() => {
+        if (pending?.request.requestID !== request.requestID) return;
+        pending = undefined;
+        if (disposed || currentGeneration !== generation || !sameTarget(api, location)) return;
+        alert(
+          `STM ${action}`,
+          "No STM result arrived. Verify the server plugin is enabled. An admitted action may still finish; inspect status before retrying.",
+          location,
         );
-      if (disposed || generation !== request || !sameTarget(api, location)) return;
-      if (location.sessionID) {
-        const result = await api.client.session.get(
-          { sessionID: location.sessionID, directory: location.directory },
-          { signal },
-        );
-        if (result.error || result.data?.id !== location.sessionID || result.data.directory !== location.directory)
-          throw new Error("The server session does not match the selected project. No local files were read.");
-      }
-      if (disposed || generation !== request || !sameTarget(api, location)) return;
-      const output = await readV1LocalView(action, location);
-      if (disposed || generation !== request || !sameTarget(api, location)) return;
-      alert(`STM ${action} — local files`, output);
+      }, V1_ACTION_TIMEOUT_MS);
+      const result = await api.client.tui.publish(
+        {
+          directory: location.directory,
+          body: { type: "tui.command.execute", properties: { command: V1_REQUEST_PREFIX + JSON.stringify(request) } },
+        },
+        { signal },
+      );
+      if (result.error)
+        throw new Error("The native STM request could not be delivered. An admitted action may still finish.");
     } catch (error) {
-      if (disposed || generation !== request || !sameTarget(api, location)) return;
-      alert(`STM ${action} error`, error instanceof Error ? error.message : String(error));
+      if (disposed || generation !== currentGeneration || !sameTarget(api, location)) return;
+      pending = undefined;
+      clearTimeout(timer);
+      alert(`STM ${action} error`, error instanceof Error ? error.message : String(error), location);
     }
   };
-  const menu = () => {
-    generation++;
+  const select = (action: V1Action) => {
+    const location = target(api);
+    if (!location) return alert("STM", "The current project is not ready. No action ran.");
+    if (!["reset", "setup"].includes(action)) return void show(action, location);
+    cancelView();
     api.ui.dialog.replace(() =>
-      api.ui.DialogSelect({
-        title: "STM — view local files (remote server files may differ)",
-        options: [
-          { title: "Show local memory", value: "show" },
-          { title: "Show local logs", value: "logs" },
-          { title: "Show local settings and config paths", value: "settings" },
-          { title: "Show local paths and session", value: "status" },
-        ],
-        onSelect: (option) => {
-          void show(option.value);
-        },
+      api.ui.DialogConfirm({
+        title: `STM ${action}`,
+        message:
+          action === "reset"
+            ? "Reset this session's saved memory and checkpoint? V1's next update can summarize earlier conversation again."
+            : "Create an optional project-local .opencode/stm.jsonc example? Existing STM configuration is preserved. Installation already creates the minimal config.",
+        // Host DialogConfirm clears its dialog after this callback returns.
+        onConfirm: () =>
+          queueMicrotask(() => {
+            if (!disposed && sameTarget(api, location)) void show(action, location, true);
+          }),
       }),
     );
+    api.ui.dialog.setSize("large");
   };
-  // Both pinned 1.14.25 and 1.18.35 support this API. Native slash callbacks
-  // receive no arguments: /stm opens a menu; typed server subcommands remain legacy.
-  api.command.register(() => [
-    { title: "STM local files", value: "stm.local-files", category: "Plugin", slash: { name: "stm" }, onSelect: menu },
-    ...(["show", "logs", "settings", "status"] as const).map((action) => ({
-      title: `STM ${action} — local files`,
-      value: `stm.local-${action}`,
-      category: "Plugin",
-      slash: { name: `stm-${action}` },
-      onSelect: () => {
-        void show(action);
-      },
-    })),
+  const menu = () => {
+    cancelView();
+    api.ui.dialog.replace(() =>
+      api.ui.DialogSelect({
+        title: "STM session memory",
+        options: [
+          { title: "Show memory", value: "show" },
+          { title: "Show log file path", value: "logs" },
+          { title: "Show settings and config paths", value: "settings" },
+          { title: "Show status and live counters", value: "status" },
+          { title: "Update memory (uses memory model)", value: "update" },
+          { title: "Reset saved memory...", value: "reset" },
+          { title: "Create optional example config...", value: "setup" },
+        ],
+        onSelect: (option) => select(option.value),
+      }),
+    );
+    api.ui.dialog.setSize("large");
+  };
+  const unregister = api.command.register(() => [
+    { title: "STM session memory", value: "stm.menu", category: "Plugin", slash: { name: "stm" }, onSelect: menu },
   ]);
+  api.lifecycle.onDispose(() => {
+    disposed = true;
+    cancelView();
+    controller.abort();
+    off();
+    unregister();
+  });
 }

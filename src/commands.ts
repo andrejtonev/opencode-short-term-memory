@@ -1,9 +1,9 @@
 import type { SessionMemoryConfig, RuntimeState, ConfigDiagnostics } from "./memory-utils";
+import { resolve } from "node:path";
 import type { Client } from "./types";
 import {
   createProjectExampleConfig,
   logEvent,
-  tailLog,
   ensureMemoryFile,
   readText,
   memoryPathFor,
@@ -126,13 +126,13 @@ export async function executeMemoryAction(
       2,
     );
   }
-  if (action === "logs") return (await tailLog(120, config.memoryDir)) || "No logs yet.";
+  if (action === "logs") return resolve(logPath(config.memoryDir));
   if (action === "status") return await statusText(sessionID, ctx);
   if (action === "setup") {
     if (options.confirm !== true) {
       return [
         "Setup not run: explicit confirmation is required.",
-        "Run `/stm setup confirm true` or call `stm_memory_setup` with `confirm: true`.",
+        "Select the optional example-config action in the V1 `/stm` menu, use V2 `/stm setup confirm true`, or call `stm_memory_setup` with `confirm: true`.",
         "This creates only the project-local .opencode/stm.jsonc example and never overwrites stm.jsonc or stm.json.",
       ].join("\n");
     }

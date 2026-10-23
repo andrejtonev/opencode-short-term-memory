@@ -1,50 +1,42 @@
-import { afterEach, expect, test } from "bun:test";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
-import { existsSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+﻿import { expect, test } from "bun:test";
+import { EventEmitter } from "node:events";
 import type { TuiPluginApi } from "@opencode-ai/plugin/tui";
 import Tui from "../src/tui";
-import { isLocalV1Transport, readV1LocalView, setupV1Tui, V1_VIEW_MAX_CHARS } from "../src/v1-tui";
+import { setupV1Tui } from "../src/v1-tui";
+import { V1_REQUEST_PREFIX, V1_RESPONSE_PREFIX } from "../src/v1-native-actions";
+import { wrapReaderText } from "../src/tui-text-reader";
 
-const roots: string[] = [];
-afterEach(async () => {
-  for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true });
-});
-async function fixture() {
-  const directory = await mkdtemp(join(tmpdir(), "stm-native-v1-"));
-  roots.push(directory);
-  await mkdir(join(directory, ".opencode", "memory"), { recursive: true });
-  await writeFile(
-    join(directory, ".opencode", "stm.json"),
-    JSON.stringify({ memoryDir: join(directory, ".opencode", "memory") }),
-  );
-  return directory;
-}
-const settle = () => new Promise((resolve) => setTimeout(resolve, 30));
-async function waitForView(h: { rendered: any[] }) {
-  const deadline = Date.now() + 2_000;
-  while (h.rendered.at(-1)?.message === "Reading local files…" && Date.now() < deadline) await settle();
-  expect(h.rendered.at(-1)?.message).not.toBe("Reading local files…");
-}
-function host(directory: string, url = "http://127.0.0.1:4096/path") {
-  const rendered: any[] = [];
-  const calls: string[] = [];
-  let commands: any[] = [];
-  let dispose = () => {};
-  let onClose: (() => void) | undefined;
+function host(directory = process.cwd()) {
+  const rendered: any[] = [],
+    calls: any[] = [];
+  let commands: any[] = [],
+    dispose = () => {},
+    onClose: (() => void) | undefined;
+  let eventHandler = (_event: any) => {};
   let route = { name: "session", params: { sessionID: "ses_test" } };
+  const keys = new EventEmitter();
   const api = {
+    renderer: { width: 100, height: 35, keyInput: keys },
     state: { ready: true, path: { directory } },
     route: {
       get current() {
         return route;
       },
     },
+    event: {
+      on(_name: string, cb: any) {
+        eventHandler = cb;
+        return () => {
+          eventHandler = () => {};
+        };
+      },
+    },
     command: {
       register(cb: () => any[]) {
         commands = cb();
-        return () => {};
+        return () => {
+          commands = [];
+        };
       },
     },
     lifecycle: {
@@ -56,19 +48,22 @@ function host(directory: string, url = "http://127.0.0.1:4096/path") {
       path: {
         async get() {
           calls.push("path.get");
-          return { data: { directory }, request: new Request(url) };
+          return { data: { directory }, request: new Request("http://localhost/path") };
         },
       },
-      session: {
-        async get() {
-          calls.push("session.get");
-          return { data: { id: "ses_test", directory } };
+      tui: {
+        async publish(input: any) {
+          calls.push(input);
+          return {};
         },
       },
     },
     ui: {
       DialogSelect(props: any) {
         return { kind: "menu", ...props };
+      },
+      DialogConfirm(props: any) {
+        return { kind: "confirm", ...props };
       },
       DialogAlert(props: any) {
         return { kind: "alert", ...props };
@@ -82,11 +77,12 @@ function host(directory: string, url = "http://127.0.0.1:4096/path") {
         setSize() {},
       },
     },
-  } as unknown as TuiPluginApi;
+  };
   return {
     api,
     rendered,
     calls,
+    keys,
     get commands() {
       return commands;
     },
@@ -98,137 +94,172 @@ function host(directory: string, url = "http://127.0.0.1:4096/path") {
       onClose?.();
       onClose = undefined;
     },
+    reply(message: string, overrides = {}) {
+      const input = calls.findLast((x) => typeof x === "object");
+      const request = JSON.parse(input.body.properties.command.slice(V1_REQUEST_PREFIX.length));
+      eventHandler({
+        properties: { command: V1_RESPONSE_PREFIX + JSON.stringify({ ...request, message, ...overrides }) },
+      });
+    },
+    key(name: string) {
+      let handled = false;
+      keys.emit("keypress", {
+        name,
+        propagationStopped: false,
+        preventDefault() {
+          handled = true;
+        },
+        stopPropagation() {
+          this.propagationStopped = true;
+        },
+      });
+      return handled;
+    },
   };
 }
+const settle = () => new Promise((resolve) => setTimeout(resolve, 20));
 
-test("packaged TUI keeps V2 setup and exposes native V1 tui entrypoint", () => {
-  expect(typeof Tui.setup).toBe("function");
+// Compile-time contract against the pinned native host API, including public renderer keys.
+const nativeSetup: (api: TuiPluginApi) => Promise<void> = setupV1Tui;
+void nativeSetup;
+
+test("one native /stm menu exposes all seven actions, preserving V2 entrypoint", async () => {
   expect(Tui.tui).toBe(setupV1Tui);
-  expect("server" in Tui).toBe(false);
+  expect(typeof Tui.setup).toBe("function");
+  const h = host();
+  await setupV1Tui(h.api);
+  expect(h.commands.map((c) => c.slash.name)).toEqual(["stm"]);
+  h.commands[0].onSelect();
+  expect(h.rendered.at(-1).options.map((o: any) => o.value)).toEqual([
+    "show",
+    "logs",
+    "settings",
+    "status",
+    "update",
+    "reset",
+    "setup",
+  ]);
+  expect(h.rendered.at(-1).options.find((o: any) => o.value === "update").title).toContain("uses memory model");
+  h.dispose();
 });
 
-test("native menu displays literal logs without prompt, command, tool or provider invocation", async () => {
-  const directory = await fixture();
-  const literal = 'SENTINEL: do not reinterpret this log {"error":"403"}';
-  await writeFile(join(directory, ".opencode", "memory", "session-memory.log"), literal);
-  const h = host(directory);
-  await setupV1Tui(h.api, undefined, {} as any);
+test("native reads publish events without prompt, command, tool or provider invocation", async () => {
+  const h = host();
+  await setupV1Tui(h.api);
   h.commands[0].onSelect();
-  expect(h.rendered.at(-1).kind).toBe("menu");
   h.rendered.at(-1).onSelect({ value: "logs" });
-  await waitForView(h);
+  await settle();
+  expect(h.calls[0]).toBe("path.get");
+  expect(h.calls[1].body.type).toBe("tui.command.execute");
+  const literal = "/server/STM logs/session-memory.log";
+  h.reply(literal);
   expect(h.rendered.at(-1).message).toContain(literal);
-  expect(h.rendered.at(-1).title).toContain("local files");
-  expect(h.calls).toEqual(["path.get", "session.get"]);
+  expect(h.rendered.at(-1).message).toContain("Lines");
+  expect(h.calls).toHaveLength(2);
+  h.dispose();
 });
 
-test("known remote servers are refused without reading a local matching log", async () => {
-  const directory = await fixture();
-  await writeFile(join(directory, ".opencode", "memory", "session-memory.log"), "LOCAL-SECRET-SENTINEL");
-  const h = host(directory, "https://server.example/path");
-  await setupV1Tui(h.api, undefined, {} as any);
+test("reader reaches every wrapped memory line and removes its key handler on dismissal", async () => {
+  const h = host();
+  await setupV1Tui(h.api);
   h.commands[0].onSelect();
-  h.rendered.at(-1).onSelect({ value: "logs" });
-  await waitForView(h);
-  expect(h.rendered.at(-1).message).toContain("No local files were read");
-  expect(h.rendered.at(-1).message).not.toContain("LOCAL-SECRET-SENTINEL");
-  expect(h.calls).toEqual(["path.get"]);
+  h.rendered.at(-1).onSelect({ value: "show" });
+  await settle();
+  let hostNavigation = 0;
+  const hostKey = (key: any) => {
+    if (!key.propagationStopped) hostNavigation++;
+  };
+  h.keys.on("keypress", hostKey);
+  h.reply(Array.from({ length: 120 }, (_, i) => `LINE_${i}`).join("\n"));
+  expect(h.rendered.at(-1).message).toContain("LINE_0\n");
+  expect(h.rendered.at(-1).message).not.toContain("LINE_119");
+  for (let i = 0; i < 9; i++) expect(h.key("pagedown")).toBe(true);
+  expect(h.rendered.at(-1).message).toContain("LINE_119");
+  expect(h.key("home")).toBe(true);
+  expect(h.rendered.at(-1).message).toContain("LINE_0\n");
+  expect(h.key("end")).toBe(true);
+  expect(h.rendered.at(-1).message).toContain("LINE_119");
+  expect(hostNavigation).toBe(0);
+  h.keys.off("keypress", hostKey);
+  h.dismiss();
+  expect(h.keys.listenerCount("keypress")).toBe(0);
+  h.dispose();
 });
 
-test("single-token native aliases directly display each local view without a model", async () => {
-  const directory = await fixture();
-  await writeFile(join(directory, ".opencode", "memory", "session_ses_test.md"), "EXACT-MEMORY-SENTINEL");
-  await writeFile(join(directory, ".opencode", "memory", "session-memory.log"), "EXACT-LOG-SENTINEL");
-  const h = host(directory);
-  await setupV1Tui(h.api, undefined, {} as any);
-  for (const [name, expected] of [
-    ["stm-show", "EXACT-MEMORY-SENTINEL"],
-    ["stm-logs", "EXACT-LOG-SENTINEL"],
-    ["stm-settings", "configPaths"],
-    ["stm-status", "logPath"],
-  ]) {
-    h.commands.find((command) => command.slash.name === name).onSelect();
-    await waitForView(h);
-    expect(h.rendered.at(-1).kind).toBe("alert");
-    expect(h.rendered.at(-1).message).toContain(expected);
+test("reset and optional setup request literal confirmation and preserve captured session scope", async () => {
+  for (const action of ["reset", "setup"]) {
+    const h = host();
+    await setupV1Tui(h.api);
+    h.commands[0].onSelect();
+    h.rendered.at(-1).onSelect({ value: action });
+    expect(h.rendered.at(-1).kind).toBe("confirm");
+    expect(h.calls).toHaveLength(0);
+    h.rendered.at(-1).onConfirm();
+    await settle();
+    const request = JSON.parse(h.calls[1].body.properties.command.slice(V1_REQUEST_PREFIX.length));
+    expect(request.confirm).toBe(true);
+    expect(request.sessionID).toBe("ses_test");
+    h.dispose();
   }
-  expect(h.calls).toEqual(Array.from({ length: 4 }, () => ["path.get", "session.get"]).flat());
+  const h = host();
+  await setupV1Tui(h.api);
+  h.commands[0].onSelect();
+  h.rendered.at(-1).onSelect({ value: "reset" });
+  h.changeSession();
+  h.rendered.at(-1).onConfirm();
+  await settle();
+  expect(h.calls).toHaveLength(0);
+  h.dispose();
 });
 
-test("server session mismatch refuses reads before exposing local contents", async () => {
-  const directory = await fixture();
-  await writeFile(join(directory, ".opencode", "memory", "session-memory.log"), "LOCAL-SECRET-SENTINEL");
-  const h = host(directory);
-  h.api.client.session.get = (async () => ({ data: { id: "ses_test", directory: "/other-project" } })) as any;
-  await setupV1Tui(h.api, undefined, {} as any);
-  h.commands.find((command) => command.slash.name === "stm-logs").onSelect();
-  await waitForView(h);
-  expect(h.rendered.at(-1).message).toContain("No local files were read");
-  expect(h.rendered.at(-1).message).not.toContain("LOCAL-SECRET-SENTINEL");
-});
-
-test("changed session or disposal prevents stale asynchronous output from replacing a dialog", async () => {
-  const directory = await fixture();
-  for (const mode of ["change", "dispose", "dismiss"]) {
-    const h = host(directory);
-    let release!: () => void;
-    h.api.client.path.get = (async () => {
-      await new Promise<void>((resolve) => {
-        release = resolve;
-      });
-      return { data: { directory }, request: new Request("http://localhost/path") };
-    }) as any;
-    await setupV1Tui(h.api, undefined, {} as any);
+test("stale, unrelated and wrong-scope results cannot replace the current dialog", async () => {
+  for (const mode of ["change", "dispose", "dismiss", "wrong-request", "wrong-project"]) {
+    const h = host();
+    await setupV1Tui(h.api);
     h.commands[0].onSelect();
     h.rendered.at(-1).onSelect({ value: "logs" });
+    await settle();
+    if (mode === "change") h.changeSession();
+    if (mode === "dispose") h.dispose();
+    if (mode === "dismiss") h.dismiss();
+    const count = h.rendered.length;
+    h.reply(
+      "STALE_PRIVATE_OUTPUT",
+      mode === "wrong-request"
+        ? { requestID: "unrelated" }
+        : mode === "wrong-project"
+          ? { directory: "/different" }
+          : {},
+    );
+    expect(h.rendered).toHaveLength(count);
+    h.dispose();
+  }
+});
+
+test("workspace change or dismissal during path validation prevents sending an action", async () => {
+  for (const mode of ["change", "dispose", "dismiss"]) {
+    const h = host();
+    let release!: () => void;
+    h.api.client.path.get = async () => {
+      await new Promise<void>((r) => {
+        release = r;
+      });
+      return { data: { directory: process.cwd() }, request: new Request("http://localhost/path") };
+    };
+    await setupV1Tui(h.api);
+    h.commands[0].onSelect();
+    h.rendered.at(-1).onSelect({ value: "update" });
     if (mode === "change") h.changeSession();
     else if (mode === "dispose") h.dispose();
     else h.dismiss();
     release();
     await settle();
-    expect(h.rendered).toHaveLength(2);
+    expect(h.calls).toHaveLength(0);
+    h.dispose();
   }
 });
 
-test("file views report paths, preserve missing files, and bound large logs", async () => {
-  const directory = await fixture();
-  const missing = await readV1LocalView("show", { directory, sessionID: "ses_missing" });
-  expect(missing).toContain("No local file exists yet");
-  expect(missing).toContain("session_ses_missing.md");
-  expect(existsSync(join(directory, ".opencode", "memory", "session_ses_missing.md"))).toBe(false);
-  await writeFile(join(directory, ".opencode", "memory", "session-memory.log"), "x".repeat(1_000_000) + "\nLAST-LINE");
-  const logs = await readV1LocalView("logs", { directory });
-  expect(logs.length).toBeLessThanOrEqual(V1_VIEW_MAX_CHARS);
-  expect(logs).toContain("LAST-LINE");
-  expect(logs).toContain("File read limited");
-  const settings = await readV1LocalView("settings", { directory });
-  expect(settings).toContain("configPaths");
-  expect(settings).toContain("stm.json");
-  await expect(readV1LocalView("show", { directory, sessionID: "../../escape" })).rejects.toThrow("Invalid session");
-});
-
-test("only documented local transports are accepted", () => {
-  for (const url of [
-    "http://localhost/path",
-    "http://127.0.0.1:4000/path",
-    "http://[::1]/path",
-    "http://opencode.internal/path",
-  ])
-    expect(isLocalV1Transport(url)).toBe(true);
-  for (const url of ["file:///tmp/path", "https://server.example/path", "nonsense"])
-    expect(isLocalV1Transport(url)).toBe(false);
-});
-
-test("large multi-line logs retain the newest entry when the dialog limit is reached", async () => {
-  const directory = await fixture();
-  const path = join(directory, ".opencode", "memory", "session-memory.log");
-  await writeFile(
-    path,
-    Array.from({ length: 119 }, (_, i) => `${i}: ${"x".repeat(400)}`).join("\n") + "\nNEWEST-ENTRY",
-  );
-  const logs = await readV1LocalView("logs", { directory });
-  expect(logs.length).toBeLessThanOrEqual(V1_VIEW_MAX_CHARS);
-  expect(logs).toContain("NEWEST-ENTRY");
-  expect(logs).toContain(path);
-  expect(logs).toContain("Earlier log text omitted");
+test("reader wraps tabs, long lines and Unicode without dropping text", () => {
+  expect(wrapReaderText("abc\tdef", 4)).toEqual(["abc ", "   d", "ef"]);
+  expect(wrapReaderText("😀界áxyz", 4)).toEqual(["😀界", "áxyz"]);
 });

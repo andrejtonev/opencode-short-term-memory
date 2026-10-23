@@ -57,7 +57,7 @@ export function createTools(ctx: CreateToolsContext): Record<string, unknown> {
     }),
     stm_memory_logs: tool({
       description:
-        "Read recent short-term memory plugin logs. Logs can contain sensitive operational context; do not disclose their contents unless necessary.",
+        "Return the absolute path to the shared STM log file on the OpenCode server. Does not read log contents.",
       args: {},
       async execute(_args: Record<string, never>, toolCtx: ToolContext) {
         return await executeAction("logs", toolCtx);

@@ -2407,12 +2407,7 @@ workflow: try {
   assert.ok(exactSkip, "Manual update did not produce an exact session-scoped skip row for logs");
   const renderedLogs = await (async () => {
     const before = readFileSync(productionLogPath, "utf8").split(/\r?\n/).filter(Boolean).length;
-    const screen = await keyboardCommand(
-      "/stm logs",
-      "STM logs",
-      ["event", JSON.stringify(exactSkip)],
-      "keyboard-logs",
-    );
+    const screen = await keyboardCommand("/stm logs", "STM logs", [productionLogPath], "keyboard-logs");
     return { before, rows: readFileSync(productionLogPath, "utf8").split(/\r?\n/).filter(Boolean), screen };
   })();
   manualUsage.results.logs = {
@@ -3740,8 +3735,7 @@ workflow: try {
         }
         case "logs": {
           assert.ok(before.log.trim().length > 0, "RC logs case requires a populated shared log before snapshot");
-          const expectedTail = before.log.split(/\r?\n/).filter(Boolean).slice(-120).join("\n");
-          assert.equal(result, expectedTail);
+          assert.equal(result, productionLogPath);
           break;
         }
         case "setup-refused":

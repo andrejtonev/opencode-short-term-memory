@@ -1,3 +1,4 @@
+import { resolve } from "node:path";
 import type { Info as ToolDefinition, ToolContext } from "@opencode/plugin/promise/tool";
 import {
   checkpointPathFor,
@@ -10,7 +11,7 @@ import {
   readText,
   resetBoundaryPathFor,
   safeSessionID,
-  tailLog,
+  logPath,
   type SessionMemoryConfig,
 } from "./memory-utils";
 import { readLastProcessedMessageID } from "./message-collector";
@@ -279,7 +280,7 @@ export function createV2MemoryActions(pluginContext: V2Context, lifetimeSignal?:
       resetMemory(sessionID, input.confirm, pluginContext, directory, input.messageID),
     logs: async (_sessionID: string) => {
       const config = await readConfig(undefined, directory);
-      return (await tailLog(120, config.memoryDir)) || "No logs yet.";
+      return resolve(logPath(config.memoryDir));
     },
     settings: async (_sessionID: string) => {
       const config = await readConfig(undefined, directory);
@@ -392,7 +393,7 @@ export function createV2MemoryTools(
   const logsTool = {
     name: "stm_memory_logs",
     description:
-      "Read the latest 120 log lines shared by all sessions using the configured memory directory, not filtered to this session. Logs may contain sensitive context; review before sharing.",
+      "Return the absolute path to the shared STM log file on the OpenCode server. Does not read log contents.",
     input: EMPTY_INPUT,
     options: { codemode: false },
     execute: async (_input: Record<string, never>) => textResult(await actions.logs("")),
