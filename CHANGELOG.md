@@ -7,9 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [1.4.0-rc.8] - 2026-10-22
+## [1.4.0-rc.8] - 2026-10-23
 
-Local prerelease preparation only; no npm publication or Git push. RC7 remains the registry's `rc` release. Exact RC8 archive qualification is recorded separately in [RC Readiness](docs/RC-READINESS.md).
+Published under `rc` on 2026-10-23 from release commit `7d33df7e252d11a7517d9a7ec87f627d525be40a` and tag `v1.4.0-rc.8`, after local preparation on 2026-10-22. The registry tarball matched the frozen qualified archive byte for byte, with `latest` left at `1.3.0`. Exact RC8 archive qualification is recorded separately in [RC Readiness](docs/RC-READINESS.md).
 
 ### Fixed
 

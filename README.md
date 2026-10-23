@@ -1,6 +1,6 @@
 # OpenCode Short-Term Memory Plugin
 
-Automatically summarizes conversation context into structured session memory and supports injecting it back into the system prompt — aiming to preserve user instructions, project context, decisions, and active references across long chats and compactions, without guaranteeing semantic preservation. This package is the local testing candidate `1.4.0-rc.8`; it has not been published. Update and injection timing differ between OpenCode generations; V2 system injection is opt-in and disabled by default, independently of automatic memory updates.
+Automatically summarizes conversation context into structured session memory and supports injecting it back into the system prompt — aiming to preserve user instructions, project context, decisions, and active references across long chats and compactions, without guaranteeing semantic preservation. The published testing release is `1.4.0-rc.8`, available under the npm `rc` tag. Update and injection timing differ between OpenCode generations; V2 system injection is opt-in and disabled by default, independently of automatic memory updates.
 
 > **Unofficial plugin:** This is an independent project and is not affiliated with, endorsed by, or maintained by the opencode team.
 
@@ -8,7 +8,7 @@ Automatically summarizes conversation context into structured session memory and
 
 See the [feature matrix](https://github.com/andrejtonev/opencode-short-term-memory/blob/dev/docs/FEATURE-MATRIX.md) for the repository's feature, configuration and validation comparison, including historical evidence and its version scope. This feature-matrix document is not included in the npm package; this README is shipped.
 
-- **Version scope:** **`1.4.0-rc.8` is a local, unpublished candidate.** Registry inspection on 2026-10-22 still reports `rc: 1.4.0-rc.7` and `latest: 1.3.0`. Provider APIs remain pinned to V1 plugin/SDK `1.14.25` and V2 plugin `2.0.8`. Exact archive and native qualification are recorded separately in repository [RC Readiness](https://github.com/andrejtonev/opencode-short-term-memory/blob/dev/docs/RC-READINESS.md), which is not included in the npm package.
+- **Version scope:** **`1.4.0-rc.8` was published on 2026-10-23 under `rc`**, with `latest` left at `1.3.0`. The registry tarball matched the qualified frozen archive byte for byte. Provider APIs remain pinned to V1 plugin/SDK `1.14.25` and V2 plugin `2.0.8`. Exact archive and native qualification are recorded separately in repository [RC Readiness](https://github.com/andrejtonev/opencode-short-term-memory/blob/dev/docs/RC-READINESS.md), which is not included in the npm package.
 - **V1:** Provides `/stm` commands and eight tools: seven `stm_memory_*` tools plus legacy `short_term_memory`. Uses idle/pre-compaction updates, periodic injection and a separate side session in clean mode, as described below.
 - **RC6 V1 fixes:** Filters the plugin's own generated prompt messages and assistant replies to those prompts from update input. Automatic unchanged-input fingerprint suppression, real-user busy-turn idle waiting and internal temporary-session skipping remain in place; these process-local fences do not ban manual retries.
 - **RC8 fixes:** V1 clean summaries keep tool definitions visible for OpenCode free-model access while rejecting tool execution before it runs. First activation creates `stm.json` in the native installation scope, and read dialogs show local files without model output. Provider failures remain visible and failed manual updates no longer display old memory as refreshed. RC7 lifecycle fencing, cleanup recovery, idle deferral and native V2 retry bounds are retained. Recorded V2 active-summary tool requests and long-log dialog visibility failures remain unresolved.
@@ -30,7 +30,7 @@ See the [feature matrix](https://github.com/andrejtonev/opencode-short-term-memo
 
 ```json
 {
-  "plugins": ["@atonev/opencode-short-term-memory@1.4.0-rc.7"]
+  "plugins": ["@atonev/opencode-short-term-memory@1.4.0-rc.8"]
 }
 ```
 
@@ -44,22 +44,22 @@ The packaged plugin supplies separate server, `/tui` and `/rpc` exports resolved
 
 ### V2
 
-The [pinned authoritative CLI specification](https://github.com/anomalyco/opencode/blob/2670273ff17da96f85c5826ced57aa1b368754fa/packages/cli/src/commands/commands.ts) defines `plugin add <package>` as installing a plugin and adding it to global configuration, with no `--global` flag. RC8 remains local; the registry installation below installs RC7:
+The [pinned authoritative CLI specification](https://github.com/anomalyco/opencode/blob/2670273ff17da96f85c5826ced57aa1b368754fa/packages/cli/src/commands/commands.ts) defines `plugin add <package>` as installing a plugin and adding it to global configuration, with no `--global` flag. Install the published RC8 release explicitly:
 
 ```bash
-opencode plugin add '@atonev/opencode-short-term-memory@1.4.0-rc.7'
+opencode plugin add '@atonev/opencode-short-term-memory@1.4.0-rc.8'
 ```
 
-Verify both server and TUI configuration against [V2 TUI loading](#v1--v2-support) above, preserving existing entries. Installing published RC7 does not include the RC8 fixes.
+Verify both server and TUI configuration against [V2 TUI loading](#v1--v2-support) above, preserving existing entries. Keep their package versions aligned.
 
 ### V1
 
-The [V1 CLI documentation](https://opencode.ai/docs/cli/#plugin) and hosts `1.14.25`, `1.18.23`, and `1.18.35` support a local install by default and `--global` for a user-wide install. RC8 remains local; these registry commands install RC7. Run the local command from the project:
+The [V1 CLI documentation](https://opencode.ai/docs/cli/#plugin) and hosts `1.14.25`, `1.18.23`, and `1.18.35` support a local install by default and `--global` for a user-wide install. Run the local command from the project:
 
 ```bash
-opencode plugin '@atonev/opencode-short-term-memory@1.4.0-rc.7' --force
+opencode plugin '@atonev/opencode-short-term-memory@1.4.0-rc.8' --force
 # Or install globally:
-opencode plugin '@atonev/opencode-short-term-memory@1.4.0-rc.7' --global --force
+opencode plugin '@atonev/opencode-short-term-memory@1.4.0-rc.8' --global --force
 ```
 
 Local installation writes OpenCode configuration under `<git-worktree>/.opencode/`, or `<directory>/.opencode/` outside Git. Global installation uses OpenCode's global configuration directory, normally `~/.config/opencode/`, respecting XDG configuration. `--force` replaces the plugin version; it does not reset STM memory or overwrite STM configuration. V2's `plugin add` syntax is a different command.
@@ -68,7 +68,7 @@ For manual V1 configuration, add the published prerelease to the singular `plugi
 
 ```json
 {
-  "plugin": ["@atonev/opencode-short-term-memory@1.4.0-rc.7"]
+  "plugin": ["@atonev/opencode-short-term-memory@1.4.0-rc.8"]
 }
 ```
 

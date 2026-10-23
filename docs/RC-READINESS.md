@@ -1,10 +1,12 @@
 # RC Readiness
 
-## Latest Status: 2026-10-22, Local RC8 Qualified
+## Latest Status: 2026-10-23, RC8 Published
 
-`1.4.0-rc.8` is a local, unpublished testing candidate. The user requested local
-preparation only: no npm publication or Git push. Live registry inspection still
-reports `rc: 1.4.0-rc.7`, `latest: 1.3.0`, and RC8 is absent.
+`1.4.0-rc.8` was published under `rc` on 2026-10-23 from release commit
+`7d33df7e252d11a7517d9a7ec87f627d525be40a` and tag `v1.4.0-rc.8`, both pushed
+to GitHub. Live registry inspection confirms `rc: 1.4.0-rc.8` and
+`latest: 1.3.0`. The downloaded registry archive matched the frozen qualified
+tarball byte for byte; SHA-256, npm SHA-1 and SHA-512 integrity all matched.
 
 Reviewed implementation commits:
 
@@ -29,9 +31,11 @@ Frozen archive:
 SHA-256: `bf3b075276d3df560b9039918cc1e2240c6d6a7c2465ae17c20315289c1a5979`.
 208,989 bytes, 78 regular packaged files, Windows read-only attribute set.
 Manifest: `1.4.0-rc.8`, public access, `rc` dist-tag. Archive source, declarations,
-README and manifest match this release checkout; `d70e7f8` in the filename
+README and manifest match the release tag; `d70e7f8` in the filename
 identifies the implementation base before the RC8 version/documentation changes.
-The local annotated release tag is `v1.4.0-rc.8`.
+The annotated release tag is `v1.4.0-rc.8`. The frozen package retains its original
+local-preparation README; this repository's later documentation records publication
+and current RC8 installation commands without changing published archive bytes.
 
 | Gate                      | RC8 result | Scope                                                                                                                                                                        |
 | ------------------------- | ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -42,12 +46,12 @@ The local annotated release tag is `v1.4.0-rc.8`.
 | Native V1 clean safety    | PASS       | OpenCode 1.18.35, exact installed archive; forced built-in read/write and plugin tool rejected before execution; valid memory saved; primary-session tool control succeeded. |
 | Native MiniMax Free       | PASS       | Exact installed archive and authenticated Console account; `opencode/minimax-m3.1-flash-free` created memory through native `/stm update`, without an environment override.  |
 | Native V1 read dialog     | PASS       | Exact installed archive, OpenCode 1.18.35 real PTY; `/stm-logs` displayed a literal sentinel, zero session messages, zero provider requests.                                 |
-| Publication               | NOT RUN    | Local preparation only; npm RC7 and stable tags unchanged.                                                                                                                   |
+| Publication               | PASS       | npm `rc` is `1.4.0-rc.8`; `latest` remains `1.3.0`; registry archive matches the qualified frozen bytes.                                                                     |
 
 Durable local receipts are under `.opencode/rc8/`: `artifact.json`,
 `consumer-evidence.json`, `forced-tools-evidence.json`,
 `live-minimax-evidence.json`, `live-minimax-memory.md`, and
-`native-v1-tui-evidence.json`. Native tests used the production installation at
+`native-v1-tui-evidence.json`, and `publication.json`. Native tests used the production installation at
 `C:/Users/Andreja/AppData/Local/Temp/stm-package-acceptance-aWzUvd/runtime/node_modules/@atonev/opencode-short-term-memory`,
 not checkout imports. The normal dependency installation blocked one postinstall;
 the blocked package identity remains unestablished by Bun's lockfile diagnostic.
