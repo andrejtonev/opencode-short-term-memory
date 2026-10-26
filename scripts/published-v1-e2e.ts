@@ -498,6 +498,12 @@ workflow: try {
       scope: "Installed unpublished bytes, not registry-published acceptance",
     };
   }
+  // This retained workflow invokes the historical server /stm command. Native
+  // menu releases must use the maintained V1 menu runner, not this contract.
+  assert.ok(
+    /^1\.4\.0-rc\.[1-8]$/.test(pluginVersion),
+    "Historical V1 server-command workflow supports RC1-RC8 only. Use scripts/v1-native-menu-acceptance.cjs for current native menu releases.",
+  );
   evidence.hostRegistry = await registry("opencode-ai", hostVersion);
   if (candidateArg === undefined)
     evidence.pluginRegistry = await registry("@atonev/opencode-short-term-memory", pluginVersion);

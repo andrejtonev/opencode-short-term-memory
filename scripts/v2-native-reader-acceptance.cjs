@@ -7,6 +7,7 @@ const http = require("node:http");
 const crypto = require("node:crypto");
 const { pathToFileURL } = require("node:url");
 const { stripVTControlCharacters } = require("node:util");
+const { cleanupOwnedChildren, applyCleanupVerdict, closeOwnedServer } = require("./windows-owned-process.cjs");
 if (process.platform !== "win32") throw new Error("This harness requires Windows ConPTY.");
 if (process.argv.length !== 4) throw new Error("Supply host directory and development archive.");
 const repo = process.cwd();
@@ -53,6 +54,7 @@ const evidence = {
 let host,
   terminal,
   mock,
+  hostURL,
   hostLog = "",
   terminalLog = "";
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -134,6 +136,7 @@ async function main() {
   await wait(
     () => {
       url = hostLog.match(/server listening on (http:\/\/127\.0\.0\.1:\d+)/)?.[1];
+      hostURL = url;
       return url;
     },
     "host listener",
@@ -257,14 +260,10 @@ async function main() {
     evidence.verdict = "FAIL";
     evidence.error = String(error);
   } finally {
-    if (terminal) terminal.stdin.write(JSON.stringify({ kill: true }) + "\n");
-    for (const child of [terminal, host])
-      if (child?.pid) {
-        try {
-          cp.execFileSync("taskkill", ["/PID", String(child.pid), "/T", "/F"], { windowsHide: true, stdio: "ignore" });
-        } catch {}
-      }
-    mock?.close();
+    const cleanup = await cleanupOwnedChildren([terminal, host], { endpoints: hostURL ? [hostURL] : [] });
+    cleanup.mock = await closeOwnedServer(mock);
+    cleanup.complete &&= cleanup.mock.closed;
+    applyCleanupVerdict(evidence, cleanup);
     fs.writeFileSync(path.join(root, "evidence.json"), JSON.stringify(evidence, null, 2));
     console.log(JSON.stringify(evidence));
     process.exit(evidence.verdict === "PASS" ? 0 : 1);

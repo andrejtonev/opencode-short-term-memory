@@ -36,7 +36,7 @@ export const SETUP_EXPECTED_FIELDS = {
   debug: false,
 };
 export const SETUP_CAVEAT =
-  "Shared example: see stm_memory_settings for effective V2 settings; configured memoryModel overrides are not applied in V2.";
+  "Shared example: see stm_memory_settings for effective V2 settings; explicit memoryModel overrides apply to clean mode.";
 export function expectedSetupResult(index: number, configPath: string): string {
   if (index === 0) return "Refused to create a project example config: set confirm to literal true to confirm setup.";
   const first =

@@ -589,7 +589,7 @@ async function main() {
       '"inactiveSettings":',
       '"collapseAssistantBursts"',
     ]);
-    await connected("logs", "logs-empty", ["No logs yet."]);
+    await connected("logs", "logs-empty", [join(memoryDir, "session-memory.log")]);
     const shown = await connected(
       "show",
       "show-created",
@@ -733,7 +733,7 @@ async function main() {
     const log = await readFile(join(memoryDir, "session-memory.log"), "utf8");
     if (!log.includes("v2_memory_update_skipped") || !log.includes("no_assistant_in_delta"))
       throw new Error("Skip log missing");
-    await connected("logs", "logs-persisted", ["v2_memory_update_skipped", "no_assistant_in_delta"]);
+    await connected("logs", "logs-persisted", [join(memoryDir, "session-memory.log")]);
     await terminal("kill-server");
     tuiStarted = false;
     evidence.nativeConnectedCount = coverage.filter((row) => row.rendered).length;

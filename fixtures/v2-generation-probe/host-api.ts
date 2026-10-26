@@ -48,13 +48,51 @@ export interface ExternalSessionObservations {
 export function bounded<T>(
   operation: (signal: AbortSignal) => Promise<T>,
   timeoutMs = PROBE_HOST_TIMEOUT_MS,
+  onLateSuccess?: (value: T) => Promise<unknown>,
 ): Promise<T> {
-  return operation(AbortSignal.timeout(timeoutMs));
+  const controller = new AbortController();
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    let expired = false;
+    const timer = setTimeout(() => {
+      settled = true;
+      expired = true;
+      controller.abort();
+      reject(new Error(`Probe operation timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+    Promise.resolve()
+      .then(() => operation(controller.signal))
+      .then(
+        (value) => {
+          if (settled) {
+            if (expired && onLateSuccess) {
+              // A failed startup can still create a service later. Retain ownership of that completion.
+              Promise.resolve()
+                .then(() => onLateSuccess(value))
+                .catch(() => {
+                  console.error("Late probe service cleanup failed; lifecycle remains incomplete.");
+                });
+            }
+            return;
+          }
+          settled = true;
+          clearTimeout(timer);
+          resolve(value);
+        },
+        (error) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          reject(error);
+        },
+      );
+  });
 }
 
 export function isolatedServiceCommand(
   env: IsolatedServiceOptions["env"],
   command: readonly string[] = [PROBE_SERVICE_BINARY, "serve", "--service"],
+  cwd?: string,
 ): string[] {
   const assignments = Object.entries(env).map(([key, value]) => {
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
@@ -63,33 +101,48 @@ export function isolatedServiceCommand(
     return `${key}=${value}`;
   });
   // Service.ensure merges parent variables; clear them at the actual server exec boundary.
-  if (process.platform === "win32") {
+  if (process.platform === "win32" || cwd !== undefined) {
     const childEnv = {
       ...env,
-      PATH: `${process.env.SystemRoot}\\System32`,
-      SystemRoot: process.env.SystemRoot ?? "C:\\Windows",
+      PATH: process.platform === "win32" ? `${process.env.SystemRoot}\\System32` : "/usr/bin:/bin",
+      ...(process.platform === "win32" ? { SystemRoot: process.env.SystemRoot ?? "C:\\Windows" } : {}),
     };
-    const wrapper =
-      "const p=JSON.parse(process.argv.at(-1));const c=require('node:child_process').spawn(p.command[0],p.command.slice(1),{env:p.env,stdio:'inherit',windowsHide:true});c.on('error',()=>process.exit(1));c.on('exit',code=>process.exit(code??1));";
-    return [process.execPath, "-e", wrapper, "--", JSON.stringify({ command, env: childEnv })];
+    const wrapper = `
+      const p=JSON.parse(process.argv.at(-1));
+      const c=require('node:child_process').spawn(p.command[0],p.command.slice(1),{env:p.env,cwd:p.cwd,stdio:'inherit',windowsHide:true});
+      let exited=false;
+      let forwarded;
+      for(const signal of ['SIGTERM','SIGINT']) process.on(signal,()=>{
+        forwarded=signal;
+        if(!exited) c.kill(signal);
+      });
+      process.on('exit',()=>{if(!exited) c.kill(forwarded??'SIGTERM');});
+      c.on('error',()=>{exited=true;process.exit(1);});
+      c.on('exit',code=>{exited=true;process.exit(code??(forwarded==='SIGINT'?130:143));});
+    `;
+    return [process.execPath, "-e", wrapper, "--", JSON.stringify({ command, env: childEnv, cwd })];
   }
   return ["/usr/bin/env", "-i", ...assignments, "PATH=/usr/bin:/bin", ...command];
 }
 
-export async function startIsolatedService(options: IsolatedServiceOptions): Promise<IsolatedServiceState> {
-  const previousCwd = process.cwd();
-  let endpoint: Endpoint;
-  process.chdir(options.cwd);
-  try {
-    endpoint = await Service.ensure({
-      file: options.serviceFile,
-      version: PROBE_SERVICE_VERSION,
-      command: isolatedServiceCommand(options.env),
-      env: options.env,
-    });
-  } finally {
-    process.chdir(previousCwd);
-  }
+type ServiceLifecycle = Pick<typeof Service, "ensure" | "stop">;
+
+export async function startIsolatedService(
+  options: IsolatedServiceOptions,
+  timeoutMs = PROBE_HOST_TIMEOUT_MS,
+  lifecycle: ServiceLifecycle = Service,
+): Promise<IsolatedServiceState> {
+  const endpoint = await bounded(
+    () =>
+      lifecycle.ensure({
+        file: options.serviceFile,
+        version: PROBE_SERVICE_VERSION,
+        command: isolatedServiceCommand(options.env, undefined, options.cwd),
+        env: options.env,
+      }),
+    timeoutMs,
+    () => stopIsolatedService({ options }, timeoutMs, lifecycle),
+  );
 
   const client = OpenCode.make({
     baseUrl: endpoint.url,
@@ -98,8 +151,12 @@ export async function startIsolatedService(options: IsolatedServiceOptions): Pro
   return { options, endpoint, client };
 }
 
-export function stopIsolatedService(service: Pick<IsolatedServiceState, "options">): Promise<void> {
-  return Service.stop({ file: service.options.serviceFile, pty: "clear" });
+export function stopIsolatedService(
+  service: Pick<IsolatedServiceState, "options">,
+  timeoutMs = PROBE_HOST_TIMEOUT_MS,
+  lifecycle: ServiceLifecycle = Service,
+): Promise<void> {
+  return bounded(() => lifecycle.stop({ file: service.options.serviceFile, pty: "clear" }), timeoutMs);
 }
 
 export function createModeledSession(

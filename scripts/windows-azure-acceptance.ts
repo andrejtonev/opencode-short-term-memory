@@ -8,6 +8,7 @@ import { pathToFileURL, fileURLToPath } from "node:url";
 import { createHash, randomUUID } from "node:crypto";
 import { keyboardRequestsByTurn } from "./keyboard-turn-requests";
 import { requestJournal } from "./request-evidence";
+import { cleanupOwnedChildren, applyCleanupVerdict } from "./windows-owned-process.cjs";
 // Native Windows live acceptance. See docs/WINDOWS-AZURE-ACCEPTANCE.md.
 const [generation = "v1", model = "gpt-6-luna", candidate, hostsDirectory, v1Executable] = process.argv.slice(2);
 assert.equal(process.platform, "win32", "This runner requires Windows ConPTY");
@@ -1178,16 +1179,11 @@ try {
     join(root, "history.json"),
     redact(JSON.stringify(sessionID ? await history().catch(() => []) : [], null, 2)),
   );
-  if (terminal) {
-    terminal.stdin.write(JSON.stringify({ kill: true }) + "\n");
-    await wait(() => terminal.exitCode !== null, "TUI shutdown", 5000).catch(() => terminal.kill());
-  }
-  if (host) {
-    host.kill();
-    await wait(() => host.exitCode !== null || host.signalCode !== null, "host shutdown", 5000).catch(() => {});
-  }
+  const cleanup = await cleanupOwnedChildren([terminal, host], { endpoints: url ? [url] : [] });
+  applyCleanupVerdict(result, cleanup);
+  if (result.verdict !== "PASS") process.exitCode = 1;
   proxy.stop(true);
-  result.hostExited = !host || host.exitCode !== null || host.signalCode !== null;
+  result.hostExited = cleanup.childrenExited;
   result.requests = requests.length;
   result.providerAlias = providerID;
   result.packageCacheSeed = cacheSeed ?? null;

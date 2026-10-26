@@ -1,6 +1,7 @@
 import { mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { serializeFailure, serializeEvidence } from "./diagnostic-redaction.js";
 
 import {
   evaluateProbeMode,
@@ -64,16 +65,8 @@ interface RunResults {
   readonly directory: string;
 }
 
-function describeError(error: unknown): string {
-  if (error instanceof Error) return `${error.name}: ${error.message}`;
-  if (error === undefined) return "undefined";
-  if (error === null) return "null";
-  try {
-    const serialized = JSON.stringify(error);
-    return serialized === undefined ? String(error) : serialized;
-  } catch {
-    return String(error);
-  }
+function describeError(error: unknown, secrets: readonly string[] = []): string {
+  return JSON.stringify(serializeFailure(error, secrets));
 }
 
 async function requireDirectory(path: string): Promise<void> {
@@ -202,8 +195,8 @@ function compactObservation(observation: ExternalSessionObservations | undefined
   return { context, messages, log };
 }
 
-async function writePrettyJson(path: string, value: unknown): Promise<void> {
-  await writeFile(path, `${JSON.stringify(value, null, 2)}\n`);
+async function writePrettyJson(path: string, value: unknown, secrets: readonly string[] = []): Promise<void> {
+  await writeFile(path, `${serializeEvidence(value, secrets)}\n`);
 }
 
 function evaluationInput(
@@ -253,7 +246,7 @@ function evaluationInput(
 }
 
 async function stopService(options: IsolatedServiceOptions): Promise<void> {
-  await bounded(() => stopIsolatedService({ options }), SHUTDOWN_TIMEOUT_MS);
+  await stopIsolatedService({ options }, SHUTDOWN_TIMEOUT_MS);
 }
 
 async function runMode(mode: ProbeMode, runResults: RunResults): Promise<ModeRunResult> {
@@ -266,6 +259,10 @@ async function runMode(mode: ProbeMode, runResults: RunResults): Promise<ModeRun
     env: isolatedEnvironment(paths, runId, mode),
   };
   let service: IsolatedServiceState | undefined;
+  const secrets = (): readonly string[] => {
+    const auth = service?.endpoint.auth;
+    return auth ? [auth.password, Buffer.from(`${auth.username}:${auth.password}`).toString("base64")] : [];
+  };
   let before: ExternalSessionObservations | undefined;
   let after: ExternalSessionObservations | undefined;
   let settledAfter: ExternalSessionObservations | undefined;
@@ -280,7 +277,7 @@ async function runMode(mode: ProbeMode, runResults: RunResults): Promise<ModeRun
   const failures: string[] = [];
 
   try {
-    service = await bounded(() => startIsolatedService(options));
+    service = await startIsolatedService(options);
     const client = service.client;
     const session = await createModeledSession(client, paths.project);
 
@@ -299,7 +296,7 @@ async function runMode(mode: ProbeMode, runResults: RunResults): Promise<ModeRun
             error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError")
               ? "timeout"
               : "failure",
-          error: describeError(error),
+          error: describeError(error, secrets()),
         };
       }
       await bounded((signal) => client.session.wait({ sessionID: session.id }, { signal }));
@@ -325,13 +322,13 @@ async function runMode(mode: ProbeMode, runResults: RunResults): Promise<ModeRun
       }
     }
   } catch (error) {
-    operationFailures.push(describeError(error));
+    operationFailures.push(describeError(error, secrets()));
     failures.push(`operation: ${operationFailures.at(-1)}`);
   } finally {
     try {
       await stopService(service?.options ?? options);
     } catch (error) {
-      shutdownFailures.push(describeError(error));
+      shutdownFailures.push(describeError(error, secrets()));
       failures.push(`shutdown: ${shutdownFailures.at(-1)}`);
     }
   }
@@ -345,35 +342,39 @@ async function runMode(mode: ProbeMode, runResults: RunResults): Promise<ModeRun
     );
     failures.push(...evaluation.failures);
   } catch (error) {
-    failures.push(`evidence: ${describeError(error)}`);
+    failures.push(`evidence: ${describeError(error, secrets())}`);
   }
 
   try {
     const passed = failures.length === 0 && evaluation?.passed === true;
-    await writePrettyJson(evidenceFile, {
-      runId,
-      mode,
-      verdict: passed ? "PASS" : "FAIL",
-      sandbox: { path: paths.sandbox, disposition: passed ? "removed" : "retained" },
-      recordCount: records.length,
-      evaluator: evaluation ?? null,
-      harnessFailures: { operation: operationFailures, shutdown: shutdownFailures },
-      hostGenerateCall: hostEvidence,
-      externalHistory: {
-        before: compactObservation(before),
-        after: compactObservation(after),
-        settledAfter: compactObservation(settledAfter),
+    await writePrettyJson(
+      evidenceFile,
+      {
+        runId,
+        mode,
+        verdict: passed ? "PASS" : "FAIL",
+        sandbox: { path: paths.sandbox, disposition: passed ? "removed" : "retained" },
+        recordCount: records.length,
+        evaluator: evaluation ?? null,
+        harnessFailures: { operation: operationFailures, shutdown: shutdownFailures },
+        hostGenerateCall: hostEvidence,
+        externalHistory: {
+          before: compactObservation(before),
+          after: compactObservation(after),
+          settledAfter: compactObservation(settledAfter),
+        },
+        observedDurableEventTypes: evaluation?.evidence.durableEvents ?? [],
+        expectation: {
+          installedVersion: PROBE_SERVICE_VERSION,
+          serviceBinaryPath: PROBE_SERVICE_BINARY,
+          modelIdentifier: `${PROBE_MODEL_REF.providerID}/${PROBE_MODEL_REF.id}`,
+        },
+        telemetry: records,
       },
-      observedDurableEventTypes: evaluation?.evidence.durableEvents ?? [],
-      expectation: {
-        installedVersion: PROBE_SERVICE_VERSION,
-        serviceBinaryPath: PROBE_SERVICE_BINARY,
-        modelIdentifier: `${PROBE_MODEL_REF.providerID}/${PROBE_MODEL_REF.id}`,
-      },
-      telemetry: records,
-    });
+      secrets(),
+    );
   } catch (error) {
-    failures.push(`evidence write: ${describeError(error)}`);
+    failures.push(`evidence write: ${describeError(error, secrets())}`);
   }
 
   return {

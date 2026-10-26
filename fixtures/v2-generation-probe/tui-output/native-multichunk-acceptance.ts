@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { cp, mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, sep } from "node:path";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 import { OpenCode, type OpenCodeClient } from "@opencode/client";
@@ -17,7 +18,7 @@ import {
   verifySessionBaseline,
 } from "./production-acceptance.js";
 
-const parent = "/home/dev/workspace/opencode-work/opencode-short-term-memory-v2-forced-update";
+const parent = process.env.STM_NATIVE_SANDBOX_PARENT ?? tmpdir();
 const fixture = fileURLToPath(new URL("../", import.meta.url));
 const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
@@ -30,6 +31,7 @@ const inside = (root: string, path: string) => {
 export async function runNativeMultichunkAcceptance(tarball: string) {
   const started = Date.now();
   const deadline = started + 110_000;
+  assert.ok(isAbsolute(parent), "Acceptance sandbox parent must be absolute");
   assert.ok((await stat(parent)).isDirectory(), "Acceptance sandbox parent must already exist");
   const sandbox = await mkdtemp(join(parent, "native-multichunk-"));
   const project = join(sandbox, "consumer");

@@ -1,4 +1,5 @@
 import type { ManualEvidenceInput } from "./manual-evidence.js";
+import { resolve, join } from "node:path";
 
 export const DIAGNOSTICS_PROMPT =
   "STM_DIAGNOSTICS: call stm_memory_logs with empty input, then stm_memory_settings with empty input.";
@@ -33,28 +34,29 @@ export function expectedDiagnosticsSettings(memoryDir: string) {
     resolvedConfig,
     effective: {
       enabled: true,
-      memoryModel: "current-session",
+      memoryModel: "stm-probe/deterministic",
+      memoryModelSelection: "explicit-override",
       summarizerMode: "clean",
+      activeWithExplicitMemoryModel: "unsupported",
       maxMemoryLength: 10000,
       maxUpdateInputLength: 20000,
       maxDeltaMessages: 200,
       memoryDir,
+      cleanFallbackToActiveSession: false,
+      includeAgentsMdOnFirstUpdate: false,
+      injectInSubagents: true,
+      enableLegacyPeriodicSystemTransform: false,
+      sideSessionRetries: 1,
+      remindEveryN: 4,
+      debounceMs: 1200,
+      collapseAssistantBursts: false,
+      debug: false,
+      logMaxLines: 300,
       updateHook: "context",
+      updateHooks: ["context", "idle", "compaction"],
       injectionHooks: ["context", "compaction"],
     },
-    inactiveSettings: [
-      "memoryModel",
-      "cleanFallbackToActiveSession",
-      "includeAgentsMdOnFirstUpdate",
-      "injectInSubagents",
-      "enableLegacyPeriodicSystemTransform",
-      "sideSessionRetries",
-      "remindEveryN",
-      "debounceMs",
-      "debug",
-      "logMaxLines",
-      "collapseAssistantBursts",
-    ],
+    inactiveSettings: [],
   };
 }
 
@@ -177,7 +179,7 @@ export function evaluateDiagnosticsEvidence(input: {
         : undefined;
     if (call.tool === "stm_memory_logs") {
       const raw = typeof bs?.log === "string" ? Buffer.from(bs.log, "base64").toString("utf8") : "";
-      const lines = raw.split(/\r?\n/).filter(Boolean).slice(-120);
+      const lines = raw.split(/\r?\n/).filter(Boolean);
       const committed = lines.some((line) => {
         try {
           const event = object(JSON.parse(line));
@@ -188,7 +190,10 @@ export function evaluateDiagnosticsEvidence(input: {
       });
       require(lines.length > 0 &&
         committed &&
-        text === lines.join("\n"), "logs: response is not exact nonempty committed-update tail");
+        text ===
+          resolve(
+            join(input.expectedSettings.resolvedConfig.memoryDir, "session-memory.log"),
+          ), "logs: response is not the absolute log path or committed-update evidence is absent");
     } else {
       let settings: unknown;
       try {

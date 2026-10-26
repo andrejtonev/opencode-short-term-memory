@@ -317,7 +317,7 @@ async function run(): Promise<Evidence> {
         PROBE_TELEMETRY_PATH: telemetryPath,
       },
     };
-    service = await bounded(() => startIsolatedService(options), OPERATION_TIMEOUT_MS);
+    service = await startIsolatedService(options, OPERATION_TIMEOUT_MS);
     const session = await createModeledSession(service.client, project, OPERATION_TIMEOUT_MS);
     sessionID = session.id;
     initialObservation = await observeSession(service.client, session.id, OPERATION_TIMEOUT_MS);
@@ -490,7 +490,7 @@ async function run(): Promise<Evidence> {
   } finally {
     if (service !== undefined) {
       try {
-        await bounded(() => stopIsolatedService(service!), OPERATION_TIMEOUT_MS);
+        await stopIsolatedService(service!, OPERATION_TIMEOUT_MS);
         cleanupCompleted = true;
       } catch (error) {
         failures.push(`service cleanup failed: ${errorText(error, secrets())}`);

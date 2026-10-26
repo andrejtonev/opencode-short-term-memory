@@ -7,6 +7,7 @@ const cp = require("node:child_process");
 const crypto = require("node:crypto");
 const { pathToFileURL } = require("node:url");
 const { stripVTControlCharacters } = require("node:util");
+const { cleanupOwnedChildren, applyCleanupVerdict, closeOwnedServer } = require("./windows-owned-process.cjs");
 if (process.platform !== "win32") throw new Error("This harness uses Windows process containment and PTY support.");
 const repo = process.cwd();
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "stm-native-tui-"));
@@ -27,6 +28,7 @@ let allowModel = false;
 let host,
   terminal,
   mock,
+  hostURL,
   terminalLog = "",
   hostLog = "";
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -38,10 +40,6 @@ async function wait(predicate, label, ms = 30000) {
     await sleep(100);
   }
   throw new Error("Timeout: " + label);
-}
-function killTree(child) {
-  if (!child?.pid || child.exitCode !== null) return;
-  cp.spawnSync("taskkill.exe", ["/PID", String(child.pid), "/T", "/F"], { windowsHide: true, stdio: "ignore" });
 }
 async function main() {
   fs.mkdirSync(project, { recursive: true });
@@ -174,6 +172,7 @@ async function main() {
   const port = portProbe.address().port;
   await new Promise((r) => portProbe.close(r));
   const url = `http://127.0.0.1:${port}`;
+  hostURL = url;
   host = cp.spawn(
     native,
     ["serve", "--hostname", "127.0.0.1", "--port", String(port), "--print-logs", "--log-level", "DEBUG"],
@@ -422,9 +421,11 @@ main()
     process.exitCode = 1;
   })
   .finally(async () => {
-    killTree(terminal);
-    killTree(host);
-    if (mock) await new Promise((r) => mock.close(r));
+    const cleanup = await cleanupOwnedChildren([terminal, host], { endpoints: hostURL ? [hostURL] : [] });
+    cleanup.mock = await closeOwnedServer(mock);
+    cleanup.complete &&= cleanup.mock.closed;
+    applyCleanupVerdict(evidence, cleanup);
+    if (evidence.verdict !== "PASS") process.exitCode = 1;
     evidence.keys = fs.existsSync(path.join(root, "keys.jsonl"))
       ? fs.readFileSync(path.join(root, "keys.jsonl"), "utf8")
       : "";

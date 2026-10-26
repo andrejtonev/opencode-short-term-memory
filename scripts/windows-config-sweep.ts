@@ -6,6 +6,8 @@ import { dirname, join, resolve, toNamespacedPath } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createHash, randomUUID } from "node:crypto";
 import { Npm } from "@opencode/util/npm";
+import { selectConfigSweepCases, configSweepPassed } from "./config-sweep-selection";
+import { cleanupOwnedChildren, applyCleanupVerdict } from "./windows-owned-process.cjs";
 import {
   buildConfigScenario,
   CONFIG_SCENARIO_IDS,
@@ -19,6 +21,7 @@ assert.ok(
   candidateArg && hostsArg && seedArg,
   "Usage: bun scripts/windows-config-sweep.ts CANDIDATE HOSTS PACKAGE_SEED [v1|v2:SCENARIO ...]",
 );
+const selectedCases = selectConfigSweepCases(selection);
 const candidate = resolve(candidateArg);
 const hosts = resolve(hostsArg);
 const seed = resolve(seedArg);
@@ -55,7 +58,20 @@ for (const relative of ["package.json", "dist/index.js", "dist/tui.js", "dist/rp
 }
 console.log(JSON.stringify({ root, artifact }));
 async function save() {
-  await writeFile(join(root, "result.json"), JSON.stringify({ artifact, results, externalInference: false }, null, 2));
+  await writeFile(
+    join(root, "result.json"),
+    JSON.stringify(
+      {
+        artifact,
+        selectedCases,
+        results,
+        externalInference: false,
+        verdict: configSweepPassed(selectedCases, results) ? "PASS" : "FAIL",
+      },
+      null,
+      2,
+    ),
+  );
 }
 async function wait(check: () => any, timeout = 180000) {
   const end = Date.now() + timeout;
@@ -75,7 +91,7 @@ async function files(items: readonly { path: string; content: string | null }[])
 
 for (const generation of ["v1", "v2"] as const)
   for (const id of CONFIG_SCENARIO_IDS) {
-    if (selection.length && !selection.includes(`${generation}:${id}`)) continue;
+    if (!selectedCases.includes(`${generation}:${id}`)) continue;
     const caseRoot = join(root, `${generation}-${id}`);
     await mkdir(caseRoot, { recursive: true });
     const env: Record<string, string> = {};
@@ -413,12 +429,10 @@ for (const generation of ["v1", "v2"] as const)
     } catch (error) {
       record.error = String(error);
     } finally {
-      if (host) {
-        host.kill();
-        await wait(() => host.exitCode !== null || host.signalCode !== null, 10000).catch(() => {});
-      }
+      const cleanup = await cleanupOwnedChildren([host], { endpoints: url ? [url] : [] });
+      applyCleanupVerdict(record, cleanup);
       provider.stop(true);
-      record.hostExited = !host || host.exitCode !== null || host.signalCode !== null;
+      record.hostExited = cleanup.childrenExited;
       for (const [relative, expected] of Object.entries(libraryProof)) {
         const bytes = await readFile(join(seed, "node_modules/@atonev/opencode-short-term-memory", relative));
         assert.equal(
@@ -434,4 +448,5 @@ for (const generation of ["v1", "v2"] as const)
       console.log(JSON.stringify({ generation, id, verdict: record.verdict, error: record.error, root: caseRoot }));
     }
   }
-if (results.some((r) => r.verdict !== "PASS")) process.exitCode = 1;
+await save();
+if (!configSweepPassed(selectedCases, results)) process.exitCode = 1;

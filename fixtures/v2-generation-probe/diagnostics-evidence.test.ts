@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { resolve, join } from "node:path";
 import type { LanguageModelV3CallOptions } from "@ai-sdk/provider";
 import { diagnosticsToolDispatch } from "./index.js";
 import {
@@ -72,7 +73,7 @@ function valid(): Input {
                         type: "text",
                         text:
                           index === 0
-                            ? rawLog.split(/\r?\n/).filter(Boolean).slice(-120).join("\n")
+                            ? resolve(join(expectedSettings.resolvedConfig.memoryDir, "session-memory.log"))
                             : JSON.stringify(expectedSettings),
                       },
                     ],
@@ -87,7 +88,7 @@ function valid(): Input {
   return { records, sessionID, expectedSettings };
 }
 
-test("diagnostics accept ordered real emissions, exact 120-line tail, independent settings and byte/absence snapshots", () => {
+test("diagnostics accept ordered real emissions, absolute log path, independent settings and byte/absence snapshots", () => {
   expect(evaluateDiagnosticsEvidence(valid())).toEqual({ passed: true, failures: [] });
 });
 
@@ -120,7 +121,7 @@ const mutations: Record<string, (input: Input) => Input | void> = {
   "wrong provider": (i) => {
     (i.records[1] as { provider: string }).provider = "other";
   },
-  "wrong tail": (i) => {
+  "wrong log path": (i) => {
     const d = i.records[3]!.details!.eventData as { result: { content: { text: string }[] } };
     d.result.content[0]!.text += "\nextra";
   },
@@ -193,7 +194,7 @@ for (const [section, key, value] of [
 mutations["inactive settings missing"] = (i) => {
   const d = i.records[6]!.details!.eventData as { result: { content: { text: string }[] } };
   const settings = JSON.parse(d.result.content[0]!.text);
-  settings.inactiveSettings.pop();
+  settings.inactiveSettings.push("memoryModel");
   d.result.content[0]!.text = JSON.stringify(settings);
 };
 for (const [name, mutate] of Object.entries(mutations))
