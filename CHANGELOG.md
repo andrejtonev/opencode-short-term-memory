@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Fence V1 memory delivery across reset/deletion, report history failures as Update errors, and read live child delivery status. Bound fresh pre-compaction waiting while retaining unfinished update ownership.
+- Use durable visible history for V2 context summaries and reset cadence, preserve injection during busy updates, and fence pending generation/reset/file creation across plugin disposal.
+- Release abandoned V2 dialog ownership without letting stale dismissals release newer results.
+- Serialize automatic/example config creation, release completed write locks, and report UTF-8 memory sizes and effective update hooks accurately.
+- Refresh current probe contracts, enforce settling service deadlines, reject invalid acceptance selectors, and verify owned Windows cleanup before reporting overall success.
+
+### Documentation
+
+- Correct release qualifiers and add a maintained/historical acceptance runner map. These local changes are separate from the published RC10 archive and its qualification receipts.
+
 ## [1.4.0-rc.10] - 2026-10-26
 
 Published under `rc` from release commit `473c2273051d0fb86df3c455732c5e142dae2b0b` and tag `v1.4.0-rc.10`, with `latest` left at `1.3.0`. The registry tarball matches the validated frozen archive byte for byte. Source checks passed 1,216 tests, with 3 skipped and 0 failed; fresh-consumer and native V1 reset/V2 dialog checks passed. Exact archive and host scope are recorded separately in [RC Readiness](docs/RC-READINESS.md).
@@ -37,7 +49,7 @@ Published under `rc` from release commit `8ba7c6c286eacadf697b3c19e320f6646ae53b
 ### Validation and limits
 
 - Source checks: 1,199 passed, 3 skipped, 0 failed. Exact-archive fresh-consumer/declaration checks and bounded native V1/V2 UI checks passed on OpenCode `1.18.35` and `2.0.32` respectively. These do not qualify live V2 generation or every native registry installation/provider combination.
-- Both readers retain a 16,384-character output cap. The published README contains preparation status and RC8 installation examples; repository instructions now pin RC9 and will ship with the next candidate. The published archive remains unchanged.
+- Both readers retain a 16,384-character output cap. The published README contains preparation status and RC8 installation examples; at RC9 publication, repository instructions pinned RC9 for the next candidate. RC10 shipped corrected RC10 examples. The published archive remains unchanged.
 
 ## [1.4.0-rc.8] - 2026-10-23
 

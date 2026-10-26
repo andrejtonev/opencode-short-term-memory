@@ -1,5 +1,7 @@
 # RC Readiness
 
+Maintained and historical verification commands are mapped in [Acceptance Runners](ACCEPTANCE-RUNNERS.md). Unreleased review fixes require their own qualification; the frozen receipts below remain scoped to their named archives.
+
 ## Latest Status: 2026-10-26, RC10 Published
 
 `1.4.0-rc.10` was published under `rc` from release commit
@@ -32,7 +34,7 @@ Validation passed:
   path-only Logs, zero provider requests and zero session messages.
 - Publication: npm dist-tags and downloaded bytes independently verified.
 
-Receipts under `.opencode/rc10/`: `artifact.json`, `consumer-evidence.json`,
+Local-only, ignored receipts under `.opencode/rc10/` (not available in a clean clone): `artifact.json`, `consumer-evidence.json`,
 `native-v1-evidence.json`, `native-v2-evidence.json`, and `publication.json`.
 Native UI checks used the extracted archive with a repository dependency
 junction, separately from the fresh consumer. Live V2 generation, Ubuntu/Lima,
@@ -74,7 +76,7 @@ changing the frozen package or release tag.
 | Native V2 UI           | PASS       | OpenCode 2.0.32; bounded reader, End/settings navigation, path-only Logs; zero provider requests and session messages. |
 | Publication            | PASS       | npm `rc` points to RC9; `latest` remains 1.3.0; registry archive matches frozen bytes.                                 |
 
-Receipts under `.opencode/rc9/`: `artifact.json`, `consumer-evidence.json`,
+Local-only, ignored receipts under `.opencode/rc9/` (not available in a clean clone): `artifact.json`, `consumer-evidence.json`,
 `native-v1-evidence.json`, `native-v2-evidence.json`, and `publication.json`.
 Native UI checks used the extracted archive with a repository dependency
 junction, separately from the fresh package consumer. They do not establish a
@@ -95,9 +97,9 @@ RC10 V1 reset changes establish a persistent forward SDK-history boundary
 and stop direct pre-reset replay. They are not included in RC9, do not migrate
 existing RC9 resets, and do not erase OpenCode conversation history. Post-reset
 updates read full history to locate the boundary before applying the recent
-message cap; malformed boundary files or missing anchors stop summarization. This source
-change has no RC9 artifact or native-host qualification. See the [feature
-matrix](FEATURE-MATRIX.md#v1-reset-boundary) for its contract.
+message cap; malformed boundary files or missing anchors stop summarization. This change is not included in or qualified for the RC9 archive. RC10 evidence
+is recorded in [Latest Status](#latest-status-2026-10-26-rc10-published); see the
+[feature matrix](FEATURE-MATRIX.md#v1-reset-boundary) for its contract.
 
 ## Historical Status: 2026-10-23, RC8 Published
 

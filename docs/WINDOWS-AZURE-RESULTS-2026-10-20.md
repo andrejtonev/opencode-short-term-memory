@@ -1,5 +1,7 @@
 # Windows Azure test findings, 2026-10-20
 
+> Archived results for 2026-10-20. References to "current" describe that dated source/candidate. Preserve these results as historical evidence; see [Feature Matrix](FEATURE-MATRIX.md), [RC Readiness](RC-READINESS.md) and [Acceptance Runners](ACCEPTANCE-RUNNERS.md) for current contracts and verification scope.
+
 The expanded sweep runs one isolated setup at a time under a resource supervisor.
 After stopping at 14:55:41 UTC for sustained CPU/network threshold breaches,
 testing resumed at 18:29 UTC with an offline prepared V2 package cache.
