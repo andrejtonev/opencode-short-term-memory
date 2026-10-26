@@ -18,6 +18,7 @@ import type { V2Context } from "../src/v2-adapter";
 import { createV2MemoryActions, createV2MemoryToolRegistrations, createV2MemoryTools } from "../src/v2-memory-tools";
 import { createV2ContextInjection } from "../src/v2-context-injection";
 import { createV2MemoryUpdater } from "../src/v2-memory-update";
+import { createV2GenerateHookHarness } from "./v2-generate-hook-harness";
 import { withV2MemoryMutation } from "../src/v2-mutation-coordination";
 
 type ToolEditor = { readonly add: (definition: unknown) => void };
@@ -882,7 +883,10 @@ describe("V2 memory tools", () => {
     await writeText(join(testDir, ".opencode", "stm.json"), JSON.stringify({ summarizerMode: "active" }));
     const h = updateHost(testDir, sessionID, [settledAssistant("msg_a")]);
     const reentries: string[] = [];
-    h.pluginContext.session.generate = async () => {
+    const generationHooks = createV2GenerateHookHarness();
+    h.pluginContext.session.hook = generationHooks.hook;
+    h.pluginContext.session.generate = async (input) => {
+      await generationHooks.dispatch(input);
       const readsBefore = h.reads.length;
       reentries.push(await updateText(h.tool, sessionID));
       expect(h.reads).toHaveLength(readsBefore);
@@ -1308,16 +1312,20 @@ describe("V2 memory tools", () => {
     await writeText(join(testDir, ".opencode", "stm.json"), JSON.stringify({ summarizerMode: "active" }));
     let resetResult: Awaited<ReturnType<ToolDefinition["execute"]>> | undefined;
     let resetTool!: ToolDefinition;
+    const generationHooks = createV2GenerateHookHarness();
     const activeContext = {
       ...context(testDir),
       session: {
         ...context(testDir).session,
+        hook: generationHooks.hook,
         get: async ({ sessionID: requestedSessionID }: { sessionID: string }) => ({
           id: requestedSessionID,
           parentID: null,
           model: currentModel,
         }),
-        generate: async ({ sessionID: generatedSessionID }: { sessionID: string }) => {
+        generate: async (input: { sessionID: string; prompt: string }) => {
+          await generationHooks.dispatch(input);
+          const generatedSessionID = input.sessionID;
           resetResult = await resetTool.execute({ confirm: true }, toolContext(generatedSessionID));
           return {
             text: "## Session Memory\n\n### User Instructions\n- x\n### Long Horizon Context\n- x\n### Decisions\n- x\n### Conclusions\n- x\n### Active References\n- x\n",

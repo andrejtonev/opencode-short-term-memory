@@ -32,6 +32,7 @@ import {
 import { parseV2ResetBoundary } from "./v2-reset-boundary";
 import { generationErrorMessage, providerGenerationError } from "./provider-error";
 import { taskChildUpdaterSkip } from "./v2-child-memory";
+import { generateV2ActiveMemory } from "./v2-active-generation";
 
 export { isV2MemoryUpdateInFlight } from "./v2-mutation-coordination";
 
@@ -478,7 +479,7 @@ export function createV2MemoryUpdater(
             (signal) => {
               if (signal.aborted || lifetimeSignal?.aborted) throw new V2GenerationCancelledError();
               return active
-                ? context.session.generate({ sessionID, prompt }, { signal })
+                ? generateV2ActiveMemory(context, { sessionID, prompt }, signal)
                 : context.generate.text({ prompt, model }, { signal });
             },
             chunkDeadline,

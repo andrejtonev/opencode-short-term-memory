@@ -129,6 +129,10 @@ export const SessionMemoryPlugin = async (
   let globalState = createRuntimeState();
   const sessionStates = new Map<string, SessionRuntimeState>();
   const sessionStatesOrder: string[] = []; // LRU order
+  const primaryInjectionTransportByState = new WeakMap<
+    SessionRuntimeState,
+    "legacy_system_transform" | "prompt_no_reply"
+  >();
   let updateInFlight = new Set<string>();
   let pendingUpdateAfterInFlight = new Map<string, number>();
   const configCtx: ConfigContext = {
@@ -164,6 +168,25 @@ export const SessionMemoryPlugin = async (
 
   function ownsPrompt(sessionID: string, messageID: string | undefined): boolean {
     return Boolean(messageID && ownedPromptIDs.get(sessionID)?.has(messageID));
+  }
+
+  async function selectPrimaryInjectionTransport(
+    sessionID: string,
+    transport: "legacy_system_transform" | "prompt_no_reply",
+  ): Promise<SessionRuntimeState> {
+    const state = ensureSessionState(sessionID, sessionStates, sessionStatesOrder, MAX_SESSION_STATES);
+    const previous = primaryInjectionTransportByState.get(state);
+    if (previous && previous !== transport) {
+      state.userTurnInjectState = { count: 0, lastMessageID: "" };
+      await logEvent(config, "memory_inject_cadence_reset", {
+        sessionID,
+        previousTransport: previous,
+        nextTransport: transport,
+        reason: "transport_changed",
+      });
+    }
+    primaryInjectionTransportByState.set(state, transport);
+    return state;
   }
 
   function registerInternalSession(sessionID: string): void {
@@ -1368,8 +1391,16 @@ export const SessionMemoryPlugin = async (
       });
 
       if (config.enableLegacyPeriodicSystemTransform) {
-        await logEvent(config, "memory_inject_skipped", { sessionID, reason: "using_chat_system_transform" });
-        return;
+        if (config.summarizerMode !== "active") {
+          await logEvent(config, "memory_inject_skipped", { sessionID, reason: "using_chat_system_transform" });
+          return;
+        }
+        await logEvent(config, "memory_inject_transport_fallback", {
+          sessionID,
+          requestedTransport: "legacy_system_transform",
+          effectiveTransport: "prompt_no_reply",
+          reason: "active_summary_requests_share_system_transform_without_message_identity",
+        });
       }
 
       if (!isCurrentGeneration(sessionID, generation)) return;
@@ -1383,7 +1414,7 @@ export const SessionMemoryPlugin = async (
         output?.messageId ||
         output?.message?.id ||
         output?.id;
-      const s = ensureSessionState(sessionID, sessionStates, sessionStatesOrder, MAX_SESSION_STATES);
+      const s = await selectPrimaryInjectionTransport(sessionID, "prompt_no_reply");
       const hasRuntimeTurnID =
         runtimeTurnID !== undefined && runtimeTurnID !== null && String(runtimeTurnID).length > 0;
       if (!hasRuntimeTurnID) s.userTurnInvocationSequence += 1;
@@ -1467,7 +1498,20 @@ export const SessionMemoryPlugin = async (
         }
         return;
       }
-      if (!config.enableLegacyPeriodicSystemTransform) return;
+      if (!config.enableLegacyPeriodicSystemTransform) {
+        await selectPrimaryInjectionTransport(sessionID, "prompt_no_reply");
+        return;
+      }
+      if (config.summarizerMode === "active") {
+        await logEvent(config, "memory_inject_skipped", {
+          sessionID,
+          reason: "active_summary_requests_share_system_transform_without_message_identity",
+          effectivePrimaryTransport: "prompt_no_reply",
+        });
+        await selectPrimaryInjectionTransport(sessionID, "prompt_no_reply");
+        return;
+      }
+      const state = await selectPrimaryInjectionTransport(sessionID, "legacy_system_transform");
       await injectMemoryIntoSystemTransform(
         input,
         output,
@@ -1476,7 +1520,11 @@ export const SessionMemoryPlugin = async (
         sessionStates,
         sessionStatesOrder,
         client,
-        () => isCurrentGeneration(sessionID, generation),
+        () =>
+          isCurrentGeneration(sessionID, generation) &&
+          config.enableLegacyPeriodicSystemTransform &&
+          config.summarizerMode !== "active" &&
+          primaryInjectionTransportByState.get(state) === "legacy_system_transform",
       );
     },
 
