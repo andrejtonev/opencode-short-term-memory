@@ -2,6 +2,8 @@
 
 Automatically summarizes conversation context into structured session memory and supports injecting it back into the system prompt — aiming to preserve user instructions, project context, decisions, and active references across long chats and compactions, without guaranteeing semantic preservation. The published testing release is `1.4.0-rc.8`, available under the npm `rc` tag. Update and injection timing differ between OpenCode generations; V2 system injection is opt-in and disabled by default, independently of automatic memory updates.
 
+The local **RC9 candidate (`1.4.0-rc.9`)** includes the unified V1 menu, paged V1 reader, native V2 scrollable results, and path-only Logs. It has not been published to npm. The registry installation examples below still target published RC8.
+
 > **Unofficial plugin:** This is an independent project and is not affiliated with, endorsed by, or maintained by the opencode team.
 
 ## V1 / V2 support
@@ -34,7 +36,7 @@ See the [feature matrix](https://github.com/andrejtonev/opencode-short-term-memo
 }
 ```
 
-The packaged plugin supplies separate server, `/tui` and `/rpc` exports resolved by the host. A checkout source path alone is not a packaged TUI installation. V2 command results appear in per-action dialogs (`STM status`, `STM show`, etc.); action exceptions use an error dialog. In development after RC8, results use a height-bounded scroll area with Up/Down, PgUp/PgDn and Home/End navigation; the title and Esc hint remain outside the scrolling body. Short results use only the height they need. Output is capped at 16,384 characters with an explicit truncation notice (a character limit, not a 16 KiB UTF-8 byte limit). Press `esc` to dismiss; delivery timeouts do not expire displayed dialogs. Dismiss the current STM dialog before running another command.
+The packaged plugin supplies separate server, `/tui` and `/rpc` exports resolved by the host. A checkout source path alone is not a packaged TUI installation. V2 command results appear in per-action dialogs (`STM status`, `STM show`, etc.); action exceptions use an error dialog. In the RC9 candidate, results use a height-bounded scroll area with Up/Down, PgUp/PgDn and Home/End navigation; the title and Esc hint remain outside the scrolling body. Short results use only the height they need. Output is capped at 16,384 characters with an explicit truncation notice (a character limit, not a 16 KiB UTF-8 byte limit). Press `esc` to dismiss; delivery timeouts do not expire displayed dialogs. Dismiss the current STM dialog before running another command.
 
 **V2 operational limits:** An action can continue after its 120-second completion timeout, cancellation or delivery failure; these do not abort or roll back mutations. Busy ownership remains until the action settles; inspect persisted state before retrying. Same-server RPC clients are trusted: request/session/receiver matching is routing correlation, not user authorization. Use a single-user/trusted server; multi-user isolation is not guaranteed.
 
@@ -90,7 +92,7 @@ Restart OpenCode after setup or configuration edits before checking settings or 
 
 Enable the same STM package in the singular `plugin` array in `tui.json`, as well as the server's `opencode.json`. Select `/stm` from autocomplete to open one native menu: Show memory, Logs, Settings, Status, Update, Reset, and optional example-config creation. Results come from the attached server without adding chat messages or requesting a main-model response. Status includes live counters; reads do not create missing memory files. The reader supports Up/Down, PgUp/PgDn and Home/End; Esc closes it. Logs returns only the absolute log file path on the attached server. Inspect the file there with `cat` (Linux/macOS) or `Get-Content` (PowerShell); log contents are not read or sent to the model.
 
-**These menu improvements are in development after RC8.** Published RC8 still exposes `/stm-show`, `/stm-logs`, `/stm-settings`, `/stm-status` for local reads and legacy `/stm <action>` server commands. The development version registers only the native `/stm` menu. Remove any manually configured `command.stm` from `opencode.json`; its legacy server hook now refuses execution before a model response. Enable both server and TUI companions and restart OpenCode. V2 retains its existing command syntax; development results now use native scrollable dialogs. Path-only Logs is also a development change for V2 and the agent tools; published RC8 still returns log contents.
+**These menu improvements are in the unpublished RC9 candidate.** Published RC8 still exposes `/stm-show`, `/stm-logs`, `/stm-settings`, `/stm-status` for local reads and legacy `/stm <action>` server commands. The development version registers only the native `/stm` menu. Remove any manually configured `command.stm` from `opencode.json`; its legacy server hook now refuses execution before a model response. Enable both server and TUI companions and restart OpenCode. V2 retains its existing command syntax; development results now use native scrollable dialogs. Path-only Logs is also a development change for V2 and the agent tools; published RC8 still returns log contents.
 
 ## Configuration (V1 behavior)
 
@@ -124,7 +126,7 @@ In V1, memory summarization and injection is fully automated — the plugin watc
 
 Clean generation receives saved memory in `<existing_memory>` and filtered conversation in `<conversation_update>`. Injected `[MEMORY_SYSTEM]` chat messages are excluded from that conversation delta, so the injected copy is not summarized again. Active mode also excludes STM's own generation prompts and replies from the delta, but runs in the original session: earlier injected memory can remain in the host model's session context.
 
-**V1 native `/stm` menu (development after RC8)**
+**V1 native `/stm` menu (RC9 candidate)**
 
 | Menu action                    | Behavior                                                                                                                                | Invokes memory model?         |
 | ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------- |
