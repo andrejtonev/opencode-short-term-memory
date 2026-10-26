@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Release abandoned V2 dialog ownership without letting stale dismissals release newer results.
 - Serialize automatic/example config creation, release completed write locks, and report UTF-8 memory sizes and effective update hooks accurately.
 - Refresh current probe contracts, enforce settling service deadlines, reject invalid acceptance selectors, and verify owned Windows cleanup before reporting overall success.
+- Bound V1 clean-session cleanup waits to five seconds while retaining pending deletion ownership; read tools no longer create missing memory files after deletion.
+- Fence V2 child snapshot persistence across plugin disposal and keep reminder cadence intact when lineage metadata is unavailable.
+- Suppress stale deferred V1 reader rendering and serialize configuration creation across Windows path case aliases.
+- Require complete host/mock cleanup in the clean-tools acceptance runner and enforce a settling deadline for final probe log observation.
 
 ### Documentation
 

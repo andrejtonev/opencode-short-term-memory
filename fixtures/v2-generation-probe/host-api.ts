@@ -211,11 +211,13 @@ export async function observeSession(
     cursor = next;
   } while (cursor !== undefined);
 
-  const log: SessionLog[] = [];
-  const signal = AbortSignal.timeout(timeoutMs);
-  for await (const item of client.session.log({ sessionID, follow: false }, { signal })) {
-    log.push(item);
-  }
+  const log = await bounded(async (signal) => {
+    const collected: SessionLog[] = [];
+    for await (const item of client.session.log({ sessionID, follow: false }, { signal })) {
+      collected.push(item);
+    }
+    return collected;
+  }, timeoutMs);
 
   return { context, messagePages, messages, log };
 }

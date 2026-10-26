@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import {
   bounded,
   isolatedServiceCommand,
+  observeSession,
   PROBE_SERVICE_BINARY,
   startIsolatedService,
   stopIsolatedService,
@@ -59,6 +60,45 @@ test("bounded rejects even when an operation ignores its timeout signal", async 
     }, 10),
   ).rejects.toThrow("timed out");
   expect(signal?.aborted).toBe(true);
+});
+
+test("session observation settles a stalled log iterator and observes its late rejection", async () => {
+  let rejectLog!: (error: Error) => void;
+  const pendingLog = new Promise<IteratorResult<unknown>>((_resolve, reject) => {
+    rejectLog = reject;
+  });
+  let logSignal: AbortSignal | undefined;
+  const client = {
+    session: {
+      context: async () => ({ messages: [] }),
+      log: (_input: unknown, options: { signal: AbortSignal }) => {
+        logSignal = options.signal;
+        return { [Symbol.asyncIterator]: () => ({ next: () => pendingLog }) };
+      },
+    },
+    message: { list: async () => ({ data: [], cursor: { next: null } }) },
+  };
+  await expect(observeSession(client as never, "observed-session", 10)).rejects.toThrow("timed out");
+  expect(logSignal?.aborted).toBe(true);
+  rejectLog(new Error("late stream failure"));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+});
+
+test("session observation retains finite log contents and propagates log errors", async () => {
+  const client = {
+    session: {
+      context: async () => ({ messages: [] }),
+      log: async function* () {
+        yield { type: "observed" };
+      },
+    },
+    message: { list: async () => ({ data: [], cursor: { next: null } }) },
+  };
+  expect((await observeSession(client as never, "observed-session", 1000)).log).toEqual([{ type: "observed" }]);
+  client.session.log = async function* () {
+    throw new Error("log unavailable");
+  };
+  await expect(observeSession(client as never, "observed-session", 1000)).rejects.toThrow("log unavailable");
 });
 
 test("service startup timeout retains ownership of late service completion", async () => {

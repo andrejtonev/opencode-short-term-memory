@@ -90,7 +90,14 @@ async function cleanupOwnedChildren(children, options = {}) {
   for (const endpoint of options.endpoints ?? []) {
     let closed = false;
     try {
-      if (Date.now() < deadline) closed = await (options.portIsClosed ?? portIsClosed)(endpoint, remaining());
+      // Process exit can precede listener teardown, especially after taskkill.
+      // Observe closure within the shared cleanup budget rather than treating
+      // the first successful connection as a final containment failure.
+      while (Date.now() < deadline) {
+        closed = await (options.portIsClosed ?? portIsClosed)(endpoint, Math.min(250, remaining()));
+        if (closed) break;
+        await new Promise((resolve) => setTimeout(resolve, Math.min(50, remaining())));
+      }
     } catch {}
     ports.push({ endpoint, closed });
   }

@@ -8,6 +8,7 @@ import { pathToFileURL } from "node:url";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import http from "node:http";
+import { cleanupCleanToolsRun } from "./clean-tools-cleanup.mjs";
 
 const [nativeArgument, packageArgument, liveArgument] = process.argv.slice(2);
 assert.ok(nativeArgument && packageArgument, "Supply native executable and installed STM package directory");
@@ -297,22 +298,8 @@ try {
   process.exitCode = 1;
 } finally {
   if (primaryID) await api(`/session/${primaryID}`, undefined, "DELETE", 5000).catch(() => {});
-  if (host?.exitCode === null) {
-    if (process.platform === "win32") {
-      const killer = spawn("taskkill.exe", ["/PID", String(host.pid), "/T", "/F"], {
-        windowsHide: true,
-        stdio: "ignore",
-      });
-      await once(killer, "exit");
-    } else {
-      try {
-        process.kill(-host.pid, "SIGKILL");
-      } catch {}
-    }
-    if (host.exitCode === null) await Promise.race([once(host, "exit"), sleep(5000)]);
-  }
-  evidence.hostExited = host?.exitCode !== null;
-  if (mock) await new Promise((r) => mock.close(r));
+  const cleanup = await cleanupCleanToolsRun({ host, mock, endpoint: base, evidence });
+  if (!cleanup.complete) process.exitCode = 1;
   await writeFile(join(root, "host.log"), hostLog);
   await writeFile(join(root, "evidence.json"), JSON.stringify(evidence, null, 2));
   console.log(

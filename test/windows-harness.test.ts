@@ -4,6 +4,8 @@ import { join } from "node:path";
 import { runInNewContext } from "node:vm";
 import type { ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
+import { once } from "node:events";
+import { createServer, type AddressInfo } from "node:net";
 import { cleanupOwnedChildren, applyCleanupVerdict, closeOwnedServer } from "../scripts/windows-owned-process.cjs";
 import type { Server } from "node:http";
 import { selectConfigSweepCases, configSweepPassed } from "../scripts/config-sweep-selection";
@@ -71,6 +73,7 @@ test("cleanup failure and open listeners fail overall verdict while preserving f
   for (const failure of ["kill", "exit", "port"] as const) {
     const host = child(12001);
     const cleanup = await cleanupOwnedChildren([host], {
+      timeoutMs: 30,
       endpoints: ["http://127.0.0.1:1000"],
       killTree: async () => ({ succeeded: failure !== "kill", error: failure === "kill" ? "denied" : null }),
       waitForExit: async () => failure !== "exit",
@@ -98,6 +101,32 @@ test("owned cleanup observes immediate child exit and bounds an unresponsive chi
     });
     expect(cleanup.complete).toBe(exits);
     expect(events.listenerCount("exit")).toBe(0);
+  }
+});
+
+test("owned cleanup waits for listener closure after child exit within its deadline", async () => {
+  const server = createServer();
+  let closeTimer: ReturnType<typeof setTimeout> | undefined;
+  let connections = 0;
+  server.once("connection", () => {
+    connections++;
+    closeTimer = setTimeout(() => {
+      server.close();
+    }, 20);
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  try {
+    const cleanup = await cleanupOwnedChildren([child(12001, 0)], {
+      timeoutMs: 1000,
+      endpoints: [`http://127.0.0.1:${(server.address() as AddressInfo).port}`],
+    });
+    expect(connections).toBe(1);
+    expect(cleanup.portsClosed).toBe(true);
+    expect(cleanup.complete).toBe(true);
+  } finally {
+    clearTimeout(closeTimer);
+    await closeOwnedServer(server as unknown as Server);
   }
 });
 
@@ -136,6 +165,7 @@ test("native V2 finalization records cleanup failure and exits nonzero without t
     cleanupOwnedChildren: (children: ChildProcess[], options: any) =>
       cleanupOwnedChildren(children, {
         ...options,
+        timeoutMs: 30,
         killTree: async (value) => {
           attempted.push(value.pid!);
           return { succeeded: false, error: "denied" };
