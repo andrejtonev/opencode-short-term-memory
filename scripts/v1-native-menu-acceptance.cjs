@@ -86,14 +86,22 @@ async function main() {
     for await (const chunk of req) chunks.push(chunk);
     const body = JSON.parse(Buffer.concat(chunks).toString() || "{}");
     const clean = JSON.stringify(body.messages).includes("You are a clean short-term memory summarizer.");
-    evidence.providerRequests.push({ method: req.method, url: req.url, clean });
+    const inputText = JSON.stringify(body.messages);
+    const newAfterReset = inputText.includes("NEW_AFTER_RESET_SENTINEL");
+    evidence.providerRequests.push({
+      method: req.method,
+      url: req.url,
+      clean,
+      oldHistoryPresent: inputText.includes("NATIVE_MENU_UPDATE_SENTINEL"),
+      newHistoryPresent: newAfterReset,
+    });
     if (!allowModel) {
       res.writeHead(500, { "content-type": "application/json" });
       res.end(JSON.stringify({ error: { message: "Unexpected model request during native reads" } }));
       return;
     }
     res.writeHead(200, { "content-type": "text/event-stream" });
-    const summary = "## Session Memory\n\n### User Instructions\n- NATIVE_MENU_UPDATE_SENTINEL\n";
+    const summary = `## Session Memory\n\n### User Instructions\n- ${newAfterReset ? "NEW_AFTER_RESET_SENTINEL" : "NATIVE_MENU_UPDATE_SENTINEL"}\n`;
     for (const choice of [
       { delta: { role: "assistant", content: summary }, finish_reason: null },
       { delta: {}, finish_reason: "stop" },
@@ -339,6 +347,71 @@ async function main() {
     verdict: "PASS",
     providerRequests: 1,
     primaryMessages: updatedHistory.length,
+  });
+  // Reset an existing conversation, then prove its old messages cannot rebuild memory.
+  write("\x1b");
+  await sleep(350);
+  const resetStart = terminalLog.length;
+  await select("reset");
+  await wait(
+    () => stripVTControlCharacters(terminalLog.slice(resetStart)).includes("Reset this session"),
+    "populated reset confirmation",
+    10000,
+  );
+  write("\r");
+  await wait(() => fs.readFileSync(memoryPath, "utf8").includes("None captured yet"), "populated reset", 10000);
+  await wait(
+    () => stripVTControlCharacters(terminalLog.slice(resetStart)).includes("saved reset boundary"),
+    "populated reset result",
+    10000,
+  );
+  const boundary = JSON.parse(
+    fs.readFileSync(path.join(project, ".opencode/memory/v1-reset-boundaries", `${session.id}.json`), "utf8"),
+  );
+  if (!boundary.anchorID) throw new Error("Populated reset did not persist an anchor");
+  write("\x1b");
+  await sleep(350);
+  const unchangedStart = terminalLog.length;
+  await select("update");
+  await wait(
+    () => stripVTControlCharacters(terminalLog.slice(unchangedStart)).includes("Memory update skipped"),
+    "unchanged post-reset update",
+    10000,
+  );
+  if (evidence.providerRequests.length !== 1 || !fs.readFileSync(memoryPath, "utf8").includes("None captured yet"))
+    throw new Error("Unchanged pre-reset history was summarized again");
+  write("\x1b");
+  await sleep(350);
+  await api(`/session/${session.id}/message`, "POST", {
+    noReply: true,
+    model: { providerID: "offline", modelID: "test" },
+    parts: [{ type: "text", text: "Remember NEW_AFTER_RESET_SENTINEL." }],
+  });
+  const newUpdateStart = terminalLog.length;
+  await select("update");
+  await wait(
+    () =>
+      fs.readFileSync(memoryPath, "utf8").includes("NEW_AFTER_RESET_SENTINEL") &&
+      stripVTControlCharacters(terminalLog.slice(newUpdateStart)).includes("## Session Memory"),
+    "new-only post-reset update",
+    20000,
+  );
+  const finalRequest = evidence.providerRequests.at(-1);
+  const finalHistory = await api(`/session/${session.id}/message`);
+  if (
+    evidence.providerRequests.length !== 2 ||
+    !finalRequest.clean ||
+    !finalRequest.newHistoryPresent ||
+    finalRequest.oldHistoryPresent ||
+    finalHistory.length !== 2
+  )
+    throw new Error("Post-reset generation must contain only new conversation with no main-model echo");
+  evidence.checks.push({
+    name: "native populated reset excludes old conversation",
+    verdict: "PASS",
+    boundary,
+    providerRequests: 2,
+    primaryMessages: finalHistory.length,
   });
   evidence.verdict = "PASS";
 }

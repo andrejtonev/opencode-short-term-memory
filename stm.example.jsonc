@@ -9,8 +9,9 @@
   // clean | active
   "summarizerMode": "clean",
 
-  // If true, clean-mode failures may fall back to the active session after retries.
-  // V1 catches failures after retries; V2 permits only settled retryable clean failures (not explicit override, timeout, or cancellation).
+  // If true, eligible clean-mode failures may fall back to the active session after retries.
+  // V1 excludes classified permanent provider failures such as authentication/free-tier rejection.
+  // V2 permits only settled retryable clean failures (not explicit override, timeout, or cancellation).
   "cleanFallbackToActiveSession": false,
 
   // If true, include AGENTS.md content in the first memory update prompt per session
@@ -20,8 +21,9 @@
   // Parent-memory snapshots: V1 subagents at creation; V2 task children on first eligible read, gated by injection settings.
   "injectInSubagents": true,
 
-  // Number of retries after clean generation failures (0 = no retry).
-  // V1 creates a fresh side session for each attempt; V2 uses bounded standalone generation attempts.
+  // Number of additional attempts (0 = no retry).
+  // V1 clean mode creates a fresh side session per attempt; permanent provider failures stop retries/fallback.
+  // V2 retries settled transient/malformed output in clean or active mode within one chunk deadline.
   "sideSessionRetries": 1,
 
   // V1 selects legacy system-transform transport; V2 gates all system injection.
@@ -46,7 +48,8 @@
   // Debounce for scheduled updates (ms)
   "debounceMs": 1200,
 
-  // Debug logging
+  // V1 debug logs can include full prompts/memory/conversation; normal completion logs include text previews.
+  // V2 generation/injection debug logs contain metadata, but errors and existing logs may still be sensitive.
   "debug": false,
 
   // Max JSONL lines kept in .opencode/memory/session-memory.log

@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.0-rc.10] - 2026-10-26
+
+Release candidate for the V1 forward reset fix and documentation corrections. Registry publication and exact-archive qualification are recorded separately in [RC Readiness](docs/RC-READINESS.md).
+
+### Fixed
+
+- V1 reset establishes a persistent forward history boundary before clearing saved memory/checkpoint, preventing direct replay of pre-reset history. Missing anchors or malformed boundary/history stop summarization. Updates after reset retrieve full history to locate the boundary before applying the usual recent-message cap. Old RC9 resets are not migrated, and conversation history remains available to the host model.
+
+### Documentation
+
+- Correct clean tool visibility/execution isolation, retry/fallback exclusions, cleanup recovery, reader limits and logging exposure. Refresh current V1/V2 controls and distinguish archived acceptance records from current instructions. RC10 ships these corrections, including exact RC10 installation examples; the frozen RC9 package remains unchanged.
+
+## [1.4.0-rc.9] - 2026-10-26
+
+Published under `rc` from release commit `8ba7c6c286eacadf697b3c19e320f6646ae53b90` and tag `v1.4.0-rc.9`, with `latest` left at `1.3.0`. Registry bytes matched the frozen validated archive. See [RC Readiness](docs/RC-READINESS.md) for exact artifact and host scope.
+
+### Changed
+
+- V1 exposes one native `/stm` menu, replacing the `/stm-*` aliases and legacy model-mediated server command. Menu results add no chat messages or main-model response; Reset and optional example-config creation ask for confirmation.
+- Logs returns only the absolute attached-server log file path in V1, V2 and all memory tools. Users inspect the file themselves; log contents are no longer included in results.
+
+### Fixed
+
+- V1 long results use a paged reader with Up/Down, PgUp/PgDn and Home/End navigation.
+- V2 results use native scrollable dialogs with bounded height and fixed title/footer. Short results do not reserve unnecessary rows.
+- V2 delivery acknowledgment follows reader construction; a failed or dismissed construction is not reported as successful delivery.
+
+### Validation and limits
+
+- Source checks: 1,199 passed, 3 skipped, 0 failed. Exact-archive fresh-consumer/declaration checks and bounded native V1/V2 UI checks passed on OpenCode `1.18.35` and `2.0.32` respectively. These do not qualify live V2 generation or every native registry installation/provider combination.
+- Both readers retain a 16,384-character output cap. The published README contains preparation status and RC8 installation examples; repository instructions now pin RC9 and will ship with the next candidate. The published archive remains unchanged.
+
 ## [1.4.0-rc.8] - 2026-10-23
 
 Published under `rc` on 2026-10-23 from release commit `7d33df7e252d11a7517d9a7ec87f627d525be40a` and tag `v1.4.0-rc.8`, after local preparation on 2026-10-22. The registry tarball matched the frozen qualified archive byte for byte, with `latest` left at `1.3.0`. Exact RC8 archive qualification is recorded separately in [RC Readiness](docs/RC-READINESS.md).

@@ -1,6 +1,15 @@
 # RC Readiness
 
-## Latest Status: 2026-10-26, RC9 Published
+## Latest Status: 2026-10-26, RC10 Preparation
+
+`1.4.0-rc.10` contains the V1 persistent reset boundary fix (`6d01265`) and
+source-grounded documentation corrections. Build, typecheck and implementation
+checks passed: 1,216 tests passed, 3 skipped, 0 failed. The exact RC10 archive,
+fresh consumer and native-host checks will be recorded below after packaging;
+RC9 archive/host results are historical and do not qualify RC10.
+Publication is pending; npm `rc` currently remains at RC9.
+
+## Historical Status: 2026-10-26, RC9 Published
 
 `1.4.0-rc.9` was published under `rc` from release commit
 `8ba7c6c286eacadf697b3c19e320f6646ae53b90` and tag `v1.4.0-rc.9`, both pushed
@@ -40,6 +49,22 @@ fresh native registry installation. RC9 live V2 generation, tool isolation in a
 native V2 generator, and Ubuntu/Lima remain unqualified; RC8 provider evidence
 is historical evidence for that archive. Results retain the 16,384-character
 server output cap. V1 uses paged standard dialogs; V2 uses a native scrollbox.
+
+## RC10 Changes: 2026-10-26
+
+Repository documentation now corrects clean-session tool visibility, permanent
+provider retry/fallback exclusions, cleanup recovery, reader limits and logging
+exposure. RC10 installation examples pin RC10, while the published RC9 README still
+pins RC8; corrected text ships in RC10. Historical acceptance
+documents retain their original evidence and are marked as archived references.
+
+RC10 V1 reset changes establish a persistent forward SDK-history boundary
+and stop direct pre-reset replay. They are not included in RC9, do not migrate
+existing RC9 resets, and do not erase OpenCode conversation history. Post-reset
+updates read full history to locate the boundary before applying the recent
+message cap; malformed boundary files or missing anchors stop summarization. This source
+change has no RC9 artifact or native-host qualification. See the [feature
+matrix](FEATURE-MATRIX.md#v1-reset-boundary) for its contract.
 
 ## Historical Status: 2026-10-23, RC8 Published
 

@@ -1,5 +1,7 @@
 # Isolated Windows Azure acceptance
 
+> **Legacy runner guide.** This guide and its dated results describe the earlier Azure acceptance harness. The runner still asserts that summary requests advertise no tools (`scripts/windows-azure-acceptance.ts`), which conflicts with RC8+ native V1's visible definitions and blocked execution. Its older literal V1 slash-action checks also need auditing against RC9's menu. Do not use a failure of those old assertions as a current STM product verdict or claim a full current matrix PASS. Current bounded UI checks use `scripts/v1-native-menu-acceptance.cjs` and `scripts/v2-native-reader-acceptance.cjs`; native V1 execution isolation has `scripts/v1-clean-tools-acceptance.mjs`. See [RC Readiness](RC-READINESS.md) for retained run scope. The instructions below remain historical; updating this guide does not repair or rerun that harness.
+
 `scripts/windows-azure-acceptance.ts` runs the same clean-mode journey against
 the V1 and V2 SDK/plugin generations, using real Azure `gpt-6-luna` or
 `deepseek-v4-flash` responses. It uses native Windows ConPTY for literal typing

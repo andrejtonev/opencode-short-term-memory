@@ -1,5 +1,7 @@
 # STM RC Acceptance Matrix
 
+> **Archived acceptance inventory.** This document records RC5/RC6-era contracts and dated runs, not RC9 instructions or a current PASS matrix. Its uses of "current" and "latest" refer to those snapshots. V1 now has a native `/stm` menu with confirmed reset and paged results; Logs returns a path in both generations. Native V1 clean summaries expose tool definitions and block execution, so an advertised-tool-absence assertion is no longer the native V1 contract. Use the [current feature matrix](FEATURE-MATRIX.md), [README controls](../README.md#native-v1-controls-rc9) and [RC Readiness](RC-READINESS.md) for current behavior and exact release scope. Historical results below remain attributed to their original bytes.
+
 > **Scope.** This is the source-grounded acceptance inventory for the RC5
 > candidate, not a claim that every row has been run. `SOURCE` means the
 > implementation or a stable contract was inspected; `UNIT` means a retained
