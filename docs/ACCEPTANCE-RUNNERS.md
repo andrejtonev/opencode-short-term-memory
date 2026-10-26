@@ -1,6 +1,6 @@
 # Acceptance runners
 
-Use this map when choosing a check. A source test, a fresh package consumer and a native host run prove different things. [RC Readiness](RC-READINESS.md) records frozen release results; [Feature Matrix](FEATURE-MATRIX.md) describes the generation contracts. Unreleased review fixes are not covered by RC10 receipts, and this guide records no new native or live-provider qualification.
+Use this map when choosing a check. A source test, a fresh package consumer and a native host run prove different things. [RC Readiness](RC-READINESS.md) records frozen release results; [Feature Matrix](FEATURE-MATRIX.md) describes the generation contracts. RC11 review fixes are not covered by RC10 receipts, and this guide records no new native or live-provider qualification.
 
 Run commands from the repository root unless stated otherwise. Build current source before a runner that consumes `dist/`. Install repository dependencies with Bun; V2 fixture runners also need `bun install` in `fixtures/v2-generation-probe/`. Supply explicit archive and host paths: changing a package version in an old runner does not establish release acceptance.
 

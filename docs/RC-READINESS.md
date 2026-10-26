@@ -1,8 +1,39 @@
 # RC Readiness
 
-Maintained and historical verification commands are mapped in [Acceptance Runners](ACCEPTANCE-RUNNERS.md). Unreleased review fixes require their own qualification; the frozen receipts below remain scoped to their named archives.
+Maintained and historical verification commands are mapped in [Acceptance Runners](ACCEPTANCE-RUNNERS.md). Review fixes require their own qualification; the frozen receipts below remain scoped to their named archives.
 
-## Latest Status: 2026-10-26, RC10 Published
+## Latest Status: 2026-10-26, RC11 Prepared
+
+`1.4.0-rc.11` packages the branch-review fixes since RC10, including lifecycle
+and reset fencing, atomic missing-file initialization, V1 active injection
+ownership, V2 active request tool isolation, and acceptance-harness corrections.
+Publication is requested under `rc`; this preparation record does not claim it
+has completed. Git push is separate from npm publication.
+
+Frozen archive: `.opencode/rc11/atonev-opencode-short-term-memory-1.4.0-rc.11.tgz`.
+SHA-256: `00ac6a8ab2a0a837f9bc31c5f15be2207ef9be28d9ea6ebcb04b0a289fd52572`.
+219,080 bytes, 90 regular packaged files; every packaged file matches the
+release checkout.
+
+Validation passed:
+
+- Release build, typecheck and source suite: 1,312 passed, 3 skipped, 0 failed;
+  1,315 tests across 78 files.
+- Fresh production consumer installed the exact archive and passed public
+  import and strict declaration checks.
+- Pre-release source checks on native V1 OpenCode 1.18.35 proved active summary
+  requests do not consume primary injection cadence. Native V2 2.0.32 proved
+  zero tools on the individual STM generation and preserved tools on concurrent
+  ordinary generation and after hook disposal. These used deterministic
+  providers and were not repeated against the frozen RC11 archive.
+
+Ignored local receipts: `.opencode/rc11/artifact.json`, `consumer-evidence.json`,
+`check-package.log` and `consumer.log`; native source receipts remain under
+`.opencode/fix-validation/`. Live-provider/free-tier compatibility, fresh native
+registry installation, Ubuntu/Lima, historical shutdown disposal and cold SDK
+bootstrap remain unqualified. No new UI qualification is claimed.
+
+## Historical Status: 2026-10-26, RC10 Published
 
 `1.4.0-rc.10` was published under `rc` from release commit
 `473c2273051d0fb86df3c455732c5e142dae2b0b` and tag `v1.4.0-rc.10`, both pushed

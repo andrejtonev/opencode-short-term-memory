@@ -7,8 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.0-rc.11] - 2026-10-26
+
+RC11 includes the branch-review fixes below. Source and deterministic native-host checks are separate from exact-archive consumer checks and live-provider qualification; see [RC Readiness](docs/RC-READINESS.md).
+
 ### Fixed
 
+- Initialize memory atomically only when absent, preserving empty files and concurrent external writes.
+- Route V1 primary memory injection through message-aware NoReply delivery in active mode, preventing summary requests from consuming primary reminder cadence.
+- Remove tools from individual V2 active summary requests, including clean-to-active fallback, while preserving ordinary generation requests and disposing the temporary hook.
+- Capture and verify owned Windows descendants around termination, preserve paid-run admission closure reasons, and correct historical acceptance-runner contracts and update assertions.
 - Fence V1 memory delivery across reset/deletion, report history failures as Update errors, and read live child delivery status. Bound fresh pre-compaction waiting while retaining unfinished update ownership.
 - Use durable visible history for V2 context summaries and reset cadence, preserve injection during busy updates, and fence pending generation/reset/file creation across plugin disposal.
 - Release abandoned V2 dialog ownership without letting stale dismissals release newer results.
@@ -21,7 +29,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Documentation
 
-- Correct release qualifiers and add a maintained/historical acceptance runner map. These local changes are separate from the published RC10 archive and its qualification receipts.
+- Correct release qualifiers and add a maintained/historical acceptance runner map. RC11 changes are separate from the published RC10 archive and its qualification receipts.
 
 ## [1.4.0-rc.10] - 2026-10-26
 

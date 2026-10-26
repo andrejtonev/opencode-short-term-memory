@@ -1,10 +1,10 @@
 # OpenCode Short-Term Memory Plugin
 
-Automatically summarizes conversation context into structured session memory and supports injecting it back into the system prompt — aiming to preserve user instructions, project context, decisions, and active references across long chats and compactions, without guaranteeing semantic preservation. The published testing release is `1.4.0-rc.10`, available under the npm `rc` tag. Update and injection timing differ between OpenCode generations; V2 system injection is opt-in and disabled by default, independently of automatic memory updates.
+Automatically summarizes conversation context into structured session memory and supports injecting it back into the system prompt — aiming to preserve user instructions, project context, decisions, and active references across long chats and compactions, without guaranteeing semantic preservation. The RC11 testing release is `1.4.0-rc.11`, intended for the npm `rc` tag. Update and injection timing differ between OpenCode generations; V2 system injection is opt-in and disabled by default, independently of automatic memory updates.
 
 **RC10 (`1.4.0-rc.10`)** adds persistent V1 reset boundaries and corrected documentation to RC9's unified V1 menu, paged V1 reader, native V2 scrollable results, and path-only Logs.
 
-**Unreleased dev fixes:** Memory initialization preserves existing files, including empty files, and atomically creates the template only when the file is missing. V1 primary memory injection uses message-aware NoReply delivery when active summarization is enabled, even when legacy system injection is selected. Active V2 summaries remove tool definitions through a hook scoped to the individual STM request, preserving the session's model, instructions and history. These changes are not included in published RC10.
+**RC11 fixes:** Memory initialization preserves existing files, including empty files, and atomically creates the template only when the file is missing. V1 primary memory injection uses message-aware NoReply delivery when active summarization is enabled, even when legacy system injection is selected. Active V2 summaries remove tool definitions through a hook scoped to the individual STM request, preserving the session's model, instructions and history. RC11 also includes the subsequent lifecycle, reader and acceptance fixes listed in the changelog; published RC10 remains unchanged.
 
 RC9 shipped preparation instructions that pinned RC8. RC10 corrects the installation examples; the historical RC9 archive remains unchanged.
 
@@ -36,7 +36,7 @@ See the [feature matrix](https://github.com/andrejtonev/opencode-short-term-memo
 
 ```json
 {
-  "plugins": ["@atonev/opencode-short-term-memory@1.4.0-rc.10"]
+  "plugins": ["@atonev/opencode-short-term-memory@1.4.0-rc.11"]
 }
 ```
 
@@ -55,7 +55,7 @@ The packaged plugin supplies separate server, `/tui` and `/rpc` exports resolved
 The [pinned authoritative CLI specification](https://github.com/anomalyco/opencode/blob/2670273ff17da96f85c5826ced57aa1b368754fa/packages/cli/src/commands/commands.ts) defines `plugin add <package>` as installing a plugin and adding it to global configuration, with no `--global` flag. Install this testing version explicitly:
 
 ```bash
-opencode plugin add '@atonev/opencode-short-term-memory@1.4.0-rc.10'
+opencode plugin add '@atonev/opencode-short-term-memory@1.4.0-rc.11'
 ```
 
 Verify both server and TUI configuration against [V2 TUI loading](#v1--v2-support) above, preserving existing entries. Keep their package versions aligned.
@@ -65,9 +65,9 @@ Verify both server and TUI configuration against [V2 TUI loading](#v1--v2-suppor
 The [V1 CLI documentation](https://opencode.ai/docs/cli/#plugin) and hosts `1.14.25`, `1.18.23`, and `1.18.35` support a local install by default and `--global` for a user-wide install. Run the local command from the project:
 
 ```bash
-opencode plugin '@atonev/opencode-short-term-memory@1.4.0-rc.10' --force
+opencode plugin '@atonev/opencode-short-term-memory@1.4.0-rc.11' --force
 # Or install globally:
-opencode plugin '@atonev/opencode-short-term-memory@1.4.0-rc.10' --global --force
+opencode plugin '@atonev/opencode-short-term-memory@1.4.0-rc.11' --global --force
 ```
 
 Local installation writes OpenCode configuration under `<git-worktree>/.opencode/`, or `<directory>/.opencode/` outside Git. Global installation uses OpenCode's global configuration directory, normally `~/.config/opencode/`, respecting XDG configuration. `--force` replaces the plugin version; it does not reset STM memory or overwrite STM configuration. V2's `plugin add` syntax is a different command.
@@ -76,7 +76,7 @@ For manual V1 configuration, add the published prerelease to the singular `plugi
 
 ```json
 {
-  "plugin": ["@atonev/opencode-short-term-memory@1.4.0-rc.10"]
+  "plugin": ["@atonev/opencode-short-term-memory@1.4.0-rc.11"]
 }
 ```
 
@@ -199,4 +199,4 @@ Why a separate session?
 - **Tool execution blocked** — Native V1 keeps tool definitions visible with approval permissions for free-model access, then rejects every tool invocation from STM summarizer sessions before execution. Standalone runtimes without the execution guard disable all tools in the request. STM skips memory creation, injection and updates for its own side sessions. Other plugins remain loaded at the host-instance level.
 - **Clean chat** — Summarization prompts never appear in the main chat UI.
 - **Host-resolved or explicit model** — By default summary calls omit a model override and use a fresh host-resolved model; this is not guaranteed to be the originating active-session model. Set `memoryModel` to a valid `provider/model` for an explicit, often cheaper override.
-- **Cleanup and recovery** — STM attempts side-session deletion immediately after summarization. Failed deletions remain tracked for later startup cleanup; immediate removal is not guaranteed. Unreleased V1 changes bound the caller's cleanup wait to five seconds and retain ownership of late deletion, so a stalled cleanup cannot block a completed summary indefinitely.
+- **Cleanup and recovery** — STM attempts side-session deletion immediately after summarization. Failed deletions remain tracked for later startup cleanup; immediate removal is not guaranteed. RC11 V1 changes bound the caller's cleanup wait to five seconds and retain ownership of late deletion, so a stalled cleanup cannot block a completed summary indefinitely.
