@@ -6,6 +6,7 @@ import { tmpdir, homedir } from "node:os";
 import { join, resolve, toNamespacedPath } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
 import { createHash, randomUUID } from "node:crypto";
+import { createRequire } from "node:module";
 import { keyboardRequestsByTurn } from "./keyboard-turn-requests";
 import { requestJournal } from "./request-evidence";
 import { cleanupOwnedChildren, applyCleanupVerdict } from "./windows-owned-process.cjs";
@@ -25,10 +26,21 @@ let faultTargetText = "";
 let releaseFault: (() => void) | undefined;
 const mode = process.env.STM_TEST_MODE === "active" ? "active" : "clean";
 const injection = process.env.STM_TEST_INJECTION !== "off";
+const v1NoReplyDelivery = generation === "v1" && (!injection || mode === "active");
 const providerID = generation === "v2" ? "azure-isolated" : "azure";
 assert.ok(["v1", "v2"].includes(generation));
 assert.ok(["gpt-6-luna", "deepseek-v4-flash"].includes(model));
 const hostRoot = resolve(hostsDirectory!);
+const ptyRoot = resolve(import.meta.dir, "../node_modules/node-pty");
+let ptyManifest: any;
+try {
+  ptyManifest = JSON.parse(await readFile(join(ptyRoot, "package.json"), "utf8"));
+  assert.equal(ptyManifest.name, "node-pty");
+  assert.equal(typeof ptyManifest.main, "string");
+  assert.equal(typeof createRequire(import.meta.url)(ptyRoot).spawn, "function");
+} catch (error) {
+  throw new Error(`Repository node-pty preflight failed before live inference: ${String(error)}`);
+}
 const native =
   generation === "v1"
     ? v1Executable
@@ -406,7 +418,12 @@ let result: any = {
   full,
   mode,
   injection,
-  configuredDelivery: injection ? "system" : generation === "v1" ? "promptNoReply" : "none",
+  configuredDelivery: v1NoReplyDelivery ? "promptNoReply" : injection ? "system" : "none",
+  cleanSummaryContract:
+    generation === "v1"
+      ? "V1 may advertise tool definitions; this Azure runner verifies no summary tool calls, while execution fencing is covered by scripts/v1-clean-tools-acceptance.mjs."
+      : "V2 clean summary requests advertise no tools.",
+  skippedScopes: [],
   installation: installedSeed
     ? { kind: "verified-prepared-package", seed: installedSeed, files: preparedPackageProof }
     : { kind: "fresh-bun-install" },
@@ -504,6 +521,14 @@ function toolNames(rows: any[]): string[] {
     (row.parts ?? row.content ?? []).filter((p: any) => p.type === "tool").map((p: any) => p.tool ?? p.name),
   );
 }
+function toolOutput(part: any): string {
+  return generation === "v1"
+    ? String(part.state?.output ?? "")
+    : (part.state?.content ?? [])
+        .filter((x: any) => x.type === "text")
+        .map((x: any) => x.text)
+        .join("");
+}
 async function phase(name: string, action: () => Promise<any>) {
   const start = requests.length;
   try {
@@ -532,11 +557,12 @@ async function openTerminal() {
     generation === "v1"
       ? ["attach", url, "--session", sessionID, "--dir", project]
       : ["--server", url, "--session", sessionID, ...(commandsOnly ? ["--log-level", "debug"] : [])];
-  terminal = spawn(
-    "node",
-    [resolve("scripts/windows-pty-bridge.cjs"), join(hostRoot, "node_modules/node-pty"), native, ...args],
-    { cwd: project, env, windowsHide: true, stdio: ["pipe", "pipe", "pipe"] },
-  );
+  terminal = spawn("node", [resolve("scripts/windows-pty-bridge.cjs"), ptyRoot, native, ...args], {
+    cwd: project,
+    env,
+    windowsHide: true,
+    stdio: ["pipe", "pipe", "pipe"],
+  });
   let buffer = "";
   terminal.stdout.on("data", (chunk: any) => {
     buffer += chunk.toString();
@@ -591,6 +617,21 @@ async function fullActions() {
   await writeFile(join(project, ".opencode/stm.jsonc"), JSON.stringify({ ...stmSettings, enabled: false }));
   await startHost();
   await createSession("Full isolated manual actions");
+  if (generation === "v1") {
+    await wait(async () => {
+      const events = (await readFile(join(memory, "session-memory.log"), "utf8").catch(() => ""))
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => {
+          try {
+            return JSON.parse(line);
+          } catch {
+            return null;
+          }
+        });
+      return events.some((event) => event?.event === "session_created" && event.sessionID === sessionID);
+    }, "V1 session.created memory initialization");
+  }
   if (generation === "v2")
     await writeFile(
       join(root, "plugin-inventory.json"),
@@ -610,13 +651,6 @@ async function fullActions() {
       /* Retain failure and exercise independent cases. */
     }
   };
-  const outputOf = (part: any) =>
-    generation === "v1"
-      ? part.state.output
-      : part.state.content
-          ?.filter((x: any) => x.type === "text")
-          .map((x: any) => x.text)
-          .join("");
   for (const action of commandsOnly ? [] : ["show", "status", "settings", "logs", "update", "setup", "reset"]) {
     await attempt(`compatibility-action-${action}`, async () => {
       const beforeRows = await history();
@@ -629,7 +663,7 @@ async function fullActions() {
         .filter((p: any) => p.type === "tool" && (p.tool ?? p.name) === "short_term_memory");
       assert.equal(parts.length, 1, "exactly one compatibility invocation");
       assert.equal(parts[0].state.status, "completed");
-      const output = outputOf(parts[0]);
+      const output = toolOutput(parts[0]);
       assert.ok(output?.length);
       if (action === "setup" || (action === "reset" && generation === "v2"))
         assert.match(output, /refus|not run|confirm/i);
@@ -653,7 +687,7 @@ async function fullActions() {
         .filter((p: any) => p.type === "tool" && (p.tool ?? p.name) === "stm_memory_reset");
       assert.equal(parts.length, 1);
       assert.equal(parts[0].state.status, "completed");
-      const output = outputOf(parts[0]);
+      const output = toolOutput(parts[0]);
       if (!confirm) {
         assert.match(output, /refus|confirm/i);
         assert.equal(await readFile(mem, "utf8"), sentinel);
@@ -663,6 +697,21 @@ async function fullActions() {
       }
       return { output, memory: await readFile(mem, "utf8") };
     });
+  }
+  if (generation === "v1") {
+    assert.ok(
+      phases.every((phase) => phase.verdict === "PASS"),
+      "V1 action phase failures cannot be masked by UI scope skip",
+    );
+    result.skippedScopes ??= [];
+    result.skippedScopes.push({
+      name: "V1 native menu qualification",
+      verdict: "SKIP",
+      maintainedRunner: "scripts/v1-native-menu-acceptance.cjs",
+      detail:
+        "The historical literal /stm server-command flow is retired; this Azure runner does not claim V1 native menu coverage.",
+    });
+    return;
   }
   await openTerminal();
   const commands = [
@@ -675,13 +724,14 @@ async function fullActions() {
     "setup confirm false",
     "setup confirm true",
     "setup confirm true",
-    ...(generation === "v2" ? ["reset", "reset confirm false", "reset confirm true"] : ["reset"]),
+    "reset",
+    "reset confirm false",
+    "reset confirm true",
     "invalid-action",
   ];
   for (const [index, action] of commands.entries()) {
     await attempt(`literal-command-${index}-${action.replaceAll(" ", "-")}`, async () => {
-      const snapshot = () =>
-        generation === "v1" ? history() : client.message.list({ sessionID }, { signal: AbortSignal.timeout(10000) });
+      const snapshot = () => client.message.list({ sessionID }, { signal: AbortSignal.timeout(10000) });
       const beforeRows = await snapshot();
       const requestStart = requests.length;
       const screenStart = terminalLog.length;
@@ -691,48 +741,36 @@ async function fullActions() {
       await Bun.sleep(400);
       terminal.stdin.write(JSON.stringify({ write: "\r" }) + "\n");
       let output = "";
-      if (generation === "v1") {
-        await wait(async () => {
-          const rows = (await history()).slice(beforeRows.length);
-          const part = rows
-            .flatMap((r: any) => r.parts ?? [])
-            .find((p: any) => p.synthetic && p.text?.startsWith("The STM action has already completed."));
-          if (part) output = JSON.parse(part.text.slice(part.text.indexOf("\n") + 1));
-          return part && rows.some((r: any) => r.info?.role === "assistant" && r.info.time?.completed);
-        }, `literal /stm ${action}`);
-        assert.ok(output.length);
-      } else {
-        const title = action === "invalid-action" ? "Unknown action" : `STM ${action.split(" ")[0]}`;
-        await wait(
-          () => {
-            const visible = stripVTControlCharacters(terminalLog.slice(screenStart));
-            assert.doesNotMatch(visible, /no connected TUI receiver|No action was run/);
-            if (action !== "invalid-action") assert.doesNotMatch(visible, /Failed to run command/);
-            // Long settings output can place the title above a short viewport.
-            // Require actual settings fields, rather than matching echoed input.
-            if (action === "settings")
-              return (
-                /"memoryModelSelection"\s*:/.test(visible) &&
-                /"maxDeltaMessages"\s*:\s*200/.test(visible) &&
-                /"updateHook"\s*:\s*"context"/.test(visible)
-              );
-            return visible.includes(title);
-          },
-          `visible /stm ${action}`,
-          30000,
-        );
-        output = stripVTControlCharacters(terminalLog.slice(screenStart));
-        if (action === "reset" || action === "reset confirm false") {
-          assert.match(output, /Refused:/);
-          assert.equal(await readFile(mem, "utf8"), memoryBefore);
-        }
-        if (action === "reset confirm true" && !commandsOnly) {
-          assert.match(output, /reset:\s*completed/);
-          assert.equal((await readFile(mem, "utf8")).includes("FULL_SWEEP_SENTINEL"), false);
-        }
-        assert.equal(requests.length, requestStart, "V2 command output is model-free");
-        assert.deepEqual(await snapshot(), beforeRows, "V2 slash command does not modify durable conversation");
+      const title = action === "invalid-action" ? "Unknown action" : `STM ${action.split(" ")[0]}`;
+      await wait(
+        () => {
+          const visible = stripVTControlCharacters(terminalLog.slice(screenStart));
+          assert.doesNotMatch(visible, /no connected TUI receiver|No action was run/);
+          if (action !== "invalid-action") assert.doesNotMatch(visible, /Failed to run command/);
+          // Long settings output can place the title above a short viewport.
+          // Require actual settings fields, rather than matching echoed input.
+          if (action === "settings")
+            return (
+              /"memoryModelSelection"\s*:/.test(visible) &&
+              /"maxDeltaMessages"\s*:\s*200/.test(visible) &&
+              /"updateHook"\s*:\s*"context"/.test(visible)
+            );
+          return visible.includes(title);
+        },
+        `visible /stm ${action}`,
+        30000,
+      );
+      output = stripVTControlCharacters(terminalLog.slice(screenStart));
+      if (action === "reset" || action === "reset confirm false") {
+        assert.match(output, /Refused:/);
+        assert.equal(await readFile(mem, "utf8"), memoryBefore);
       }
+      if (action === "reset confirm true" && !commandsOnly) {
+        assert.match(output, /reset:\s*completed/);
+        assert.equal((await readFile(mem, "utf8")).includes("FULL_SWEEP_SENTINEL"), false);
+      }
+      assert.equal(requests.length, requestStart, "V2 command output is model-free");
+      assert.deepEqual(await snapshot(), beforeRows, "V2 slash command does not modify durable conversation");
       assert.equal(
         await readFile(join(project, ".opencode/stm.jsonc"), "utf8"),
         configBefore,
@@ -1009,9 +1047,9 @@ try {
         async () => (await readFile(mem, "utf8").catch(() => "")).toLowerCase().includes("violet"),
         "second automatic memory",
       );
-      if (mode === "clean")
+      if (mode === "clean" && generation === "v2")
         for (const req of requests.filter((x) => x.summary))
-          assert.deepEqual(req.tools, [], "summary tools must be absent");
+          assert.deepEqual(req.tools, [], "V2 clean summary tools must be absent");
       if (full) {
         await type(typedPrompts[2]!);
         await wait(
@@ -1039,9 +1077,8 @@ try {
             "system injection cadence across three typed turns",
           );
         if (generation === "v1") {
-          const delivered = injection
-            ? fresh
-            : ordinary.slice(-3).map(
+          const delivered = v1NoReplyDelivery
+            ? ordinary.slice(-3).map(
                 (x) =>
                   x.messages.filter((m: any) => {
                     const text =
@@ -1050,10 +1087,11 @@ try {
                         : (m.content ?? []).map((part: any) => part.text ?? "").join("\n");
                     return m.role === "user" && text.trimStart().startsWith("[MEMORY_SYSTEM]");
                   }).length,
-              );
+              )
+            : fresh;
           assert.deepEqual(
             delivered,
-            injection ? [0, 1, 0] : [0, 1, 1],
+            v1NoReplyDelivery ? [0, 1, 1] : [0, 1, 0],
             "V1 injection cadence, including retained NoReply messages",
           );
           result.v1DeliveryCadence = delivered;
@@ -1065,7 +1103,7 @@ try {
               typeof message.content === "string"
                 ? message.content
                 : (message.content ?? []).map((part: any) => part.text ?? "").join("\n");
-            const role = generation === "v1" && !injection ? "user" : "system";
+            const role = v1NoReplyDelivery ? "user" : "system";
             return (
               message.role === role &&
               (role === "user" ? text.trimStart().startsWith("[MEMORY_SYSTEM]") : text.includes("[MEMORY_SYSTEM]"))
@@ -1081,12 +1119,12 @@ try {
       }
       return { sessionID, summaries: requests.filter((x) => x.summary).length, memory: await readFile(mem, "utf8") };
     });
-    await phase("read-logs-compatibility-tools", async () => {
+    await phase("read-logs-status-tools", async () => {
       const rows = await prompt(
-        "Call stm_memory_read, stm_memory_logs, and short_term_memory with action=status exactly once each. Do not call any other tools. Reply briefly.",
+        "Call stm_memory_read, stm_memory_logs, and stm_memory_status exactly once each. Do not call any other tools. Reply briefly.",
       );
       const names = toolNames(rows);
-      for (const name of ["stm_memory_read", "stm_memory_logs", "short_term_memory"]) assert.ok(names.includes(name));
+      for (const name of ["stm_memory_read", "stm_memory_logs", "stm_memory_status"]) assert.ok(names.includes(name));
       return { tools: names };
     });
     await phase("manual-update-tool", async () => {
@@ -1094,16 +1132,19 @@ try {
       const startedAt = Date.now();
       const checkpointPath = join(memory, "checkpoints", `${sessionID}.last-message-id.txt`);
       const checkpointBefore = await readFile(checkpointPath, "utf8").catch(() => "");
+      const memoryBefore = await readFile(join(memory, `session_${sessionID}.md`), "utf8").catch(() => "");
+      const beforeRows = await history();
       const rows = await prompt("Call stm_memory_update exactly once, then reply briefly. Do not use any other tools.");
-      assert.ok(toolNames(rows).includes("stm_memory_update"));
+      const updates = rows
+        .slice(beforeRows.length)
+        .flatMap((row: any) => row.parts ?? row.content ?? [])
+        .filter((part: any) => part.type === "tool" && (part.tool ?? part.name) === "stm_memory_update");
+      assert.equal(updates.length, 1, "exactly one manual update invocation");
+      assert.equal(updates[0].state?.status, "completed");
+      const output = toolOutput(updates[0]);
+      assert.ok(output.trim(), "manual update must return an outcome");
       if (generation === "v1" && mode === "active") {
-        const updates = rows
-          .flatMap((row: any) => row.parts ?? [])
-          .filter((part: any) => part.type === "tool" && part.tool === "stm_memory_update");
-        assert.ok(
-          updates.some((part: any) => String(part.state?.output).includes("deferred until")),
-          "busy active update must return an explicit deferred result",
-        );
+        assert.ok(/deferred until/i.test(output), "busy active update must return an explicit deferred result");
         await wait(async () => {
           // The logger may be appending the final line while this poll reads it.
           const events = (await readFile(logPath, "utf8"))
@@ -1119,9 +1160,25 @@ try {
             (await readFile(checkpointPath, "utf8").catch(() => "")) !== checkpointBefore
           );
         }, "deferred manual update commits after idle");
-        return { deferred: true, committedAfterIdle: true };
+        return { output, deferred: true, committedAfterIdle: true };
       }
-      return {};
+      assert.doesNotMatch(output, /update:\s*error|Memory update failed:/i, "manual update returned an error outcome");
+      if (generation === "v2" && /^update: committed$/m.test(output)) {
+        const progressLine = output.match(/^progress: cumulative-invocation (.+)$/m)?.[1];
+        assert.ok(progressLine, "committed V2 update must report progress");
+        assert.ok(JSON.parse(progressLine).checkpointedChunks > 0, "committed V2 update must checkpoint a chunk");
+        await wait(
+          async () => (await readFile(checkpointPath, "utf8").catch(() => "")) !== checkpointBefore,
+          "committed V2 manual update checkpoint",
+        );
+      }
+      const memoryAfter = await readFile(join(memory, `session_${sessionID}.md`), "utf8").catch(() => "");
+      const checkpointAfter = await readFile(checkpointPath, "utf8").catch(() => "");
+      return {
+        output,
+        memoryChanged: memoryAfter !== memoryBefore,
+        checkpointChanged: checkpointAfter !== checkpointBefore,
+      };
     });
     await phase("summary-isolation-and-cleanup", async () => {
       await wait(
@@ -1146,7 +1203,7 @@ try {
         "Expected actual summary requests",
       );
       for (const request of requests.filter((x) => x.summary)) {
-        if (mode === "clean") assert.deepEqual(request.tools, []);
+        if (mode === "clean" && generation === "v2") assert.deepEqual(request.tools, []);
         assert.equal(request.response?.message?.tool_calls?.length ?? 0, 0, "summaries must not request tool calls");
       }
       for (const id of sideIDs) assert.equal(await Bun.file(join(memory, `session_${id}.md`)).exists(), false);
@@ -1154,7 +1211,12 @@ try {
         rows.some((x) => x.event === "collect_recent_messages_error"),
         false,
       );
-      return { sideIDs, memoryFiles: await readdir(memory) };
+      return {
+        sideIDs,
+        memoryFiles: await readdir(memory),
+        summaryTools: requests.filter((x) => x.summary).map((request) => request.tools),
+        toolPolicy: result.cleanSummaryContract,
+      };
     });
     if (full && process.env.STM_TEST_ACTIONS !== "off") await fullActions();
   }

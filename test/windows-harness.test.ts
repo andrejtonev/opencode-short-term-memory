@@ -56,6 +56,8 @@ test("Windows cleanup never signals terminal children or invalid process IDs", a
       killed.push(value.pid!);
       return { succeeded: true, error: null };
     },
+    captureTree: async (value) => ({ complete: true, rootPids: [value.pid!], identities: [] }),
+    verifyTreeGone: async () => true,
   });
   expect(killed).toEqual([]);
   expect(cleanup.complete).toBe(true);
@@ -91,6 +93,11 @@ test("owned cleanup observes immediate child exit and bounds an unresponsive chi
     const events = Object.assign(new EventEmitter(), { pid: 12001, exitCode: null as number | null, signalCode: null });
     const cleanup = await cleanupOwnedChildren([events as unknown as ChildProcess], {
       timeoutMs: 30,
+      captureTree: async (value) => ({
+        complete: true,
+        rootPids: [value.pid!],
+        identities: [{ pid: value.pid!, created: "100", commandLine: "node" }],
+      }),
       killTree: async () => {
         if (exits) {
           events.exitCode = 0;
@@ -120,6 +127,8 @@ test("owned cleanup waits for listener closure after child exit within its deadl
     const cleanup = await cleanupOwnedChildren([child(12001, 0)], {
       timeoutMs: 1000,
       endpoints: [`http://127.0.0.1:${(server.address() as AddressInfo).port}`],
+      captureTree: async (value) => ({ complete: true, rootPids: [value.pid!], identities: [] }),
+      verifyTreeGone: async () => true,
     });
     expect(connections).toBe(1);
     expect(cleanup.portsClosed).toBe(true);
@@ -166,12 +175,18 @@ test("native V2 finalization records cleanup failure and exits nonzero without t
       cleanupOwnedChildren(children, {
         ...options,
         timeoutMs: 30,
+        captureTree: async (value) => ({
+          complete: true,
+          rootPids: [value.pid!],
+          identities: [{ pid: value.pid!, created: "100", commandLine: "node" }],
+        }),
         killTree: async (value) => {
           attempted.push(value.pid!);
           return { succeeded: false, error: "denied" };
         },
         waitForExit: async () => false,
         portIsClosed: async () => false,
+        verifyTreeGone: async () => false,
       }),
     applyCleanupVerdict,
     closeOwnedServer,

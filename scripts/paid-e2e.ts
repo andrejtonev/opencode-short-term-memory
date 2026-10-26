@@ -14,6 +14,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
+import { tmpdir } from "node:os";
 import { createHash, randomBytes } from "node:crypto";
 import assert from "node:assert/strict";
 import { stripVTControlCharacters } from "node:util";
@@ -47,6 +48,7 @@ export interface Ledger {
   estimatedUnits: number;
   maxObservedUnits: number;
   closed: boolean;
+  closedReason: string | null;
 }
 export function createLedger(prior: Prior = { knownUnits: 0, uncertainUnits: 0, attempts: 0, provenance: [] }): Ledger {
   requireThat(
@@ -63,7 +65,12 @@ export function createLedger(prior: Prior = { knownUnits: 0, uncertainUnits: 0, 
     estimatedUnits: 0,
     maxObservedUnits: exposure,
     closed: false,
+    closedReason: null,
   };
+}
+function closeLedger(ledger: Ledger, reason: string): void {
+  ledger.closed = true;
+  ledger.closedReason ??= reason;
 }
 export function parseRunArgs(args: string[]): { priorPaths: string[]; cliPath?: string } {
   requireThat(
@@ -96,8 +103,9 @@ function validateCliPath(path: string): { path: string; realPath: string; sha256
   return { path, realPath, sha256: createHash("sha256").update(readFileSync(realPath)).digest("hex") };
 }
 export function reserve(ledger: Ledger): number {
-  if (ledger.closed || ledger.reservedUnits + RESERVATION_UNITS > LIMIT_UNITS) {
-    ledger.closed = true;
+  if (ledger.closed) throw new Error(`admission closed: ${ledger.closedReason ?? "unknown reason"}`);
+  if (ledger.reservedUnits + RESERVATION_UNITS > LIMIT_UNITS) {
+    closeLedger(ledger, "reservation_ceiling");
     throw new Error("admission closed: USD 5 reservation ceiling");
   }
   // Synchronous, before any await/fetch: concurrent requests cannot oversubscribe.
@@ -116,11 +124,11 @@ export function settle(ledger: Ledger, id: number, units: number): void {
   entry.state = "settled";
   entry.units = units;
 }
-function retainUncertain(ledger: Ledger, id: number): void {
+function retainUncertain(ledger: Ledger, id: number, reason: string): void {
   const entry = ledger.entries.get(id);
   if (entry?.state === "pending") entry.state = "uncertain";
   // A delivery failure after settlement remains a known charge, not a second reserve.
-  ledger.closed = true;
+  closeLedger(ledger, reason);
 }
 function record(value: unknown): value is Json {
   return !!value && typeof value === "object" && !Array.isArray(value);
@@ -597,7 +605,7 @@ export function createProxy(options: {
       const text = await cappedText(upstream.body);
       if (!upstream.ok) {
         // Preserve the provider's HTTP status and error, but never echo a raw completion.
-        retainUncertain(ledger, id);
+        retainUncertain(ledger, id, "provider_http_error");
         let error: unknown;
         try {
           error = JSON.parse(text).error;
@@ -605,7 +613,13 @@ export function createProxy(options: {
           /* Non-JSON errors are still actionable. */
         }
         const safe = redact(error === undefined ? text : JSON.stringify(error), [apiKey, token]);
-        emit({ status, error: safe.slice(0, 4096), admission: "closed", reservationRetained: true });
+        emit({
+          status,
+          error: safe.slice(0, 4096),
+          admission: "closed",
+          closedReason: ledger.closedReason,
+          reservationRetained: true,
+        });
         return new Response(error === undefined ? safe.slice(0, 4096) : `{"error":${safe}}`, {
           status,
           headers: { "content-type": error === undefined ? "text/plain" : "application/json" },
@@ -645,12 +659,26 @@ export function createProxy(options: {
         headers: { "content-type": streaming ? "text/event-stream" : "application/json", "cache-control": "no-store" },
       });
     } catch (error) {
-      if (id !== undefined) retainUncertain(ledger, id);
+      if (id !== undefined) {
+        const entry = ledger.entries.get(id);
+        const reason =
+          entry?.state === "settled"
+            ? "local_delivery_failure"
+            : options.signal?.aborted
+              ? "shutdown"
+              : status === undefined
+                ? error instanceof Error && error.name === "TimeoutError"
+                  ? "provider_timeout"
+                  : "provider_transport_failure"
+                : "response_validation_failure";
+        retainUncertain(ledger, id, reason);
+      }
       const message = redact(error instanceof Error ? error.message : "proxy failure", [apiKey, token]).slice(0, 4096);
       emit({
         status: status ?? null,
         error: message,
         admission: ledger.closed ? "closed" : "rejected",
+        ...(ledger.closedReason ? { closedReason: ledger.closedReason } : {}),
         reservationRetained: id !== undefined && ledger.entries.get(id)?.state !== "settled",
         accountingState: id === undefined ? undefined : ledger.entries.get(id)?.state,
       });
@@ -716,9 +744,9 @@ function sandboxEnvironment(root: string, baseURL: string, token: string): NodeJ
     OPENCODE_DISABLE_TERMINAL_TITLE: "1",
   };
 }
-function setupSandbox(): string {
-  requireThat(statSync(PARENT).isDirectory(), "sandbox parent missing");
-  const root = mkdtempSync(join(PARENT, "stm-paid-e2e-"));
+function setupSandbox(parent = PARENT): string {
+  requireThat(statSync(parent).isDirectory(), "sandbox parent missing");
+  const root = mkdtempSync(join(parent, "stm-paid-e2e-"));
   for (const dir of [
     "home/.config",
     "home/.local/share/opencode",
@@ -805,12 +833,13 @@ async function run(prior: Prior, selectedCli?: ReturnType<typeof validateCliPath
     "test/e2e/",
   ];
   const stopGroup = () => {
-    ledger.closed = true;
+    closeLedger(ledger, "launcher_shutdown");
     upstreamShutdown.abort();
     killGroup(group);
   };
   const onSignal = () => {
     blocker = "launcher interrupted";
+    closeLedger(ledger, "launcher_interrupted");
     stopGroup();
   };
   process.on("SIGINT", onSignal);
@@ -1001,6 +1030,7 @@ async function run(prior: Prior, selectedCli?: ReturnType<typeof validateCliPath
       priorUncertainUSD: prior.uncertainUnits / 1e8,
       attemptsIncludingPreflight: ledger.attempts,
       totalAttempts: prior.attempts + ledger.attempts,
+      closedReason: ledger.closedReason,
       currentSettledUSD: ledger.estimatedUnits / 1e8,
       currentUncertainUSD: currentUncertain / 1e8,
       currentOutstandingUSD: 0,
@@ -1068,8 +1098,8 @@ async function selfTest(): Promise<void> {
   );
   assert.deepEqual(countTestResults(execution + summary + execution + summary), expectedCounts(2, 2));
   const priorPaths = [
-    "/tmp/opencode/stm-paid-e2e-os0JV2/evidence/report.json",
-    "/tmp/opencode/stm-paid-e2e-f5faOd/evidence/report.json",
+    join(tmpdir(), "opencode/stm-paid-e2e-os0JV2/evidence/report.json"),
+    join(tmpdir(), "opencode/stm-paid-e2e-f5faOd/evidence/report.json"),
   ];
   assert.deepEqual(
     parseRunArgs(["--run", "--prior-evidence", dirname(priorPaths[0]), "--prior-report", priorPaths[1]]),
@@ -1102,7 +1132,8 @@ async function selfTest(): Promise<void> {
   assert.throws(() => settle(carried, 99, 114));
   const pendingID = reserve(carried);
   assert.throws(() => settle(carried, pendingID, RESERVATION_UNITS + 1));
-  retainUncertain(carried, pendingID);
+  retainUncertain(carried, pendingID, "self_test_uncertain_attempt");
+  assert.equal(carried.closedReason, "self_test_uncertain_attempt");
   assert.throws(() => settle(carried, pendingID, 1));
   const ledger = createLedger();
   await Promise.all(Array.from({ length: 21 }, async () => reserve(ledger)));
@@ -1312,6 +1343,7 @@ async function selfTest(): Promise<void> {
   assert.equal(concurrentLedger.reservedUnits, 480_170_880);
   assert.equal(concurrentLedger.estimatedUnits, 457_305_600);
   assert.equal(concurrentLedger.closed, true);
+  assert.equal(concurrentLedger.closedReason, "reservation_ceiling");
   for (const failure of [
     "provider",
     "missing-usage",
@@ -1327,11 +1359,13 @@ async function selfTest(): Promise<void> {
   ]) {
     const failed = createLedger();
     let calls = 0;
+    const failureEvents: Json[] = [];
     const handler = createProxy({
       endpoint: "https://mock.invalid",
       apiKey: "azure-secret",
       token: "local-secret",
       ledger: failed,
+      telemetry: (event) => failureEvents.push(event),
       fetcher: async () => {
         calls++;
         if (failure === "network") throw new Error("azure-secret local-secret");
@@ -1380,9 +1414,42 @@ async function selfTest(): Promise<void> {
     assert.equal(failed.estimatedUnits, failure === "local-oversized" ? 114 : 0);
     assert.equal(failed.entries.get(1)?.state, failure === "local-oversized" ? "settled" : "uncertain");
     assert.equal(failed.closed, true);
+    assert.equal(
+      failed.closedReason,
+      failure === "provider"
+        ? "provider_http_error"
+        : failure === "local-oversized"
+          ? "local_delivery_failure"
+          : failure === "timeout"
+            ? "provider_timeout"
+            : failure === "network"
+              ? "provider_transport_failure"
+              : "response_validation_failure",
+    );
+    const priorReservedUnits = failed.reservedUnits;
     assert.equal((await handler(makeRequest())).status, 429);
+    assert.equal(failed.reservedUnits, priorReservedUnits);
+    assert.equal(failed.closedReason, failureEvents.at(-1)?.closedReason);
     assert.equal(calls, 1);
   }
+  const shutdownController = new AbortController();
+  const shutdownLedger = createLedger();
+  const shutdownDuringRequest = createProxy({
+    endpoint: "https://mock.invalid",
+    apiKey: "mock",
+    token: "local-secret",
+    ledger: shutdownLedger,
+    signal: shutdownController.signal,
+    fetcher: async () => {
+      shutdownController.abort();
+      throw new DOMException("mock shutdown", "AbortError");
+    },
+  });
+  assert.equal((await shutdownDuringRequest(makeRequest())).status, 502);
+  assert.equal(shutdownLedger.closedReason, "shutdown");
+  assert.equal(shutdownLedger.reservedUnits, RESERVATION_UNITS);
+  assert.equal((await shutdownDuringRequest(makeRequest())).status, 429);
+  assert.equal(shutdownLedger.reservedUnits, RESERVATION_UNITS);
   const smallResponse = {
     ...response,
     usage: {
@@ -1408,6 +1475,10 @@ async function selfTest(): Promise<void> {
   assert.equal(sequential.closed, false);
 
   const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { detached: true, stdio: "ignore" });
+  const stopTestChild = () => {
+    if (process.platform === "win32") child.kill("SIGKILL");
+    else killGroup(child.pid);
+  };
   const exited = new Promise<string | null>((resolve, reject) => {
     child.once("error", reject);
     child.once("close", (_code, signal) => resolve(signal));
@@ -1426,20 +1497,22 @@ async function selfTest(): Promise<void> {
     },
     onClosed: () => {
       closedCalls++;
-      killGroup(child.pid);
+      stopTestChild();
     },
   });
-  const safety = setTimeout(() => killGroup(child.pid), 3000);
+  const safety = setTimeout(stopTestChild, 3000);
   try {
     const start = Date.now();
     assert.equal((await shutdownProxy(makeRequest())).status, 429);
-    assert.equal(await exited, "SIGKILL");
+    const signal = await exited;
+    if (process.platform === "win32") assert.ok(child.exitCode !== null || child.signalCode !== null);
+    else assert.equal(signal, "SIGKILL");
     assert.ok(Date.now() - start < 2500);
     assert.equal(closedCalls, 1);
     assert.equal(shutdownFetches, 0);
   } finally {
     clearTimeout(safety);
-    killGroup(child.pid);
+    stopTestChild();
   }
 
   if (priorPaths.every(existsSync)) {
@@ -1460,7 +1533,7 @@ async function selfTest(): Promise<void> {
       before,
     );
   }
-  const fixtureRoot = mkdtempSync(join(PARENT, "stm-ledger-selftest-"));
+  const fixtureRoot = mkdtempSync(join(tmpdir(), "stm-ledger-selftest-"));
   try {
     const reportPath = join(fixtureRoot, "report.json");
     const logPath = join(fixtureRoot, "requests.jsonl");
@@ -1526,7 +1599,25 @@ async function selfTest(): Promise<void> {
   } finally {
     rmSync(fixtureRoot, { recursive: true, force: true });
   }
-  const root = setupSandbox();
+  if (process.platform === "win32") {
+    const root = mkdtempSync(join(tmpdir(), "stm-paid-e2e-selftest-env-"));
+    try {
+      const env = sandboxEnvironment(root, "http://127.0.0.1:1/v1", "local-secret");
+      assert.equal(env.AZURE_RESOURCE_NAME, undefined);
+      assert.equal(env.AZURE_API_KEY, undefined);
+      const config = JSON.parse(env.OPENCODE_CONFIG_CONTENT!);
+      assert.equal(config.model, MODEL_ID);
+      assert.deepEqual(config.enabled_providers, ["paid-e2e"]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+    console.log(
+      "self-test PASS: CLI option validation, settlement and exposure accounting; prior evidence; provider, validation, timeout and shutdown closure labels; retained reservations; no credentials read or paid inference; SKIP POSIX CLI sandbox routing on Windows",
+    );
+    return;
+  }
+  const selfTestParent = mkdtempSync(join(tmpdir(), "stm-paid-e2e-parent-"));
+  const root = setupSandbox(selfTestParent);
   try {
     const env = sandboxEnvironment(root, "http://127.0.0.1:1/v1", "local-secret");
     assert.equal(env.AZURE_RESOURCE_NAME, undefined);
@@ -1587,7 +1678,7 @@ async function selfTest(): Promise<void> {
       ],
     });
   } finally {
-    rmSync(root, { recursive: true, force: true });
+    rmSync(selfTestParent, { recursive: true, force: true });
   }
   console.log(
     "self-test PASS: CLI option validation, executable identity and sandbox discovery/serve/attached-run routing; settlement and exposure accounting; sequential >21 and concurrency; prior evidence reconciliation; malformed usage/tools, timeouts and provider errors fail closed; delivery failure remains settled; prompt/response envelope; shutdown; sandbox helper; no credentials read or paid inference",
