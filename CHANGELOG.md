@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.4.0-rc.11] - 2026-10-26
 
-RC11 includes the branch-review fixes below. Source and deterministic native-host checks are separate from exact-archive consumer checks and live-provider qualification; see [RC Readiness](docs/RC-READINESS.md).
+Published under `rc` from release commit `64c2bc3e0887d5f7eeaa54e92a5a904e3fef2447` and local tag `v1.4.0-rc.11`, with `latest` left at `1.3.0`. Registry bytes match the validated frozen archive. RC11 includes the branch-review fixes below. Source and deterministic native-host checks are separate from exact-archive consumer checks and live-provider qualification; see [RC Readiness](docs/RC-READINESS.md). Git push was not part of this publication.
 
 ### Fixed
 

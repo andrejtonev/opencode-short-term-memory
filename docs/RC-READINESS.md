@@ -2,13 +2,17 @@
 
 Maintained and historical verification commands are mapped in [Acceptance Runners](ACCEPTANCE-RUNNERS.md). Review fixes require their own qualification; the frozen receipts below remain scoped to their named archives.
 
-## Latest Status: 2026-10-26, RC11 Prepared
+## Latest Status: 2026-10-26, RC11 Published
 
 `1.4.0-rc.11` packages the branch-review fixes since RC10, including lifecycle
 and reset fencing, atomic missing-file initialization, V1 active injection
 ownership, V2 active request tool isolation, and acceptance-harness corrections.
-Publication is requested under `rc`; this preparation record does not claim it
-has completed. Git push is separate from npm publication.
+Published under `rc` from release commit
+`64c2bc3e0887d5f7eeaa54e92a5a904e3fef2447` and local tag `v1.4.0-rc.11`.
+Registry verification confirms `rc: 1.4.0-rc.11` and `latest: 1.3.0`.
+The downloaded registry tarball matches the frozen archive byte for byte,
+including SHA-256, npm SHA-1 and SHA-512 integrity. Git commits and the tag have
+not been pushed as part of this publication.
 
 Frozen archive: `.opencode/rc11/atonev-opencode-short-term-memory-1.4.0-rc.11.tgz`.
 SHA-256: `00ac6a8ab2a0a837f9bc31c5f15be2207ef9be28d9ea6ebcb04b0a289fd52572`.
@@ -28,7 +32,7 @@ Validation passed:
   providers and were not repeated against the frozen RC11 archive.
 
 Ignored local receipts: `.opencode/rc11/artifact.json`, `consumer-evidence.json`,
-`check-package.log` and `consumer.log`; native source receipts remain under
+`publication.json`, `check-package.log` and `consumer.log`; native source receipts remain under
 `.opencode/fix-validation/`. Live-provider/free-tier compatibility, fresh native
 registry installation, Ubuntu/Lima, historical shutdown disposal and cold SDK
 bootstrap remain unqualified. No new UI qualification is claimed.
