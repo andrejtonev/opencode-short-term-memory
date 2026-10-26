@@ -9,11 +9,10 @@ import {
   memoryPathFor,
   logPath,
   parseModel,
-  removePath,
-  checkpointPathFor,
 } from "./memory-utils";
 import { resetSessionDeliveryState, type SessionRuntimeState } from "./session-state";
 import type { MemoryUpdateDisposition } from "./memory-update-result";
+import { persistV1Reset, selectV1ResetBoundary } from "./v1-reset-boundary";
 
 export function parseMemoryActionFromCommandArgument(argument: unknown): string {
   const raw = String(argument || "")
@@ -148,15 +147,16 @@ export async function executeMemoryAction(
     if (ctx.resetSessionPersistence) {
       await ctx.resetSessionPersistence(sessionID, config);
     } else {
-      await removePath(memoryPathFor(sessionID, config.memoryDir));
-      await removePath(checkpointPathFor(sessionID, config.memoryDir));
-      await ensureMemoryFile(sessionID, config);
+      const result = await client.session.messages({ path: { id: sessionID } });
+      if (result.error || !Array.isArray(result.data))
+        throw new Error("Reset refused: conversation history unavailable.");
+      await persistV1Reset(sessionID, config, selectV1ResetBoundary(result.data));
     }
     const s = sessionStates.get(sessionID);
     if (s) resetSessionDeliveryState(s);
     ctx.clearSessionDeliveryMetadata?.(sessionID);
     await logEvent(config, "memory_reset", { sessionID });
-    return `Reset memory for session ${sessionID}.`;
+    return `Reset memory for session ${sessionID}. Future updates use only conversation after the saved reset boundary; missing anchors pause updates.`;
   }
   if (action === "update") {
     const disposition = await updateMemoryFn(client, sessionID, "manual_tool", config);

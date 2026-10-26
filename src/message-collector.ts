@@ -4,7 +4,6 @@ import {
   getMessageRole,
   getMessageText,
   getMessageTextFromParts,
-  getMessageTime,
   isInternalPartType,
   sanitizeMessage,
   INJECTION_PREFIX,
@@ -17,6 +16,7 @@ import {
 } from "./memory-utils";
 import type { Client } from "./types";
 import type { RuntimeContract } from "./runtime-contract";
+import { getV1HistoryMessageID, historyAfterV1Reset, readV1ResetBoundary, sortV1History } from "./v1-reset-boundary";
 
 type MessageReader = Pick<RuntimeContract, "readSessionMessages">;
 
@@ -81,14 +81,7 @@ export function isLikelyInternalAssistantMessage(row: unknown, cleanText: string
   return false;
 }
 
-export function getMessageID(row: unknown) {
-  const r = row as Record<string, unknown>;
-  const message = r?.message as Record<string, unknown> | undefined;
-  const info = r?.info as Record<string, unknown> | undefined;
-  const messageInfo = message?.info as Record<string, unknown> | undefined;
-  const candidate = r?.id ?? r?.messageID ?? r?.messageId ?? message?.id ?? info?.id ?? messageInfo?.id;
-  return String(candidate || "").trim();
-}
+export const getMessageID = getV1HistoryMessageID;
 
 export async function readLastProcessedMessageID(sessionID: string, config: SessionMemoryConfig) {
   return (await readText(checkpointPathFor(sessionID, config.memoryDir), "")).trim();
@@ -117,21 +110,14 @@ export async function collectVisibleMessagesSinceCheckpoint(
       });
     }
 
-    const rows = await runtime.readSessionMessages(sessionID, { limit: config.maxDeltaMessages });
-    const list = [...rows];
-
-    list.sort((a, b) => {
-      const timeA = getMessageTime(a);
-      const timeB = getMessageTime(b);
-      if (timeA !== undefined && timeB !== undefined) {
-        return timeA - timeB;
-      }
-      const idA = getMessageID(a);
-      const idB = getMessageID(b);
-      if (idA < idB) return -1;
-      if (idA > idB) return 1;
-      return 0;
-    });
+    const boundary = await readV1ResetBoundary(sessionID, config.memoryDir);
+    // A recent window cannot prove a reset anchor disappeared rather than just
+    // falling outside maxDeltaMessages. Locate it in durable history first.
+    const rows = await runtime.readSessionMessages(
+      sessionID,
+      boundary ? undefined : { limit: config.maxDeltaMessages },
+    );
+    const list = boundary ? historyAfterV1Reset(rows, boundary).slice(-config.maxDeltaMessages) : sortV1History(rows);
 
     let startIndex = 0;
     if (sinceMessageID) {

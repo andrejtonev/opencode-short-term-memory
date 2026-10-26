@@ -174,7 +174,7 @@ export async function setupV1Tui<Node>(api: V1TuiContext<Node>, _options?: unkno
         title: `STM ${action}`,
         message:
           action === "reset"
-            ? "Reset this session's saved memory and checkpoint? V1's next update can summarize earlier conversation again."
+            ? "Reset this session's saved memory and checkpoint? Future memory updates use only conversation after the saved reset boundary. Conversation history remains."
             : "Create an optional project-local .opencode/stm.jsonc example? Existing STM configuration is preserved. Installation already creates the minimal config.",
         // Host DialogConfirm clears its dialog after this callback returns.
         onConfirm: () =>

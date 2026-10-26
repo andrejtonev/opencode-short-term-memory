@@ -72,7 +72,11 @@ describe("session lifecycle generation safety", () => {
       const collectionStarted = deferred<void>();
       const releaseCollection = deferred<unknown>();
       const client = createFakeClient({ promptText: updatedMemory });
+      let historyReads = 0;
       client.session.messages = async () => {
+        // Reset now needs its own durable snapshot while the earlier update's
+        // history read remains held. These are independent host API requests.
+        if (historyReads++ > 0) return { data: messageRows };
         collectionStarted.resolve();
         return await releaseCollection.promise;
       };

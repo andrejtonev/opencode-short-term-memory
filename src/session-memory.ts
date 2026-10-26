@@ -76,6 +76,12 @@ import {
   rememberTaggedOriginAlias,
 } from "./session-state";
 import { maybeBootstrapSessionHistory, processMemoryChunks } from "./memory-lifecycle";
+import {
+  persistV1Reset,
+  readV1ResetBoundary,
+  selectV1ResetBoundary,
+  v1ResetBoundaryPathFor,
+} from "./v1-reset-boundary";
 
 type SharedRuntime = Pick<
   RuntimeContract,
@@ -332,14 +338,17 @@ export const SessionMemoryPlugin = async (
     globalState,
     clearSessionDeliveryMetadata: (sessionID) => childDeliveryMetadata.delete(sessionID),
     resetSessionPersistence: async (sessionID, resetConfig) => {
-      const lifecycle = invalidateSession(sessionID, false);
-      const generation = lifecycle.generation;
       await withPersistenceLock(sessionID, async () => {
-        if (!isCurrentGeneration(sessionID, generation)) return;
-        await removePath(memoryPathFor(sessionID, resetConfig.memoryDir));
-        await removePath(checkpointPathFor(sessionID, resetConfig.memoryDir));
-        if (!isCurrentGeneration(sessionID, generation)) return;
-        await ensureMemoryFile(sessionID, resetConfig);
+        if (isSessionTerminal(sessionID)) throw new Error("Cannot reset a deleted session.");
+        // Read and validate before invalidating work or erasing saved state.
+        // Use the collector's ownership filter too: an active summarizer's own
+        // prompt/reply cannot anchor a history from which those rows are removed.
+        const boundary = selectV1ResetBoundary(
+          await wrapperSummarizerRuntime(sessionID).readSessionMessages(sessionID),
+        );
+        if (isSessionTerminal(sessionID)) throw new Error("Cannot reset a deleted session.");
+        invalidateSession(sessionID, false);
+        await persistV1Reset(sessionID, resetConfig, boundary);
       });
     },
   };
@@ -1134,7 +1143,7 @@ export const SessionMemoryPlugin = async (
         if (parentID) {
           const metadata = childDeliveryMetadata.get(sessionID);
           if (!metadata || !isCurrentGeneration(sessionID, childGeneration)) return;
-          if (config.injectInSubagents) {
+          if (config.injectInSubagents && !(await readV1ResetBoundary(sessionID, config.memoryDir))) {
             const parentMemory = await readText(memoryPathFor(parentID, config.memoryDir), "");
             if (!isCurrentGeneration(sessionID, childGeneration)) return;
             metadata.startupSnapshot = parentMemory;
@@ -1204,6 +1213,7 @@ export const SessionMemoryPlugin = async (
       await withPersistenceLock(sessionID, async () => {
         await removePath(memoryPathFor(sessionID, config.memoryDir));
         await removePath(checkpointPathFor(sessionID, config.memoryDir));
+        await removePath(v1ResetBoundaryPathFor(sessionID, config.memoryDir));
       });
       // Clean up per‑session runtime state
       const s = sessionStates.get(sessionID);
@@ -1221,6 +1231,7 @@ export const SessionMemoryPlugin = async (
           await withPersistenceLock(child, async () => {
             await removePath(memoryPathFor(child, config.memoryDir));
             await removePath(checkpointPathFor(child, config.memoryDir));
+            await removePath(v1ResetBoundaryPathFor(child, config.memoryDir));
           });
           sessionParents.delete(child);
           childDeliveryMetadata.delete(child);
