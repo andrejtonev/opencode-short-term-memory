@@ -1,6 +1,6 @@
 # V1 Manual Acceptance
 
-> **Historical acceptance records.** These dated RC4/earlier runs preserve their original fixtures, commands and model-mediated result boundaries. They are not current V1 usage instructions or RC9 qualification. For the native `/stm` menu, confirmations, paged results and path-only Logs, use the [README](../README.md#native-v1-controls-rc9) and [feature matrix](FEATURE-MATRIX.md). Current exact-artifact evidence is in [RC Readiness](RC-READINESS.md); no earlier PASS is relabeled as RC9 or unpublished development evidence.
+> **Historical acceptance records.** These dated RC4/earlier runs preserve their original fixtures, commands and model-mediated result boundaries. They are not current V1 usage instructions or RC9 qualification. For the native `/stm` menu, confirmations, paged results and path-only Logs, use the [README](../README.md#native-v1-controls-rc10) and [feature matrix](FEATURE-MATRIX.md). Current exact-artifact evidence is in [RC Readiness](RC-READINESS.md); no earlier PASS is relabeled as RC9 or unpublished development evidence.
 
 # Addendum — final paired V1/V2 STM qualification (2026-10-13)
 
