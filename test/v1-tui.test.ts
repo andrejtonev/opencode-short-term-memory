@@ -13,6 +13,8 @@ function host(directory = process.cwd()) {
     dispose = () => {},
     onClose: (() => void) | undefined;
   let eventHandler = (_event: any) => {};
+  let deferredRender: (() => unknown) | undefined;
+  let deferRender = false;
   let route = { name: "session", params: { sessionID: "ses_test" } };
   const keys = new EventEmitter();
   const api = {
@@ -72,7 +74,8 @@ function host(directory = process.cwd()) {
         replace(render: () => unknown, close?: () => void) {
           onClose?.();
           onClose = close;
-          rendered.push(render());
+          if (deferRender) deferredRender = render;
+          else rendered.push(render());
         },
         setSize() {},
       },
@@ -89,6 +92,15 @@ function host(directory = process.cwd()) {
     dispose: () => dispose(),
     changeSession: () => {
       route = { name: "session", params: { sessionID: "ses_other" } };
+    },
+    deferNextRender: () => {
+      deferRender = true;
+    },
+    evaluateDeferred: () => {
+      deferRender = false;
+      const render = deferredRender!;
+      deferredRender = undefined;
+      return render();
     },
     dismiss: () => {
       onClose?.();
@@ -258,6 +270,29 @@ test("workspace change or dismissal during path validation prevents sending an a
     h.dispose();
   }
 });
+
+test.each(["change", "dispose", "dismiss"])(
+  "deferred V1 reader rendering refuses stale scope after %s and releases its listeners",
+  async (mode) => {
+    const h = host();
+    await setupV1Tui(h.api);
+    h.commands[0].onSelect();
+    h.rendered.at(-1).onSelect({ value: "show" });
+    await settle();
+    h.deferNextRender();
+    h.reply("PREVIOUS_SESSION_PRIVATE_MEMORY");
+    expect(h.keys.listenerCount("keypress")).toBe(1);
+    if (mode === "change") h.changeSession();
+    else if (mode === "dispose") h.dispose();
+    else h.dismiss();
+    const renderedBefore = h.rendered.length;
+    expect(h.evaluateDeferred()).toBeNull();
+    expect(h.keys.listenerCount("keypress")).toBe(0);
+    // Abandoning the old component never replaces or clears a host dialog.
+    expect(h.rendered).toHaveLength(renderedBefore);
+    h.dispose();
+  },
+);
 
 test("reader wraps tabs, long lines and Unicode without dropping text", () => {
   expect(wrapReaderText("abc\tdef", 4)).toEqual(["abc ", "   d", "ef"]);

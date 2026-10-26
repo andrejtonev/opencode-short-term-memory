@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -83,6 +83,32 @@ describe("installation-scoped STM configuration", () => {
     expect(diagnostics.configFiles.filter((path) => path.startsWith(join(directory, ".opencode")))).toHaveLength(1);
     expect(bootstrap.status === "existing" || !example.created).toBe(true);
   });
+
+  test.skipIf(process.platform !== "win32")(
+    "case-aliased Windows bootstrap and example setup create only one config and preserve its bytes",
+    async () => {
+      const alias = directory.toUpperCase();
+      // Verify this fixture uses the supported case-insensitive directory
+      // contract, rather than claiming aliases on case-sensitive Windows dirs.
+      await writeFile(join(directory, "case-probe"), "same-directory");
+      expect(await readText(join(alias, "case-probe"), "")).toBe("same-directory");
+      const origin = { spec: STM, source: join(directory, "opencode.json"), scope: "local" };
+      const [bootstrap, example] = await Promise.all([
+        bootstrapInstalledConfig([origin]),
+        createProjectExampleConfig(alias),
+      ]);
+      expect(Number(bootstrap.status === "created") + Number(example.created)).toBe(1);
+      const configDir = join(directory, ".opencode");
+      const files = (await readdir(configDir)).filter((file) => file === "stm.json" || file === "stm.jsonc");
+      expect(files).toHaveLength(1);
+      const selectedPath = join(configDir, files[0]!);
+      await writeFile(selectedPath, '{"enabled":false,"remindEveryN":17}\n');
+      expect((await bootstrapInstalledConfig([origin])).status).toBe("existing");
+      expect((await createProjectExampleConfig(alias)).created).toBe(false);
+      expect(await readFile(selectedPath, "utf8")).toBe('{"enabled":false,"remindEveryN":17}\n');
+      expect(await readConfig(undefined, directory)).toMatchObject({ enabled: false, remindEveryN: 17 });
+    },
+  );
 
   test("native global directory provenance creates config in that directory rather than its parent", async () => {
     const result = await bootstrapInstalledConfig([{ spec: STM, source: globalDirectory, scope: "global" }]);

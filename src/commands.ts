@@ -1,15 +1,7 @@
 import type { SessionMemoryConfig, RuntimeState, ConfigDiagnostics } from "./memory-utils";
 import { resolve } from "node:path";
 import type { Client } from "./types";
-import {
-  createProjectExampleConfig,
-  logEvent,
-  ensureMemoryFile,
-  readText,
-  memoryPathFor,
-  logPath,
-  parseModel,
-} from "./memory-utils";
+import { createProjectExampleConfig, logEvent, readText, memoryPathFor, logPath, parseModel } from "./memory-utils";
 import { resetSessionDeliveryState, type SessionRuntimeState } from "./session-state";
 import type { MemoryUpdateDisposition } from "./memory-update-result";
 import { persistV1Reset, selectV1ResetBoundary } from "./v1-reset-boundary";
@@ -144,8 +136,7 @@ export async function executeMemoryAction(
   }
   if (!sessionID) return "No active session ID found yet. Send one chat message, then run this again.";
   if (action === "show") {
-    await ensureMemoryFile(sessionID, config);
-    return await readText(memoryPathFor(sessionID, config.memoryDir), "No memory file found.");
+    return await readText(memoryPathFor(sessionID, config.memoryDir), "No memory file exists yet.");
   }
   if (action === "reset") {
     if (ctx.resetSessionPersistence) {

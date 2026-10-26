@@ -36,6 +36,15 @@ export function createV2ContextInjection(
       config = await readConfig(undefined, resolvedDirectory);
       if (!current() || !config.enabled || !config.enableLegacyPeriodicSystemTransform) return;
       const lineage = cadence ? await classifyV2Session(context, input.sessionID) : undefined;
+      if (!current()) return;
+      if (lineage?.kind === "metadata-error") {
+        await debugLog(config, "v2_context_injection_skip", {
+          sessionID: input.sessionID,
+          reason: "metadata-error",
+          transport: "system",
+        });
+        return;
+      }
       if (
         cadence &&
         lineage?.kind === "primary" &&
@@ -49,7 +58,8 @@ export function createV2ContextInjection(
         return;
       }
 
-      const child = await readTaskChildMemory(context, input, config, resolvedDirectory);
+      if (!current()) return;
+      const child = await readTaskChildMemory(context, input, config, resolvedDirectory, {}, lifetimeSignal);
       if (!current()) return;
       if (child.status === "metadata-error" || child.status === "invalid-state" || child.status === "suppressed") {
         await debugLog(config, "v2_context_injection_skip", {

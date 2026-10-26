@@ -46,6 +46,7 @@ export interface SummarizerRuntime {
 // because ES module bindings are read-only — the property of an exported
 // object is reassignable.
 export const CLEAN_SUMMARIZER_TIMEOUT = { ms: 90_000 };
+export const CLEAN_SUMMARIZER_CLEANUP_TIMEOUT = { ms: 5_000 };
 
 export function buildMemoryPrompt(
   existingMemory: string,
@@ -338,16 +339,26 @@ export async function runCleanOpencodeSummarizer(
 
     return text;
   } finally {
-    // 4. Clean up: delete the side session and remove it from the tracking file.
+    // 4. Bound the caller's cleanup wait. Keep late deletion owned and observed:
+    // only actual success can remove tracking, and failure cannot mask a result.
     if (sessionID) {
       const cleanupSessionID: string = sessionID;
-      try {
+      const cleanup = (async () => {
         await runtime.deleteTemporarySession({ id: cleanupSessionID });
         await mutateActiveSideSessions(config.memoryDir, (active) => active.filter((id) => id !== cleanupSessionID));
-      } catch {
-        // Keep failed deletions tracked so the next plugin instance can
-        // recognize the internal session and retry cleanup after a restart.
-        // Cleanup failures must not mask the summarizer result.
+      })().catch(() => {
+        // Failed or pending deletions stay tracked for cleanup after a restart.
+      });
+      let cleanupTimer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          cleanup,
+          new Promise<void>((resolve) => {
+            cleanupTimer = setTimeout(resolve, CLEAN_SUMMARIZER_CLEANUP_TIMEOUT.ms);
+          }),
+        ]);
+      } finally {
+        if (cleanupTimer !== undefined) clearTimeout(cleanupTimer);
       }
     }
   }

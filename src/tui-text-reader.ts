@@ -78,7 +78,15 @@ export function openTextReader<Node>(
     replacing = true;
     try {
       api.ui.dialog.replace(
-        () => api.ui.DialogAlert({ title, message: lines.slice(offset, end).join("\n") + "\n\n" + footer }),
+        () => {
+          // The host stores this component callback. Scope or ownership can
+          // change after replace() returns and before the view is evaluated.
+          if (disposed || !isCurrent()) {
+            close();
+            return null as Node;
+          }
+          return api.ui.DialogAlert({ title, message: lines.slice(offset, end).join("\n") + "\n\n" + footer });
+        },
         () => {
           if (!replacing) close();
         },

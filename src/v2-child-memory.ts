@@ -131,13 +131,15 @@ export async function readTaskChildMemory(
   config: Pick<SessionMemoryConfig, "memoryDir" | "maxMemoryLength" | "injectInSubagents">,
   directory: string,
   hooks: { readonly afterSnapshotWrite?: () => void | Promise<void> } = {},
+  lifetimeSignal?: AbortSignal,
 ): Promise<{
   readonly status: "injected" | "suppressed" | "metadata-error" | "invalid-state";
   readonly memory?: string;
 }> {
-  if (isV2MemorySessionDeleted(directory, input.sessionID)) return { status: "suppressed" };
+  const cancelled = () => lifetimeSignal?.aborted || isV2MemorySessionDeleted(directory, input.sessionID);
+  if (cancelled()) return { status: "suppressed" };
   const lineage = await classifyV2Session(context, input.sessionID);
-  if (isV2MemorySessionDeleted(directory, input.sessionID)) return { status: "suppressed" };
+  if (cancelled()) return { status: "suppressed" };
   if (lineage.kind === "metadata-error") return { status: "metadata-error" };
   if (lineage.kind === "primary") return { status: "injected" };
   if (!config.injectInSubagents) return { status: "suppressed" };
@@ -148,28 +150,29 @@ export async function readTaskChildMemory(
       directory,
       input.sessionID,
       async () => {
+        if (cancelled()) return { status: "suppressed" };
         let existingRaw: string | undefined;
         try {
           existingRaw = await readBoundedText(path, config.maxMemoryLength * 6 + 4096);
         } catch {
-          if (isV2MemorySessionDeleted(directory, input.sessionID)) return { status: "suppressed" };
+          if (cancelled()) return { status: "suppressed" };
           return { status: "invalid-state" };
         }
-        if (isV2MemorySessionDeleted(directory, input.sessionID)) return { status: "suppressed" };
+        if (cancelled()) return { status: "suppressed" };
         if (existingRaw !== undefined && !existingRaw.trim()) return { status: "invalid-state" };
         const existing = parseState(existingRaw ?? "", input.sessionID);
         if (existing === null || (existing !== undefined && existing.parentID !== lineage.parentID)) {
           return { status: "invalid-state" };
         }
         const boundary = await readBoundedText(resetBoundaryPathFor(input.sessionID, config.memoryDir), 4096);
-        if (isV2MemorySessionDeleted(directory, input.sessionID) || boundary !== undefined) {
+        if (cancelled() || boundary !== undefined) {
           return { status: "suppressed" };
         }
         if (existing) return { status: "injected", memory: existing.memory };
         return undefined;
       },
     );
-    if (isV2MemorySessionDeleted(directory, input.sessionID)) return { status: "suppressed" };
+    if (cancelled()) return { status: "suppressed" };
     if (result) return result;
   } catch (error: unknown) {
     if (childSignal.aborted && error === childSignal.reason) return { status: "suppressed" };
@@ -179,15 +182,17 @@ export async function readTaskChildMemory(
   let parentMemory: string | undefined;
   try {
     parentMemory = await withV2MemoryMutation(directory, lineage.parentID, () =>
-      readBoundedText(memoryPathFor(lineage.parentID, config.memoryDir), config.maxMemoryLength * 4 + 4096),
+      cancelled()
+        ? undefined
+        : readBoundedText(memoryPathFor(lineage.parentID, config.memoryDir), config.maxMemoryLength * 4 + 4096),
     );
   } catch {
-    if (isV2MemorySessionDeleted(directory, input.sessionID) || isV2MemorySessionDeleted(directory, lineage.parentID)) {
+    if (cancelled() || isV2MemorySessionDeleted(directory, lineage.parentID)) {
       return { status: "suppressed" };
     }
     return { status: "invalid-state" };
   }
-  if (isV2MemorySessionDeleted(directory, input.sessionID) || isV2MemorySessionDeleted(directory, lineage.parentID)) {
+  if (cancelled() || isV2MemorySessionDeleted(directory, lineage.parentID)) {
     return { status: "suppressed" };
   }
   const memory = parentMemory?.slice(0, config.maxMemoryLength) ?? "";
@@ -197,21 +202,22 @@ export async function readTaskChildMemory(
       directory,
       input.sessionID,
       async () => {
+        if (cancelled()) return { status: "suppressed" };
         let currentRaw: string | undefined;
         try {
           currentRaw = await readBoundedText(path, config.maxMemoryLength * 6 + 4096);
         } catch {
-          if (isV2MemorySessionDeleted(directory, input.sessionID)) return { status: "suppressed" };
+          if (cancelled()) return { status: "suppressed" };
           return { status: "invalid-state" };
         }
-        if (isV2MemorySessionDeleted(directory, input.sessionID)) return { status: "suppressed" };
+        if (cancelled()) return { status: "suppressed" };
         if (currentRaw !== undefined && !currentRaw.trim()) return { status: "invalid-state" };
         const current = parseState(currentRaw ?? "", input.sessionID);
         if (current === null || (current !== undefined && current.parentID !== lineage.parentID)) {
           return { status: "invalid-state" };
         }
         const currentBoundary = await readBoundedText(resetBoundaryPathFor(input.sessionID, config.memoryDir), 4096);
-        if (isV2MemorySessionDeleted(directory, input.sessionID) || currentBoundary !== undefined) {
+        if (cancelled() || currentBoundary !== undefined) {
           return { status: "suppressed" };
         }
         if (current) return { status: "injected", memory: current.memory };
@@ -221,24 +227,22 @@ export async function readTaskChildMemory(
           parentID: lineage.parentID,
           memory,
         };
-        if (
-          isV2MemorySessionDeleted(directory, input.sessionID) ||
-          isV2MemorySessionDeleted(directory, lineage.parentID)
-        ) {
+        if (cancelled() || isV2MemorySessionDeleted(directory, lineage.parentID)) {
           return { status: "suppressed" };
         }
         const raw = JSON.stringify(state) + "\n";
         await writeTextAtomic(path, raw);
         if (hooks.afterSnapshotWrite) await hooks.afterSnapshotWrite();
-        if (isV2MemorySessionDeleted(directory, lineage.parentID)) {
+        if (cancelled() || isV2MemorySessionDeleted(directory, lineage.parentID)) {
+          // Dispose can race the atomic write; remove only this operation's
+          // unchanged bytes, preserving externally replaced or older snapshots.
           await removeRawFileIfCurrent(path, Buffer.from(raw, "utf8"));
           return { status: "suppressed" };
         }
-        if (isV2MemorySessionDeleted(directory, input.sessionID)) return { status: "suppressed" };
         return { status: "injected", memory };
       },
     );
-    if (isV2MemorySessionDeleted(directory, input.sessionID)) return { status: "suppressed" };
+    if (cancelled()) return { status: "suppressed" };
     return result;
   } catch (error: unknown) {
     if (childSignal.aborted && error === childSignal.reason) return { status: "suppressed" };

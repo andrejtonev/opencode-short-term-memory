@@ -474,7 +474,7 @@ function requireCurrentOperation(isStillValid?: () => boolean): void {
 
 async function createExampleConfigFile(configDir: string, isStillValid?: () => boolean): Promise<ExampleConfigResult> {
   const configPath = join(configDir, "stm.jsonc");
-  return await withPathWriteLock(`config-directory:${resolve(configDir)}`, async () => {
+  return await withPathWriteLock(`config-directory:${configDirectoryIdentity(configDir)}`, async () => {
     requireCurrentOperation(isStillValid);
     for (const fileName of CONFIG_FILE_CANDIDATES) {
       if (await pathExists(join(configDir, fileName))) {
@@ -611,9 +611,16 @@ export async function readConfigDiagnostics(baseDir?: string): Promise<ConfigDia
   return { configPaths: [...new Set(configPaths)], configFiles: [...new Set(configFiles)], configSources };
 }
 
+// Match native admission and locking for ordinary case-insensitive Windows
+// directories. Unix case, symlink aliases and cross-process ownership remain
+// separate concerns; this identity does not establish filesystem exclusion.
+function configDirectoryIdentity(path: string): string {
+  const absolute = resolve(path);
+  return process.platform === "win32" ? absolute.toLowerCase() : absolute;
+}
+
 function sameDirectory(left: string, right: string): boolean {
-  const normalize = (path: string) => (process.platform === "win32" ? resolve(path).toLowerCase() : resolve(path));
-  return normalize(left) === normalize(right);
+  return configDirectoryIdentity(left) === configDirectoryIdentity(right);
 }
 
 /**
@@ -660,7 +667,7 @@ export async function bootstrapInstalledConfig(origins: unknown): Promise<Config
   }
   const configPath = join(configDir, "stm.json");
   try {
-    return await withPathWriteLock(`config-directory:${resolve(configDir)}`, async () => {
+    return await withPathWriteLock(`config-directory:${configDirectoryIdentity(configDir)}`, async () => {
       for (const fileName of CONFIG_FILE_CANDIDATES) {
         const existingPath = join(configDir, fileName);
         if (await pathExists(existingPath)) {
