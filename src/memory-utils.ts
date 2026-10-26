@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile, appendFile, rm, stat, lstat, rename, open } from "node:fs/promises";
+import { mkdir, readFile, writeFile, appendFile, rm, stat, lstat, rename, open, link } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { parse } from "jsonc-parser";
@@ -782,6 +782,61 @@ ${MEMORY_HEADER}
 - None captured yet.
 `;
 
+async function initializeMemoryFileIfMissing(path: string, isStillValid?: () => boolean) {
+  try {
+    // An existing file, including an empty file or symlink, needs no staging IO.
+    await lstat(path);
+    requireCurrentOperation(isStillValid);
+    return;
+  } catch (error: unknown) {
+    if ((error as { code?: string })?.code !== "ENOENT") throw error;
+  }
+  const directory = dirname(path);
+  await ensureDir(directory);
+
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    requireCurrentOperation(isStillValid);
+    const temporaryPath = join(
+      directory,
+      `.${basename(path)}.init-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    );
+    let handle: Awaited<ReturnType<typeof open>>;
+    try {
+      handle = await open(temporaryPath, "wx");
+    } catch (error: unknown) {
+      if ((error as { code?: string })?.code === "EEXIST") continue;
+      throw error;
+    }
+
+    let closed = false;
+    try {
+      await handle.writeFile(STANDARD_MEMORY_TEMPLATE, "utf8");
+      await handle.sync();
+      await handle.close();
+      closed = true;
+      requireCurrentOperation(isStillValid);
+
+      try {
+        // A hard link publishes the complete staged file only if the destination
+        // is still absent. Unlike rename, it cannot replace a concurrent writer.
+        await link(temporaryPath, path);
+      } catch (error: unknown) {
+        if ((error as { code?: string })?.code === "EEXIST") {
+          requireCurrentOperation(isStillValid);
+          return;
+        }
+        throw error;
+      }
+      return;
+    } finally {
+      if (!closed) await handle.close().catch(() => {});
+      await rm(temporaryPath, { force: true }).catch(() => {});
+    }
+  }
+
+  throw new Error(`Unable to reserve a temporary memory file for initialization: ${path}`);
+}
+
 export function sideSessionsStatePath(memoryDir = DEFAULT_CONFIG.memoryDir) {
   return join(memoryDir, "side-sessions.json");
 }
@@ -831,16 +886,9 @@ export async function ensureMemoryFile(sessionID: string, config: SessionMemoryC
   const path = memoryPathFor(sessionID, config.memoryDir);
   return await withPathWriteLock(path, async () => {
     requireCurrentOperation(isStillValid);
-    // Read inside the same ownership scope: a concurrent writer must not have
-    // its new memory replaced by a template selected from an earlier read.
-    let existing = "";
-    try {
-      existing = await readFile(path, "utf8");
-    } catch {}
-    if (existing.trim()) return path;
-    await ensureDir(dirname(path));
-    requireCurrentOperation(isStillValid);
-    await writeFile(path, STANDARD_MEMORY_TEMPLATE, "utf8");
+    // Existing files are user-owned even when empty. Stage a complete template
+    // and publish it only if no other writer has created the destination.
+    await initializeMemoryFileIfMissing(path, isStillValid);
     return path;
   });
 }
