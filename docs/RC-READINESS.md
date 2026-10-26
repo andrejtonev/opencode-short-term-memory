@@ -1,13 +1,46 @@
 # RC Readiness
 
-## Latest Status: 2026-10-26, RC10 Preparation
+## Latest Status: 2026-10-26, RC10 Published
 
-`1.4.0-rc.10` contains the V1 persistent reset boundary fix (`6d01265`) and
-source-grounded documentation corrections. Build, typecheck and implementation
-checks passed: 1,216 tests passed, 3 skipped, 0 failed. The exact RC10 archive,
-fresh consumer and native-host checks will be recorded below after packaging;
-RC9 archive/host results are historical and do not qualify RC10.
-Publication is pending; npm `rc` currently remains at RC9.
+`1.4.0-rc.10` was published under `rc` from release commit
+`473c2273051d0fb86df3c455732c5e142dae2b0b` and tag `v1.4.0-rc.10`, both pushed
+to GitHub. Live registry verification confirms `rc: 1.4.0-rc.10` and
+`latest: 1.3.0`. Registry bytes, SHA-256, npm SHA-1 and SHA-512 integrity match
+the frozen validated archive.
+
+Implementation commit `6d01265` adds persistent V1 reset boundaries, prepared
+writes with guarded rollback, history validation and stale-generation fencing.
+The release commit packages corrected docs and RC10 installation examples.
+RC9 remains unchanged; old RC9 resets are not automatically migrated.
+
+Frozen archive: `.opencode/rc10/atonev-opencode-short-term-memory-1.4.0-rc.10.tgz`.
+SHA-256: `319846ef1a1c0d815cd3807e1ef90383518c2435d02a0adcdb24fe394345cd7e`.
+213,313 bytes, 88 regular packaged files. Shipped bytes matched the release
+checkout; the archive is read-only. Later publication docs do not change it.
+
+Validation passed:
+
+- Formatting, build, typecheck and source suite: 1,216 passed, 3 skipped,
+  0 failed; 1,219 tests across 67 files.
+- Fresh production consumer: exact archive installation, public imports and
+  strict declaration consumers.
+- Native V1 OpenCode 1.18.35: menu, status, path-only Logs, confirmations and
+  clean Update without main-model echo. Populated-conversation reset persisted
+  an anchor; unchanged history triggered zero additional model requests, and
+  subsequent clean generation contained only new post-reset text.
+- Native V2 OpenCode 2.0.32: bounded memory reader, End/settings navigation,
+  path-only Logs, zero provider requests and zero session messages.
+- Publication: npm dist-tags and downloaded bytes independently verified.
+
+Receipts under `.opencode/rc10/`: `artifact.json`, `consumer-evidence.json`,
+`native-v1-evidence.json`, `native-v2-evidence.json`, and `publication.json`.
+Native UI checks used the extracted archive with a repository dependency
+junction, separately from the fresh consumer. Live V2 generation, Ubuntu/Lima,
+paid-model semantic quality and fresh native registry installation remain
+unqualified. Reset sessions read full durable history to locate their boundary;
+then the usual look-back cap limits newer records. Missing anchors pause
+updates. Reset does not erase conversation history or guarantee that future
+messages cannot reintroduce old facts. Persistence guards are process-local.
 
 ## Historical Status: 2026-10-26, RC9 Published
 

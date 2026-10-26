@@ -4,12 +4,12 @@ Current source operational comparison for **RC10 (`1.4.0-rc.10`)**, reviewed on 
 
 ## Scope
 
-| Area     | Scope                                                                                                                                                                                            |
-| -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Release  | RC10 candidate; immutable archive and exact host evidence are recorded in [RC Readiness](RC-READINESS.md).                                                                                       |
-| Pins     | V1 plugin/SDK `1.14.25`; V2 plugin API `2.0.8`. Native RC9 UI checks used OpenCode `1.18.35` and `2.0.32` respectively; these do not establish minimum or universal compatibility.               |
-| UI       | V1: one native `/stm` menu and paged reader. V2: native slash actions and scrollable results. Both return only a log file path for Logs.                                                         |
-| Evidence | RC9 source, fresh package consumer, extracted-archive native UI and registry byte verification are separate checks. Historical artifact records below retain their original versions and hashes. |
+| Area     | Scope                                                                                                                                                                                             |
+| -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Release  | Published RC10; immutable archive and exact host evidence are recorded in [RC Readiness](RC-READINESS.md).                                                                                        |
+| Pins     | V1 plugin/SDK `1.14.25`; V2 plugin API `2.0.8`. Native RC10 UI checks used OpenCode `1.18.35` and `2.0.32` respectively; these do not establish minimum or universal compatibility.               |
+| UI       | V1: one native `/stm` menu and paged reader. V2: native slash actions and scrollable results. Both return only a log file path for Logs.                                                          |
+| Evidence | RC10 source, fresh package consumer, extracted-archive native UI and registry byte verification are separate checks. Historical artifact records below retain their original versions and hashes. |
 
 ## Generation
 
@@ -142,7 +142,7 @@ Both generations expose these seven named tools plus legacy `short_term_memory`,
 
 ## Current Release Qualification
 
-RC9 passed source checks (1,199 pass / 3 skip / 0 fail), exact-archive fresh-consumer/declaration checks, bounded native V1 UI on `1.18.35`, and bounded native V2 UI on `2.0.32`. Registry bytes matched the frozen archive. Native UI checks used extracted package bytes with a repository dependency junction; they are separate from fresh-consumer installation and do not prove a fresh native registry installation. Live V2 generation and Ubuntu/Lima remain unqualified. A user's general manual success on another V1 OpenCode 1.18 machine does not broaden those gates.
+RC10 passed source checks (1,216 pass / 3 skip / 0 fail), exact-archive fresh-consumer/declaration checks, native V1 menu and populated-conversation reset checks on `1.18.35`, and native V2 dialog checks on `2.0.32`. The registry archive matches the frozen bytes. Native UI checks used the extracted archive with a repository dependency junction, separately from fresh-consumer installation. This does not prove live V2 generation, Ubuntu/Lima or a fresh native registry installation. A user's general manual success on another V1 OpenCode 1.18 machine remains separately scoped.
 
 The published RC9 README still contains preparation status and RC8 installation examples. RC10 ships corrected instructions that pin RC10. The frozen RC9 package remains unchanged.
 

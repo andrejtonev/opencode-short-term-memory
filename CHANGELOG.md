@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.4.0-rc.10] - 2026-10-26
 
-Release candidate for the V1 forward reset fix and documentation corrections. Registry publication and exact-archive qualification are recorded separately in [RC Readiness](docs/RC-READINESS.md).
+Published under `rc` from release commit `473c2273051d0fb86df3c455732c5e142dae2b0b` and tag `v1.4.0-rc.10`, with `latest` left at `1.3.0`. The registry tarball matches the validated frozen archive byte for byte. Source checks passed 1,216 tests, with 3 skipped and 0 failed; fresh-consumer and native V1 reset/V2 dialog checks passed. Exact archive and host scope are recorded separately in [RC Readiness](docs/RC-READINESS.md).
 
 ### Fixed
 
