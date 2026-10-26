@@ -1,8 +1,8 @@
 # OpenCode Short-Term Memory Plugin
 
-Automatically summarizes conversation context into structured session memory and supports injecting it back into the system prompt — aiming to preserve user instructions, project context, decisions, and active references across long chats and compactions, without guaranteeing semantic preservation. The published testing release is `1.4.0-rc.8`, available under the npm `rc` tag. Update and injection timing differ between OpenCode generations; V2 system injection is opt-in and disabled by default, independently of automatic memory updates.
+Automatically summarizes conversation context into structured session memory and supports injecting it back into the system prompt — aiming to preserve user instructions, project context, decisions, and active references across long chats and compactions, without guaranteeing semantic preservation. The published testing release is `1.4.0-rc.9`, available under the npm `rc` tag. Update and injection timing differ between OpenCode generations; V2 system injection is opt-in and disabled by default, independently of automatic memory updates.
 
-The local **RC9 candidate (`1.4.0-rc.9`)** includes the unified V1 menu, paged V1 reader, native V2 scrollable results, and path-only Logs. It has not been published to npm. The registry installation examples below still target published RC8.
+**RC9 (`1.4.0-rc.9`)** includes the unified V1 menu, paged V1 reader, native V2 scrollable results, and path-only Logs.
 
 > **Unofficial plugin:** This is an independent project and is not affiliated with, endorsed by, or maintained by the opencode team.
 
@@ -10,10 +10,10 @@ The local **RC9 candidate (`1.4.0-rc.9`)** includes the unified V1 menu, paged V
 
 See the [feature matrix](https://github.com/andrejtonev/opencode-short-term-memory/blob/dev/docs/FEATURE-MATRIX.md) for the repository's feature, configuration and validation comparison, including historical evidence and its version scope. This feature-matrix document is not included in the npm package; this README is shipped.
 
-- **Version scope:** **`1.4.0-rc.8` was published on 2026-10-23 under `rc`**, with `latest` left at `1.3.0`. The registry tarball matched the qualified frozen archive byte for byte. Provider APIs remain pinned to V1 plugin/SDK `1.14.25` and V2 plugin `2.0.8`. Exact archive and native qualification are recorded separately in repository [RC Readiness](https://github.com/andrejtonev/opencode-short-term-memory/blob/dev/docs/RC-READINESS.md), which is not included in the npm package.
+- **Version scope:** **`1.4.0-rc.9` was published on 2026-10-26 under `rc`**, with `latest` left at `1.3.0`. The registry tarball matched the qualified frozen archive byte for byte. Provider APIs remain pinned to V1 plugin/SDK `1.14.25` and V2 plugin `2.0.8`. Exact archive and native qualification are recorded separately in repository [RC Readiness](https://github.com/andrejtonev/opencode-short-term-memory/blob/dev/docs/RC-READINESS.md), which is not included in the npm package.
 - **V1:** Provides the native `/stm` menu and eight tools: seven `stm_memory_*` tools plus legacy `short_term_memory`. Uses idle/pre-compaction updates, periodic injection and a separate side session in clean mode, as described below.
 - **RC6 V1 fixes:** Filters the plugin's own generated prompt messages and assistant replies to those prompts from update input. Automatic unchanged-input fingerprint suppression, real-user busy-turn idle waiting and internal temporary-session skipping remain in place; these process-local fences do not ban manual retries.
-- **RC8 fixes:** V1 clean summaries keep tool definitions visible for OpenCode free-model access while rejecting tool execution before it runs. First activation creates `stm.json` in the native installation scope, and read dialogs show local files without model output. Provider failures remain visible and failed manual updates no longer display old memory as refreshed. RC7 lifecycle fencing, cleanup recovery, idle deferral and native V2 retry bounds are retained. Recorded V2 active-summary tool requests and long-log dialog visibility failures remain unresolved.
+- **RC8 fixes:** V1 clean summaries keep tool definitions visible for OpenCode free-model access while rejecting tool execution before it runs. First activation creates `stm.json` in the native installation scope, and read dialogs show local files without model output. Provider failures remain visible and failed manual updates no longer display old memory as refreshed. RC7 lifecycle fencing, cleanup recovery, idle deferral and native V2 retry bounds are retained. Recorded V2 active-summary tool requests remain unqualified. RC9 resolves long-result display with native scrolling and returns only the file path for Logs.
 - **V1 delivery behavior:** Preserves the no-reply delivery path, originating agent/model routing, and all existing memory tools. Native bus lifecycle and child snapshot fixes are prior RC5 behavior, not new RC6 features. DCP handling preserves the originating agent and skips reinjection when origin metadata is missing or stale; memory updates remain allowed, avoiding an unintended default-agent reinjection.
 - **V2 updates:** Native execution terminal events schedule an idle update after `debounceMs`, reading fresh settled durable history; the context hook also catches up from new visible conversation text. Updates require an assistant message in the delta and respect checkpoints and forward reset boundaries. Execution start, deletion, move and shutdown invalidate scheduled idle work. There is no DCP-compress trigger.
 - **V2 injection (introduced in RC3; also in published RC5):** Native context/system transform injection is supported but disabled by default. Set `enableLegacyPeriodicSystemTransform: true` to enable primary-session, task-child and compaction memory injection. When opted in, primary sessions inject on literally every N admitted user turns (`remindEveryN`), retaining that turn's eligibility across tool continuations. Cadence is process-local and bounded, not reconstructed from old history; restart or eviction can restart counting. Compaction attempts a refresh from settled durable history independently of injection opt-in; when opted in, it injects stored memory as fallback even if refresh skips, fails or is busy. Compaction injection bypasses reminder cadence and does not wait for an already-running update to drain.
@@ -32,11 +32,11 @@ See the [feature matrix](https://github.com/andrejtonev/opencode-short-term-memo
 
 ```json
 {
-  "plugins": ["@atonev/opencode-short-term-memory@1.4.0-rc.8"]
+  "plugins": ["@atonev/opencode-short-term-memory@1.4.0-rc.9"]
 }
 ```
 
-The packaged plugin supplies separate server, `/tui` and `/rpc` exports resolved by the host. A checkout source path alone is not a packaged TUI installation. V2 command results appear in per-action dialogs (`STM status`, `STM show`, etc.); action exceptions use an error dialog. In the RC9 candidate, results use a height-bounded scroll area with Up/Down, PgUp/PgDn and Home/End navigation; the title and Esc hint remain outside the scrolling body. Short results use only the height they need. Output is capped at 16,384 characters with an explicit truncation notice (a character limit, not a 16 KiB UTF-8 byte limit). Press `esc` to dismiss; delivery timeouts do not expire displayed dialogs. Dismiss the current STM dialog before running another command.
+The packaged plugin supplies separate server, `/tui` and `/rpc` exports resolved by the host. A checkout source path alone is not a packaged TUI installation. V2 command results appear in per-action dialogs (`STM status`, `STM show`, etc.); action exceptions use an error dialog. In RC9, results use a height-bounded scroll area with Up/Down, PgUp/PgDn and Home/End navigation; the title and Esc hint remain outside the scrolling body. Short results use only the height they need. Output is capped at 16,384 characters with an explicit truncation notice (a character limit, not a 16 KiB UTF-8 byte limit). Press `esc` to dismiss; delivery timeouts do not expire displayed dialogs. Dismiss the current STM dialog before running another command.
 
 **V2 operational limits:** An action can continue after its 120-second completion timeout, cancellation or delivery failure; these do not abort or roll back mutations. Busy ownership remains until the action settles; inspect persisted state before retrying. Same-server RPC clients are trusted: request/session/receiver matching is routing correlation, not user authorization. Use a single-user/trusted server; multi-user isolation is not guaranteed.
 
@@ -46,10 +46,10 @@ The packaged plugin supplies separate server, `/tui` and `/rpc` exports resolved
 
 ### V2
 
-The [pinned authoritative CLI specification](https://github.com/anomalyco/opencode/blob/2670273ff17da96f85c5826ced57aa1b368754fa/packages/cli/src/commands/commands.ts) defines `plugin add <package>` as installing a plugin and adding it to global configuration, with no `--global` flag. Install the published RC8 release explicitly:
+The [pinned authoritative CLI specification](https://github.com/anomalyco/opencode/blob/2670273ff17da96f85c5826ced57aa1b368754fa/packages/cli/src/commands/commands.ts) defines `plugin add <package>` as installing a plugin and adding it to global configuration, with no `--global` flag. Install the published RC9 release explicitly:
 
 ```bash
-opencode plugin add '@atonev/opencode-short-term-memory@1.4.0-rc.8'
+opencode plugin add '@atonev/opencode-short-term-memory@1.4.0-rc.9'
 ```
 
 Verify both server and TUI configuration against [V2 TUI loading](#v1--v2-support) above, preserving existing entries. Keep their package versions aligned.
@@ -59,9 +59,9 @@ Verify both server and TUI configuration against [V2 TUI loading](#v1--v2-suppor
 The [V1 CLI documentation](https://opencode.ai/docs/cli/#plugin) and hosts `1.14.25`, `1.18.23`, and `1.18.35` support a local install by default and `--global` for a user-wide install. Run the local command from the project:
 
 ```bash
-opencode plugin '@atonev/opencode-short-term-memory@1.4.0-rc.8' --force
+opencode plugin '@atonev/opencode-short-term-memory@1.4.0-rc.9' --force
 # Or install globally:
-opencode plugin '@atonev/opencode-short-term-memory@1.4.0-rc.8' --global --force
+opencode plugin '@atonev/opencode-short-term-memory@1.4.0-rc.9' --global --force
 ```
 
 Local installation writes OpenCode configuration under `<git-worktree>/.opencode/`, or `<directory>/.opencode/` outside Git. Global installation uses OpenCode's global configuration directory, normally `~/.config/opencode/`, respecting XDG configuration. `--force` replaces the plugin version; it does not reset STM memory or overwrite STM configuration. V2's `plugin add` syntax is a different command.
@@ -70,7 +70,7 @@ For manual V1 configuration, add the published prerelease to the singular `plugi
 
 ```json
 {
-  "plugin": ["@atonev/opencode-short-term-memory@1.4.0-rc.8"]
+  "plugin": ["@atonev/opencode-short-term-memory@1.4.0-rc.9"]
 }
 ```
 
@@ -88,11 +88,11 @@ Published RC7 still requires manual config creation or `/stm setup confirm true`
 
 Restart OpenCode after setup or configuration edits before checking settings or testing behavior. V1 caches resolved configuration for up to 60 seconds, so an immediate check without restarting can still show the previous settings.
 
-### Native V1 controls (development after RC8)
+### Native V1 controls (RC9)
 
 Enable the same STM package in the singular `plugin` array in `tui.json`, as well as the server's `opencode.json`. Select `/stm` from autocomplete to open one native menu: Show memory, Logs, Settings, Status, Update, Reset, and optional example-config creation. Results come from the attached server without adding chat messages or requesting a main-model response. Status includes live counters; reads do not create missing memory files. The reader supports Up/Down, PgUp/PgDn and Home/End; Esc closes it. Logs returns only the absolute log file path on the attached server. Inspect the file there with `cat` (Linux/macOS) or `Get-Content` (PowerShell); log contents are not read or sent to the model.
 
-**These menu improvements are in the unpublished RC9 candidate.** Published RC8 still exposes `/stm-show`, `/stm-logs`, `/stm-settings`, `/stm-status` for local reads and legacy `/stm <action>` server commands. The development version registers only the native `/stm` menu. Remove any manually configured `command.stm` from `opencode.json`; its legacy server hook now refuses execution before a model response. Enable both server and TUI companions and restart OpenCode. V2 retains its existing command syntax; development results now use native scrollable dialogs. Path-only Logs is also a development change for V2 and the agent tools; published RC8 still returns log contents.
+**RC9 registers only the native `/stm` menu in V1**, replacing RC8's `/stm-show`, `/stm-logs`, `/stm-settings`, `/stm-status` and legacy server commands. Remove any manually configured `command.stm` from `opencode.json`; its legacy server hook refuses execution before a model response. Enable both server and TUI companions and restart OpenCode. V2 retains its existing command syntax and uses native scrollable result dialogs. Logs returns only the server log file path in V1, V2 and the agent tools.
 
 ## Configuration (V1 behavior)
 
@@ -126,7 +126,7 @@ In V1, memory summarization and injection is fully automated — the plugin watc
 
 Clean generation receives saved memory in `<existing_memory>` and filtered conversation in `<conversation_update>`. Injected `[MEMORY_SYSTEM]` chat messages are excluded from that conversation delta, so the injected copy is not summarized again. Active mode also excludes STM's own generation prompts and replies from the delta, but runs in the original session: earlier injected memory can remain in the host model's session context.
 
-**V1 native `/stm` menu (RC9 candidate)**
+**V1 native `/stm` menu (RC9)**
 
 | Menu action                    | Behavior                                                                                                                                | Invokes memory model?         |
 | ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------- |

@@ -1,6 +1,47 @@
 # RC Readiness
 
-## Latest Status: 2026-10-23, RC8 Published
+## Latest Status: 2026-10-26, RC9 Published
+
+`1.4.0-rc.9` was published under `rc` from release commit
+`8ba7c6c286eacadf697b3c19e320f6646ae53b90` and tag `v1.4.0-rc.9`, both pushed
+to GitHub. Registry verification confirms `rc: 1.4.0-rc.9` and `latest: 1.3.0`.
+The downloaded registry tarball matches the frozen validated archive byte for
+byte; SHA-256, npm SHA-1 and SHA-512 integrity match.
+
+Changes since RC8:
+
+- `a514cf2`: unified native V1 `/stm` menu and paged reader; Logs returns only
+  the attached server's absolute file path in V1, V2 and agent tools.
+- `4653478`: native V2 scrollable readers with navigation and bounded height;
+  failed or dismissed output does not acknowledge successful delivery.
+- `8ba7c6c`: RC9 version and local candidate documentation.
+
+Frozen archive: `.opencode/rc9/atonev-opencode-short-term-memory-1.4.0-rc.9.tgz`.
+SHA-256: `2eed319216fb01e643e2994941f7f70a84dd3fbfda8a2e529957a52c6a9949d2`.
+208,909 bytes, 86 regular packaged files. All shipped bytes matched the release
+checkout. The published README retains the local-preparation status and RC8
+installation examples; this documentation follow-up records publication without
+changing the frozen package or release tag.
+
+| Gate                   | RC9 result | Scope                                                                                                                  |
+| ---------------------- | ---------- | ---------------------------------------------------------------------------------------------------------------------- |
+| Release commit hooks   | PASS       | Formatting, typecheck and isolated suite: 1,199 pass, 3 skips, 0 fail; 1,202 tests across 66 files.                    |
+| Build and typecheck    | PASS       | Local RC9 preparation on native Windows/Bun.                                                                           |
+| Fresh package consumer | PASS       | Exact archive installation, public imports and strict declaration consumers.                                           |
+| Native V1 UI           | PASS       | OpenCode 1.18.35; native reads, paged reader, status, confirmations and path-only Logs; no main-model echo.            |
+| Native V2 UI           | PASS       | OpenCode 2.0.32; bounded reader, End/settings navigation, path-only Logs; zero provider requests and session messages. |
+| Publication            | PASS       | npm `rc` points to RC9; `latest` remains 1.3.0; registry archive matches frozen bytes.                                 |
+
+Receipts under `.opencode/rc9/`: `artifact.json`, `consumer-evidence.json`,
+`native-v1-evidence.json`, `native-v2-evidence.json`, and `publication.json`.
+Native UI checks used the extracted archive with a repository dependency
+junction, separately from the fresh package consumer. They do not establish a
+fresh native registry installation. RC9 live V2 generation, tool isolation in a
+native V2 generator, and Ubuntu/Lima remain unqualified; RC8 provider evidence
+is historical evidence for that archive. Results retain the 16,384-character
+server output cap. V1 uses paged standard dialogs; V2 uses a native scrollbox.
+
+## Historical Status: 2026-10-23, RC8 Published
 
 `1.4.0-rc.8` was published under `rc` on 2026-10-23 from release commit
 `7d33df7e252d11a7517d9a7ec87f627d525be40a` and tag `v1.4.0-rc.8`, both pushed
