@@ -6,8 +6,14 @@ import type { V2Context, V2SessionContext } from "../src/v2-adapter";
 import { createV2ReminderCadence } from "../src/v2-reminder-cadence";
 import { resetBoundaryPathFor, writeText } from "../src/memory-utils";
 
-function context(directory: string): V2Context {
-  return { location: { directory } } as V2Context;
+function context(directory: string, records: unknown[] = []): V2Context {
+  return {
+    location: { directory },
+    session: {
+      context: async () => records,
+      get: async () => ({ id: "session", model: { providerID: "offline", id: "test" } }),
+    },
+  } as unknown as V2Context;
 }
 
 function input(messages: unknown[]): V2SessionContext {
@@ -53,19 +59,27 @@ describe("V2 reminder cadence", () => {
     }
   });
 
-  test("rebases after an assistant reset anchor and keeps post-reset candidates", async () => {
+  test("resolves a durable idle reset anchor and keeps post-reset candidates", async () => {
     const directory = await mkdtemp(join(tmpdir(), "v2-cadence-"));
     try {
-      const cadence = createV2ReminderCadence(context(directory), directory);
-      cadence.record({ sessionID: "session", messageID: "old" });
-      cadence.record({ sessionID: "session", messageID: "new" });
-      await writeText(resetBoundaryPathFor("session", directory), JSON.stringify({ version: 1, anchorID: "a-reset" }));
-      expect(await cadence.shouldInject(input([{ id: "new", role: "user" }]), 1, directory)).toBe(false);
+      const records: unknown[] = [];
+      const cadence = createV2ReminderCadence(context(directory, records), directory);
+      cadence.record({ sessionID: "session", messageID: "msg_old" });
+      cadence.record({ sessionID: "session", messageID: "msg_new" });
+      await writeText(
+        resetBoundaryPathFor("session", directory),
+        JSON.stringify({ version: 1, anchorID: "msg_reset" }),
+      );
+      expect(await cadence.shouldInject(input([{ id: "msg_new", role: "user" }]), 1, directory)).toBe(false);
+      records.push(
+        { id: "msg_old", type: "user", text: "old", time: { created: 1 } },
+        { id: "msg_reset", type: "idle", outcome: "succeeded", time: { created: 2 } },
+        { id: "msg_new", type: "user", text: "new", time: { created: 3 } },
+      );
       const messages = [
-        { id: "old", role: "user" },
-        { id: "a-reset", role: "assistant" },
-        { id: "synthetic", role: "user" },
-        { id: "new", role: "user" },
+        { id: "msg_old", role: "user" },
+        { id: "msg_synthetic", role: "user" },
+        { id: "msg_new", role: "user" },
       ];
       expect(await cadence.shouldInject(input(messages), 1, directory)).toBe(true);
       expect(await cadence.shouldInject(input(messages), 1, directory)).toBe(true);

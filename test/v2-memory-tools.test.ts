@@ -613,6 +613,7 @@ describe("V2 memory tools", () => {
         debug: true,
         logMaxLines: 22,
         updateHook: "context",
+        updateHooks: ["context", "idle", "compaction"],
         injectionHooks: ["context", "compaction"],
       },
       inactiveSettings: [],

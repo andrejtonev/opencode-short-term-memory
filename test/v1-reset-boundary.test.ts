@@ -131,7 +131,11 @@ describe("V1 persistent reset boundaries", () => {
         v1ResetBoundaryPathFor(sessionID, DEFAULT_CONFIG.memoryDir),
         invalid === "malformed-marker" ? "{broken" : JSON.stringify({ version: 1, anchorID: "absent" }),
       );
-      await plugin.tool.stm_memory_update.execute({}, { sessionID });
+      const result = await plugin.tool.stm_memory_update.execute({}, { sessionID });
+      expect(result).toContain("Memory update failed:");
+      expect(result).toContain(
+        invalid === "malformed-marker" ? "malformed_v1_reset_boundary" : "v1_reset_anchor_absent",
+      );
       expect(client.calls.summarizerPrompts).toHaveLength(0);
       expect(await readText(memoryPathFor(sessionID))).toBe("PRESERVE_MEMORY");
       expect(await readText(checkpointPathFor(sessionID))).toBe("PRESERVE_CHECKPOINT\n");

@@ -29,6 +29,9 @@ export interface CommandContext {
   sessionStates: Map<string, SessionRuntimeState>;
   globalState: RuntimeState;
   clearSessionDeliveryMetadata?: (sessionID: string) => void;
+  getChildDeliveryMetadata?: (
+    sessionID: string,
+  ) => { startupInjectionPending: boolean; dcpInjectionPending: boolean } | undefined;
   resetSessionPersistence?: (sessionID: string, config: SessionMemoryConfig) => Promise<void>;
 }
 
@@ -57,6 +60,7 @@ export async function statusText(sessionID: string | undefined, ctx: CommandCont
   const sessionState = sid ? sessionStates.get(sid) : undefined;
   const memory = sid ? await readText(memoryPathFor(sid, config.memoryDir), "") : "";
   const modelSelection = memoryModelSelection(config);
+  const childMetadata = sid ? ctx.getChildDeliveryMetadata?.(sid) : undefined;
   return [
     "# Session Memory Plugin Status",
     `- enabled: ${config.enabled}`,
@@ -76,15 +80,15 @@ export async function statusText(sessionID: string | undefined, ctx: CommandCont
     `- configFiles: ${ctx.configuration?.configFiles.join(", ") || "none"}`,
     `- configInstallation: ${ctx.configuration?.installation?.message || "not reported"}`,
     `- debug: ${config.debug}`,
-    `- memoryBytes: ${memory.length}`,
+    `- memoryBytes: ${Buffer.byteLength(memory, "utf8")}`,
     `- updateCount: ${globalState.updateCount}`,
     `- injectCount: ${globalState.injectCount}`,
     `- injectCharCount: ${globalState.injectCharCount}`,
     `- compactCount: ${globalState.compactCount}`,
     `- memoryRevision: ${sessionState?.memoryRevision ?? 0}`,
     `- deliveryClaimPending: ${sessionState?.deliveryClaim != null}`,
-    `- childStartupInjectionPending: ${sessionState?.childStartupInjectionPending ?? false}`,
-    `- childDcpInjectionPending: ${sessionState?.childDcpInjectionPending ?? false}`,
+    `- childStartupInjectionPending: ${childMetadata?.startupInjectionPending ?? false}`,
+    `- childDcpInjectionPending: ${childMetadata?.dcpInjectionPending ?? false}`,
     `- mainDcpDeliveryPending: ${sessionState?.mainDcpDeliveryPending ?? false}`,
     `- lastUpdateAt: ${globalState.lastUpdateAt || "never"}`,
     `- lastInjectAt: ${globalState.lastInjectAt || "never"}`,

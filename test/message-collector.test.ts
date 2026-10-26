@@ -256,7 +256,9 @@ describe("collectVisibleMessagesSinceCheckpoint", () => {
       },
     };
 
-    await collectRecentVisibleMessages(runtime, client, sessionID, { ...DEFAULT_CONFIG, memoryDir }, globalState);
+    await expect(
+      collectRecentVisibleMessages(runtime, client, sessionID, { ...DEFAULT_CONFIG, memoryDir }, globalState),
+    ).rejects.toThrow();
 
     expect(globalState.lastError).toContain("NotFoundError");
     expect(globalState.lastError).toContain("Session not found");
@@ -295,7 +297,9 @@ describe("collectVisibleMessagesSinceCheckpoint", () => {
         },
       };
 
-      await collectRecentVisibleMessages(runtime, client, sessionID, { ...DEFAULT_CONFIG, memoryDir }, globalState);
+      await expect(
+        collectRecentVisibleMessages(runtime, client, sessionID, { ...DEFAULT_CONFIG, memoryDir }, globalState),
+      ).rejects.toThrow();
 
       expect(globalState.lastError).toContain(expected);
       expect(globalState.lastError).not.toContain("undefined");

@@ -4,6 +4,7 @@ type MutationState = { updater: boolean; waiters: Array<(release: Release) => vo
 // Shared only within this process. Explicit mutations are not reentrant.
 const mutations = new Map<string, MutationState>();
 const sessionControllers = new Map<string, AbortController>();
+const readRevisions = new WeakMap<AbortSignal, number>();
 
 function mutationKey(directory: string, sessionID: string): string {
   return JSON.stringify([directory, sessionID]);
@@ -21,6 +22,15 @@ export function getV2MemorySessionSignal(directory: string, sessionID: string): 
 
 export function isV2MemorySessionDeleted(directory: string, sessionID: string): boolean {
   return sessionControllers.get(mutationKey(directory, sessionID))?.signal.aborted === true;
+}
+
+export function getV2MemoryReadRevision(directory: string, sessionID: string): number {
+  return readRevisions.get(getV2MemorySessionSignal(directory, sessionID)) ?? 0;
+}
+
+export function invalidateV2MemoryReads(directory: string, sessionID: string): void {
+  const signal = getV2MemorySessionSignal(directory, sessionID);
+  readRevisions.set(signal, (readRevisions.get(signal) ?? 0) + 1);
 }
 
 function releaseFor(key: string, state: MutationState): Release {

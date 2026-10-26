@@ -27,11 +27,7 @@ export interface SessionRuntimeState {
   deliveryClaim?: MemoryDeliveryClaim;
   retryableDeliveryClaim?: MemoryDeliveryClaim;
   lastDeliveredClaim?: MemoryDeliveryClaim;
-  childStartupSnapshot?: string;
-  childStartupInjectionPending: boolean;
-  childDcpInjectionPending: boolean;
   mainDcpDeliveryPending: boolean;
-  lastIdleScheduledAt: number;
   lastDcpCompressAt: number;
   latestOriginUserID?: string;
   originUserContexts: Map<string, UserExecutionMetadata>;
@@ -57,10 +53,7 @@ export function createSessionRuntimeState(): SessionRuntimeState {
     canonicalTurnIDs: new Set(),
     canonicalTurnOrder: [],
     memoryRevision: 0,
-    childStartupInjectionPending: false,
-    childDcpInjectionPending: false,
     mainDcpDeliveryPending: false,
-    lastIdleScheduledAt: 0,
     lastDcpCompressAt: 0,
     originUserContexts: new Map(),
     originUserOrder: [],
@@ -81,9 +74,6 @@ export function resetSessionDeliveryState(state: SessionRuntimeState): void {
   state.deliveryClaim = undefined;
   state.retryableDeliveryClaim = undefined;
   state.lastDeliveredClaim = undefined;
-  state.childStartupSnapshot = undefined;
-  state.childStartupInjectionPending = false;
-  state.childDcpInjectionPending = false;
   state.mainDcpDeliveryPending = false;
   state.latestOriginUserID = undefined;
   state.originUserContexts.clear();

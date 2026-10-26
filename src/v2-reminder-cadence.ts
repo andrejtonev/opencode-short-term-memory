@@ -1,7 +1,8 @@
 import { readRawFile, resetBoundaryPathFor } from "./memory-utils";
-import { isV2MemorySessionDeleted } from "./v2-mutation-coordination";
+import { getV2MemoryReadRevision, isV2MemorySessionDeleted } from "./v2-mutation-coordination";
 import { parseV2ResetBoundary } from "./v2-reset-boundary";
 import type { V2Context, V2SessionContext } from "./v2-adapter";
+import { readV2CurrentHistory } from "./v2-current-history";
 
 const MAX_SESSION_STATES = 256;
 const MAX_IDS = 4096;
@@ -76,26 +77,47 @@ export function createV2ReminderCadence(context: V2Context, directory: string) {
 
   async function shouldInject(input: V2SessionContext, remindEveryN: number, memoryDir: string): Promise<boolean> {
     if (disposed) return false;
+    const revision = getV2MemoryReadRevision(directory, input.sessionID);
     if (isV2MemorySessionDeleted(directory, input.sessionID)) {
       states.delete(input.sessionID);
       return false;
     }
     const state = stateFor(input.sessionID);
     const boundary = await boundaryFor(input.sessionID, memoryDir);
+    if (disposed || getV2MemoryReadRevision(directory, input.sessionID) !== revision) return false;
     if (isV2MemorySessionDeleted(directory, input.sessionID)) {
       states.delete(input.sessionID);
       return false;
     }
     if (boundary === null) return false;
-    const messages = input.messages as readonly unknown[];
-    const anchorIndex = boundary === undefined ? -1 : messages.findIndex((message) => idOf(message) === boundary);
-    if (boundary !== undefined && anchorIndex < 0) return false;
-
-    const start = anchorIndex + 1;
+    let messages = input.messages as readonly unknown[];
+    let beforeBoundary: readonly unknown[] = [];
+    if (boundary !== undefined) {
+      // Reset anchors belong to durable history, not the model-facing projection
+      // (which omits idle/agent-switch records and may change other record roles).
+      const current = await readV2CurrentHistory(context, input.sessionID, 5_000, input.model);
+      if (
+        disposed ||
+        isV2MemorySessionDeleted(directory, input.sessionID) ||
+        getV2MemoryReadRevision(directory, input.sessionID) !== revision
+      )
+        return false;
+      if (current.status !== "ready") return false;
+      const indices = current.history.messages.flatMap((message, index) => (message.id === boundary ? [index] : []));
+      if (indices.length !== 1) return false;
+      beforeBoundary = current.history.messages.slice(0, indices[0]! + 1);
+      const eligibleIDs = new Set(
+        current.history.messages
+          .slice(indices[0]! + 1)
+          .filter(isUser)
+          .map(idOf),
+      );
+      messages = messages.filter((message) => eligibleIDs.has(idOf(message)));
+    }
     if (boundary !== state.boundary) {
       state.boundary = boundary;
       if (boundary !== undefined) {
-        for (const message of messages.slice(0, start)) {
+        for (const message of beforeBoundary) {
           const id = idOf(message);
           if (id) {
             state.candidates.delete(id);
@@ -109,7 +131,7 @@ export function createV2ReminderCadence(context: V2Context, directory: string) {
       }
     }
 
-    for (const message of messages.slice(start)) {
+    for (const message of messages) {
       const id = idOf(message);
       if (!id || !isUser(message) || !state.candidates.has(id) || state.counted.has(id)) continue;
       state.candidates.delete(id);
@@ -123,7 +145,7 @@ export function createV2ReminderCadence(context: V2Context, directory: string) {
       state.eligibilityByID.set(id, state.latestEligible);
     }
     let selectedEligibility: boolean | undefined;
-    for (const message of messages.slice(start)) {
+    for (const message of messages) {
       const id = idOf(message);
       const eligibility = id === undefined ? undefined : state.eligibilityByID.get(id);
       if (eligibility !== undefined) selectedEligibility = eligibility;

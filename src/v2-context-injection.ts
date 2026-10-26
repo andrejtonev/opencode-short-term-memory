@@ -3,7 +3,7 @@ import type { V2Context, V2SessionContext } from "./v2-adapter";
 import { buildTaggedMemoryForInjection } from "./injection";
 import { DEFAULT_CONFIG, INJECTION_PREFIX, logEvent, memoryPathFor, readConfig, readText } from "./memory-utils";
 import { classifyV2Session, readTaskChildMemory } from "./v2-child-memory";
-import { isV2MemorySessionDeleted } from "./v2-mutation-coordination";
+import { getV2MemoryReadRevision, isV2MemorySessionDeleted } from "./v2-mutation-coordination";
 import type { ReturnTypeOfReminderCadence } from "./v2-reminder-cadence";
 
 function errorMessage(error: unknown): string {
@@ -21,14 +21,20 @@ export function createV2ContextInjection(
   context: V2Context,
   directory?: string,
   cadence?: ReturnTypeOfReminderCadence,
+  lifetimeSignal?: AbortSignal,
 ): (input: V2SessionContext) => Promise<void> {
   const resolvedDirectory = directory ?? context.location.directory;
   return async (input) => {
-    if (isV2MemorySessionDeleted(resolvedDirectory, input.sessionID)) return;
+    const revision = getV2MemoryReadRevision(resolvedDirectory, input.sessionID);
+    const current = () =>
+      !lifetimeSignal?.aborted &&
+      !isV2MemorySessionDeleted(resolvedDirectory, input.sessionID) &&
+      getV2MemoryReadRevision(resolvedDirectory, input.sessionID) === revision;
+    if (!current()) return;
     let config: SessionMemoryConfig | undefined;
     try {
       config = await readConfig(undefined, resolvedDirectory);
-      if (!config.enabled || !config.enableLegacyPeriodicSystemTransform) return;
+      if (!current() || !config.enabled || !config.enableLegacyPeriodicSystemTransform) return;
       const lineage = cadence ? await classifyV2Session(context, input.sessionID) : undefined;
       if (
         cadence &&
@@ -44,6 +50,7 @@ export function createV2ContextInjection(
       }
 
       const child = await readTaskChildMemory(context, input, config, resolvedDirectory);
+      if (!current()) return;
       if (child.status === "metadata-error" || child.status === "invalid-state" || child.status === "suppressed") {
         await debugLog(config, "v2_context_injection_skip", {
           sessionID: input.sessionID,
@@ -71,7 +78,7 @@ export function createV2ContextInjection(
         return;
       }
 
-      if (isV2MemorySessionDeleted(resolvedDirectory, input.sessionID)) return;
+      if (!current()) return;
       input.system.push({ type: "text", text: taggedMemory });
       await debugLog(config, "v2_context_injection_success", {
         sessionID: input.sessionID,

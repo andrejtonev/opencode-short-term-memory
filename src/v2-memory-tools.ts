@@ -73,13 +73,15 @@ function memoryModelSelection(config: SessionMemoryConfig) {
   return { memoryModel: configuredModel, memoryModelSelection: "explicit-override" };
 }
 
-async function readMemory(sessionID: string, directory: string) {
+async function readMemory(sessionID: string, directory: string, lifetimeSignal?: AbortSignal) {
   if (typeof sessionID !== "string" || !sessionID.trim() || safeSessionID(sessionID) !== sessionID) {
     throw new Error("STM read sessionID must be nonempty and path-safe.");
   }
   return await withV2MemoryMutation(directory, sessionID, async () => {
+    lifetimeSignal?.throwIfAborted();
     const config = await readConfig(undefined, directory);
-    const memoryPath = await ensureMemoryFile(sessionID, config);
+    lifetimeSignal?.throwIfAborted();
+    const memoryPath = await ensureMemoryFile(sessionID, config, () => !lifetimeSignal?.aborted);
     return await readText(memoryPath, "");
   });
 }
@@ -150,11 +152,13 @@ async function resetMemory(
   pluginContext: V2Context,
   directory: string,
   messageID?: string,
+  lifetimeSignal?: AbortSignal,
 ) {
   if (confirm !== true) {
     return "Refused to reset V2 short-term memory: set confirm to literal true to confirm this destructive action.";
   }
   authoritativeIdentity(sessionID, messageID);
+  lifetimeSignal?.throwIfAborted();
   if (isV2MemoryUpdateInFlight(directory, sessionID)) {
     return "Refused to reset V2 short-term memory: an update is active for this session; retry after it finishes.";
   }
@@ -187,6 +191,9 @@ async function resetMemory(
           }
           throw new Error(refusal);
         }),
+      undefined,
+      undefined,
+      lifetimeSignal,
     );
   } catch (error) {
     if (refusal !== undefined) return refusal;
@@ -273,11 +280,11 @@ export function createV2MemoryActions(pluginContext: V2Context, lifetimeSignal?:
   const directory = pluginContext.location.directory;
   const updater = createV2MemoryUpdater(pluginContext, directory, { lifetimeSignal });
   return {
-    show: (sessionID: string) => readMemory(sessionID, directory),
+    show: (sessionID: string) => readMemory(sessionID, directory, lifetimeSignal),
     status: (sessionID: string) => readV2MemoryStatus(sessionID, directory),
     update: (sessionID: string) => updateMemory(sessionID, pluginContext, directory, updater),
     reset: (sessionID: string, input: { readonly confirm?: unknown; readonly messageID?: string }) =>
-      resetMemory(sessionID, input.confirm, pluginContext, directory, input.messageID),
+      resetMemory(sessionID, input.confirm, pluginContext, directory, input.messageID, lifetimeSignal),
     logs: async (_sessionID: string) => {
       const config = await readConfig(undefined, directory);
       return resolve(logPath(config.memoryDir));
@@ -308,6 +315,7 @@ export function createV2MemoryActions(pluginContext: V2Context, lifetimeSignal?:
             debug: config.debug,
             logMaxLines: config.logMaxLines,
             updateHook: "context",
+            updateHooks: ["context", "idle", "compaction"],
             injectionHooks: ["context", "compaction"],
           },
           inactiveSettings: [],
@@ -320,7 +328,8 @@ export function createV2MemoryActions(pluginContext: V2Context, lifetimeSignal?:
       if (input.confirm !== true) {
         return "Refused to create a project example config: set confirm to literal true to confirm setup.";
       }
-      const result = await createProjectExampleConfig(directory);
+      lifetimeSignal?.throwIfAborted();
+      const result = await createProjectExampleConfig(directory, () => !lifetimeSignal?.aborted);
       return [
         result.message,
         `configPath: ${result.configPath}`,

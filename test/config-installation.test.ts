@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   bootstrapInstalledConfig,
+  createProjectExampleConfig,
   readConfig,
   readConfigDiagnostics,
   readText,
@@ -69,6 +70,18 @@ describe("installation-scoped STM configuration", () => {
     expect(await readFile(join(globalDirectory, "stm.json"), "utf8")).toBe("{}\n");
     expect(await readText(join(project, ".opencode", "stm.json"), "missing")).toBe("missing");
     expect(await readText(join(process.env.OPENCODE_CONFIG_DIR!, "stm.json"), "missing")).toBe("missing");
+  });
+
+  test("automatic bootstrap and confirmed example setup share directory ownership", async () => {
+    const origin = { spec: STM, source: join(directory, ".opencode", "opencode.json"), scope: "local" };
+    const [bootstrap, example] = await Promise.all([
+      bootstrapInstalledConfig([origin]),
+      createProjectExampleConfig(directory),
+    ]);
+    expect(Number(bootstrap.status === "created") + Number(example.created)).toBe(1);
+    const diagnostics = await readConfigDiagnostics(directory);
+    expect(diagnostics.configFiles.filter((path) => path.startsWith(join(directory, ".opencode")))).toHaveLength(1);
+    expect(bootstrap.status === "existing" || !example.created).toBe(true);
   });
 
   test("native global directory provenance creates config in that directory rather than its parent", async () => {

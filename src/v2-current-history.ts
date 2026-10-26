@@ -225,6 +225,7 @@ export async function readV2CurrentHistory(
   context: V2CurrentHistoryContext,
   sessionID: string,
   timeoutMs = 5_000,
+  selectedModel?: V2CurrentModel,
 ): Promise<V2CurrentHistoryResult> {
   if (!sessionID.trim() || safeSessionID(sessionID) !== sessionID) return invalid(sessionID, "invalid_session_id");
   if (!Number.isInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > 2_147_483_647)
@@ -238,9 +239,10 @@ export async function readV2CurrentHistory(
     const current = recordOf(session);
     if (current === undefined) return invalid(sessionID, "invalid_session_record");
     if (current.id !== sessionID) return invalid(sessionID, "session_id_mismatch");
-    if (!isCurrentModel(current.model)) return { status: "no-model", sessionID };
+    const model = selectedModel ?? current.model;
+    if (!isCurrentModel(model)) return { status: "no-model", sessionID };
     // These independent reads are durable history, not an atomic model-facing snapshot.
-    return project(sessionID, current.model, records);
+    return project(sessionID, model, records);
   } catch (error) {
     return { status: "error", sessionID, reason: error instanceof Error ? error.message : String(error) };
   }

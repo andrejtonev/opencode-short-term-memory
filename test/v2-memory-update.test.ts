@@ -70,7 +70,15 @@ function makeContext(
     options: {},
     session: {
       wait: async () => undefined,
-      get: async ({ sessionID }: { sessionID: string }) => ({ id: sessionID, parentID: null }),
+      get: async ({ sessionID }: { sessionID: string }) => ({
+        id: sessionID,
+        parentID: null,
+        model: { providerID: "provider", id: "model" },
+      }),
+      context: async () => [
+        { id: "msg_u1", type: "user", text: "Q", time: { created: 1 } },
+        durableAssistant("msg_a1", "A", 2),
+      ],
       generate: async (input: { sessionID: string; prompt: string }, request?: { signal?: AbortSignal }) => {
         calls.active.push({ input, request });
         return options.active ? options.active(input, request?.signal) : { text: VALID_MEMORY };
@@ -1637,7 +1645,7 @@ describe("V2 fresh memory updater", () => {
     expect(isV2MemoryUpdateInFlight(directory, "restore-failed")).toBe(false);
   });
 
-  test("does not recurse through a combined active context callback", async () => {
+  test("does not start a second update when a primary context arrives during active generation", async () => {
     await writeText(join(directory, ".opencode", "stm.json"), JSON.stringify({ memoryDir, summarizerMode: "active" }));
     const hooks: Array<{ name: string; callback: (value: unknown) => Promise<void> }> = [];
     let nestedCallback: ((value: unknown) => Promise<void>) | undefined;
@@ -1683,7 +1691,7 @@ describe("V2 fresh memory updater", () => {
     expect(nestedSystemLength).toBe(0);
     expect(isV2MemoryUpdateInFlight(directory, "recursive")).toBe(false);
     expect(nestedCheckpoint).toBe("");
-    expect(await readText(checkpointPathFor("recursive", memoryDir))).toBe("a1\n");
+    expect(await readText(checkpointPathFor("recursive", memoryDir))).toBe("msg_a1\n");
     await cleanup?.();
     expect(base.calls.disposed).toEqual(["rpc", "command"]);
   });
@@ -1708,7 +1716,7 @@ describe("V2 fresh memory updater", () => {
       const cleanup = await Root.setup(base.context);
       try {
         const sessionID = `setup-default-${summarizerMode}`;
-        const snapshot = input(sessionID, [message("u1", "user", "Q"), message("a1", "assistant", "A")]);
+        const snapshot = input(sessionID, [message("msg_u1", "user", "Q"), message("msg_a1", "assistant", "A")]);
         const existing = { type: "text" as const, text: "preserved system" };
         const system = [existing];
         snapshot.system = system;
@@ -1723,7 +1731,7 @@ describe("V2 fresh memory updater", () => {
           expect(String(generated.input.prompt)).not.toContain(existing.text);
         }
         expect(await readText(memoryPathFor(sessionID, memoryDir))).toContain("Keep the instruction.");
-        expect(await readText(checkpointPathFor(sessionID, memoryDir))).toBe("a1\n");
+        expect(await readText(checkpointPathFor(sessionID, memoryDir))).toBe("msg_a1\n");
         expect(snapshot.system).toBe(system);
         expect(snapshot.system).toEqual([existing]);
         expect(snapshot.system[0]).toBe(existing);
@@ -1763,7 +1771,8 @@ describe("V2 fresh memory updater", () => {
       get: (input: { sessionID: string }) => Promise<unknown>;
       wait: () => Promise<never>;
     };
-    session.context = async () => durableRecords;
+    let includeFollowup = false;
+    session.context = async () => (includeFollowup ? durableRecords : durableRecords.slice(0, 2));
     session.get = async ({ sessionID }) => ({
       id: sessionID,
       parentID: null,
@@ -1796,6 +1805,7 @@ describe("V2 fresh memory updater", () => {
     const contextInput = input("setup", [message("msg_u1", "user", "Q"), message("msg_a1", "assistant", "A")]);
     await contextHook.callback(contextInput);
     expect(contextInput.system.some((part) => part.text.includes("[MEMORY_SYSTEM]"))).toBe(true);
+    includeFollowup = true;
     const generationCount = base.calls.clean.length;
     const compactionInput = input("setup", []) as V2SessionContext & { result?: { summary: string } };
     const result = { summary: "host-owned result" };

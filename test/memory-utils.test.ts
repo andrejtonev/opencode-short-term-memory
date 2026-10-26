@@ -81,6 +81,14 @@ describe("memory-utils general behavior", () => {
     );
   });
 
+  test("cancelled operations cannot create memory or example configuration", async () => {
+    const config = { ...DEFAULT_CONFIG, memoryDir: join(testDir, "cancelled-memory") };
+    await expect(ensureMemoryFile("cancelled", config, () => false)).rejects.toThrow("cancelled");
+    await expect(createProjectExampleConfig(testDir, () => false)).rejects.toThrow("cancelled");
+    expect(await readText(memoryPathFor("cancelled", config.memoryDir), "missing")).toBe("missing");
+    expect(await readText(join(testDir, ".opencode", "stm.jsonc"), "missing")).toBe("missing");
+  });
+
   test("getSessionID resolves common shapes with ctx precedence", () => {
     expect(getSessionID({ event: { properties: { sessionId: "evt-id" } } })).toBe("evt-id");
     expect(getSessionID({ sessionID: "input-id" }, { sessionID: "ctx-id" })).toBe("ctx-id");

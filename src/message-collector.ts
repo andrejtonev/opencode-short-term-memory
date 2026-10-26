@@ -221,12 +221,6 @@ export async function collectRecentVisibleMessages(
     globalState.lastError = `Failed to collect recent messages: ${caughtValueMessage(error)}`;
     showToast(client, "Session Memory", "Failed to read conversation history — check /stm logs for details.");
     await logEvent(config, "collect_recent_messages_error", { sessionID, error: globalState.lastError });
-    return {
-      entries: [] as VisibleDeltaEntry[],
-      newestMessageID: "",
-      rowCount: 0,
-      sinceMessageID: "",
-      foundCheckpoint: false,
-    };
+    throw error;
   }
 }

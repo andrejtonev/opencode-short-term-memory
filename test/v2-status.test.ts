@@ -418,29 +418,31 @@ test("connected TUI route rejection gives server uncertain mutation delivery fai
   const tui = tuiContext();
   let calls = 0;
   let complete!: (text: string) => void;
-  const off = receiveStatus(tui.context);
+  let started!: () => void;
+  const actionStarted = new Promise<void>((resolve) => {
+    started = resolve;
+  });
   const delivery = createStatusDelivery(
     async (name, data) => {
       await tui.handlers[name]!({ data, location: tui.location });
     },
-    20,
-    200,
+    1000,
+    2000,
   );
-  // The subscribed handlers share the original mocked RPC object; forward its calls
-  // through the server using the recorded correlated receiver identity.
+  const originalRpc = tui.context.client.rpc;
+  tui.context.client.rpc = (definition) => ({ ...originalRpc(definition), claim: (input) => delivery.claim(input) });
+  const off = receiveStatus(tui.context);
   const result = delivery.deliver(
     request(async () => {
       calls++;
       return await new Promise<string>((resolve) => {
         complete = resolve;
+        started();
       });
     }, true),
   );
   const outcome = result.catch((error: Error) => error);
-  await pause(0);
-  const receiver = tui.calls[0]!.input;
-  await delivery.claim(receiver);
-  await pause(0);
+  await actionStarted;
   tui.setRoute({ type: "session", sessionID: "other" });
   complete("mutated");
   expect((await outcome)?.message).toContain("Mutation may have completed");
@@ -791,6 +793,53 @@ test.each(["show throws", "render throws", "dismisses before render"])(
     off();
   },
 );
+
+test("abandoned deferred rendering releases its receiver and stale dismissal cannot release a new reader", async () => {
+  const tui = tuiContext();
+  const renders: (() => any)[] = [];
+  const dismissals: (() => void)[] = [];
+  tui.context.ui.dialog.show = (render, onClose) => {
+    renders.push(render);
+    dismissals.push(onClose!);
+  };
+  const off = receiveStatus(tui.context);
+  const offer = (requestID: string, sessionID = "session") => ({ requestID, sessionID, expiresAt: Date.now() + 1000 });
+  const sendOutput = (data: StatusOffer) =>
+    tui.handlers.output!({
+      data: {
+        ...data,
+        receiverID: tui.calls.findLast((call) => call.method === "claim")!.input.receiverID,
+        title: "STM status",
+        message: "state",
+      },
+      location: tui.location,
+    });
+  try {
+    const first = offer("first");
+    await tui.handlers.offer!({ data: first, location: tui.location });
+    const staleOutput = sendOutput(first);
+    await pause(0);
+    tui.setRoute({ type: "session", sessionID: "other" });
+    expect(renders[0]!()).toBeNull();
+    await staleOutput;
+    expect(tui.calls.filter((call) => call.method === "acknowledge")).toHaveLength(0);
+    const second = offer("second", "other");
+    await tui.handlers.offer!({ data: second, location: tui.location });
+    expect(tui.calls.filter((call) => call.method === "claim")).toHaveLength(2);
+    const nextOutput = sendOutput(second);
+    await pause(0);
+    dismissals[0]!();
+    expect(renders[1]!()).not.toBeNull();
+    await nextOutput;
+    await tui.handlers.offer!({ data: offer("third", "other"), location: tui.location });
+    expect(tui.calls.filter((call) => call.method === "claim")).toHaveLength(2);
+    dismissals[1]!();
+    await tui.handlers.offer!({ data: offer("fourth", "other"), location: tui.location });
+    expect(tui.calls.filter((call) => call.method === "claim")).toHaveLength(3);
+  } finally {
+    off();
+  }
+});
 
 test("slow runtime loading rechecks session scope before showing or acknowledging a result", async () => {
   const tui = tuiContext();

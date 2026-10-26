@@ -77,16 +77,14 @@ async function withPathWriteLock<T>(path: string, op: () => Promise<T>) {
   const current = new Promise<void>((resolve) => {
     release = resolve;
   });
-  pathWriteLocks.set(
-    path,
-    prev.then(() => current),
-  );
+  const tail = prev.then(() => current);
+  pathWriteLocks.set(path, tail);
   await prev;
   try {
     return await op();
   } finally {
     release();
-    if (pathWriteLocks.get(path) === current) {
+    if (pathWriteLocks.get(path) === tail) {
       pathWriteLocks.delete(path);
     }
   }
@@ -470,9 +468,14 @@ async function pathExists(path: string): Promise<boolean> {
   }
 }
 
-async function createExampleConfigFile(configDir: string): Promise<ExampleConfigResult> {
+function requireCurrentOperation(isStillValid?: () => boolean): void {
+  if (isStillValid && !isStillValid()) throw new Error("STM operation cancelled before file creation");
+}
+
+async function createExampleConfigFile(configDir: string, isStillValid?: () => boolean): Promise<ExampleConfigResult> {
   const configPath = join(configDir, "stm.jsonc");
-  return await withPathWriteLock(`example-config:${configDir}`, async () => {
+  return await withPathWriteLock(`config-directory:${resolve(configDir)}`, async () => {
+    requireCurrentOperation(isStillValid);
     for (const fileName of CONFIG_FILE_CANDIDATES) {
       if (await pathExists(join(configDir, fileName))) {
         return {
@@ -485,6 +488,7 @@ async function createExampleConfigFile(configDir: string): Promise<ExampleConfig
     }
 
     await ensureDir(configDir);
+    requireCurrentOperation(isStillValid);
     let handle: Awaited<ReturnType<typeof open>>;
     try {
       handle = await open(configPath, "wx");
@@ -516,10 +520,13 @@ async function createExampleConfigFile(configDir: string): Promise<ExampleConfig
 }
 
 /** Create a project-local example config after the caller has confirmed. */
-export async function createProjectExampleConfig(pluginBaseDir?: string): Promise<ExampleConfigResult> {
+export async function createProjectExampleConfig(
+  pluginBaseDir?: string,
+  isStillValid?: () => boolean,
+): Promise<ExampleConfigResult> {
   const baseDir = pluginBaseDir || process.cwd();
   const configDir = baseDir.endsWith(".opencode") ? baseDir : join(baseDir, ".opencode");
-  return await createExampleConfigFile(configDir);
+  return await createExampleConfigFile(configDir, isStillValid);
 }
 
 async function findOpencodeDir(startDir: string): Promise<string | undefined> {
@@ -653,7 +660,7 @@ export async function bootstrapInstalledConfig(origins: unknown): Promise<Config
   }
   const configPath = join(configDir, "stm.json");
   try {
-    return await withPathWriteLock(`installed-config:${resolve(configDir)}`, async () => {
+    return await withPathWriteLock(`config-directory:${resolve(configDir)}`, async () => {
       for (const fileName of CONFIG_FILE_CANDIDATES) {
         const existingPath = join(configDir, fileName);
         if (await pathExists(existingPath)) {
@@ -813,12 +820,22 @@ export function safeSessionID(sessionID: string) {
   return String(sessionID).replace(/[^a-zA-Z0-9_.-]/g, "_");
 }
 
-export async function ensureMemoryFile(sessionID: string, config: SessionMemoryConfig) {
+export async function ensureMemoryFile(sessionID: string, config: SessionMemoryConfig, isStillValid?: () => boolean) {
   const path = memoryPathFor(sessionID, config.memoryDir);
-  const existing = await readText(path, "");
-  if (existing.trim()) return path;
-  await writeText(path, STANDARD_MEMORY_TEMPLATE);
-  return path;
+  return await withPathWriteLock(path, async () => {
+    requireCurrentOperation(isStillValid);
+    // Read inside the same ownership scope: a concurrent writer must not have
+    // its new memory replaced by a template selected from an earlier read.
+    let existing = "";
+    try {
+      existing = await readFile(path, "utf8");
+    } catch {}
+    if (existing.trim()) return path;
+    await ensureDir(dirname(path));
+    requireCurrentOperation(isStillValid);
+    await writeFile(path, STANDARD_MEMORY_TEMPLATE, "utf8");
+    return path;
+  });
 }
 
 export function getSessionID(input: unknown, ctx?: unknown): string | undefined {

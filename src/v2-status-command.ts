@@ -211,7 +211,9 @@ export function createStatusCommand(actions: V2MemoryCommandActions, deliver: (r
   } satisfies CommandDefinition;
 }
 
-export async function setupStatusCommand(context: V2Context, runtime: V2RuntimeContract) {
+export async function setupStatusCommand(context: V2Context, runtime: V2RuntimeContract, lifetimeSignal?: AbortSignal) {
+  const lifetime = new AbortController();
+  const signal = lifetimeSignal ? AbortSignal.any([lifetimeSignal, lifetime.signal]) : lifetime.signal;
   const delivery = createStatusDelivery((name, data) => registration.events.emit(name, data));
   const registration = await context.rpc.register(statusOutputDefinition, {
     claim: (input) => delivery.claim(input),
@@ -221,9 +223,10 @@ export async function setupStatusCommand(context: V2Context, runtime: V2RuntimeC
   try {
     await runtime.registerCommand({
       name: "stm",
-      definition: createStatusCommand(createV2MemoryActions(context), delivery.deliver),
+      definition: createStatusCommand(createV2MemoryActions(context, signal), delivery.deliver),
     });
   } catch (error) {
+    lifetime.abort();
     delivery.dispose();
     try {
       await registration.dispose();
@@ -232,6 +235,7 @@ export async function setupStatusCommand(context: V2Context, runtime: V2RuntimeC
   }
   let disposal: Promise<void> | undefined;
   return () => {
+    lifetime.abort();
     delivery.dispose();
     return (disposal ??= registration.dispose());
   };

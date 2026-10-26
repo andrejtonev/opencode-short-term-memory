@@ -138,7 +138,6 @@ describe("Session state LRU eviction", () => {
 
     expect(state.userTurnInjectState.count).toBe(0);
     expect(state.userTurnInjectState.lastMessageID).toBe("");
-    expect(state.lastIdleScheduledAt).toBe(0);
     expect(state.lastDcpCompressAt).toBe(0);
     expect(state.timer).toBeUndefined();
     expect(state.lastInjectedSignature).toBeUndefined();
@@ -148,9 +147,6 @@ describe("Session state LRU eviction", () => {
     expect(state.deliveryClaim).toBeUndefined();
     expect(state.lastDeliveredClaim).toBeUndefined();
     expect(state.retryableDeliveryClaim).toBeUndefined();
-    expect(state.childStartupSnapshot).toBeUndefined();
-    expect(state.childStartupInjectionPending).toBe(false);
-    expect(state.childDcpInjectionPending).toBe(false);
     expect(state.mainDcpDeliveryPending).toBe(false);
   });
 
@@ -200,7 +196,7 @@ describe("Session state LRU eviction", () => {
     });
   });
 
-  test("resetSessionDeliveryState clears delivery and child state", () => {
+  test("resetSessionDeliveryState clears delivery state", () => {
     const state = createSessionRuntimeState();
     state.userTurnInjectState = { count: 3, lastMessageID: "message-3" };
     state.lastInjectedSignature = { signature: "signature", at: 123 };
@@ -210,9 +206,6 @@ describe("Session state LRU eviction", () => {
     completeMemoryDelivery(state, claim);
     state.deliveryClaim = { turnID: "turn-2", memoryRevision: revision };
     state.retryableDeliveryClaim = { turnID: "turn-3", memoryRevision: revision };
-    state.childStartupSnapshot = "startup memory";
-    state.childStartupInjectionPending = true;
-    state.childDcpInjectionPending = true;
     state.mainDcpDeliveryPending = true;
 
     resetSessionDeliveryState(state);
@@ -225,20 +218,14 @@ describe("Session state LRU eviction", () => {
     expect(state.deliveryClaim).toBeUndefined();
     expect(state.lastDeliveredClaim).toBeUndefined();
     expect(state.retryableDeliveryClaim).toBeUndefined();
-    expect(state.childStartupSnapshot).toBeUndefined();
-    expect(state.childStartupInjectionPending).toBe(false);
-    expect(state.childDcpInjectionPending).toBe(false);
     expect(state.mainDcpDeliveryPending).toBe(false);
   });
 
-  test("LRU eviction removes populated delivery and child state", () => {
+  test("LRU eviction removes populated delivery state", () => {
     const evicted = ensureSessionState("evicted", sessionStates, sessionStatesOrder, 1);
     const revision = bumpMemoryRevision(evicted);
     evicted.deliveryClaim = { turnID: "turn-1", memoryRevision: revision };
     evicted.lastDeliveredClaim = { turnID: "turn-0", memoryRevision: 0 };
-    evicted.childStartupSnapshot = "startup memory";
-    evicted.childStartupInjectionPending = true;
-    evicted.childDcpInjectionPending = true;
     evicted.mainDcpDeliveryPending = true;
 
     ensureSessionState("retained", sessionStates, sessionStatesOrder, 1);

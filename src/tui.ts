@@ -46,7 +46,7 @@ export function receiveStatus(context: StatusTuiContext, options: { loadRuntime?
   const rpc = context.client.rpc(statusOutputDefinition);
   const controller = new AbortController();
   let claim: { requestID: string; sessionID: string; expiresAt: number } | undefined;
-  let displaying = false;
+  let display: object | undefined;
   let reservationTimer: ReturnType<typeof setTimeout> | undefined;
   const offs: (() => void)[] = [];
   const dispose = () => {
@@ -68,7 +68,7 @@ export function receiveStatus(context: StatusTuiContext, options: { loadRuntime?
           const offer = event.data;
           if (
             controller.signal.aborted ||
-            displaying ||
+            display ||
             !isStatusOffer(offer) ||
             !statusTargets(offer, event.location, context.location, context.ui.router.current()) ||
             claim
@@ -105,7 +105,7 @@ export function receiveStatus(context: StatusTuiContext, options: { loadRuntime?
           const output = event.data as StatusOutput;
           if (
             controller.signal.aborted ||
-            displaying ||
+            display ||
             !isStatusOffer(output) ||
             output.receiverID !== receiverID ||
             output.requestID !== claim?.requestID ||
@@ -120,8 +120,13 @@ export function receiveStatus(context: StatusTuiContext, options: { loadRuntime?
             return;
           claim = undefined;
           clearTimeout(reservationTimer);
-          displaying = true;
+          const owner = {};
+          display = owner;
           let closed = false;
+          const abandon = () => {
+            closed = true;
+            if (display === owner) display = undefined;
+          };
           try {
             let loadTimer: ReturnType<typeof setTimeout> | undefined;
             const runtime = await Promise.race([
@@ -143,7 +148,7 @@ export function receiveStatus(context: StatusTuiContext, options: { loadRuntime?
                 context.ui.router.current(),
               );
             if (!current() || output.expiresAt <= Date.now()) {
-              displaying = false;
+              abandon();
               return;
             }
             let ready!: () => void;
@@ -164,6 +169,7 @@ export function receiveStatus(context: StatusTuiContext, options: { loadRuntime?
               context.ui.dialog.show(
                 () => {
                   if (closed || !current()) {
+                    abandon();
                     ready();
                     return null;
                   }
@@ -177,14 +183,16 @@ export function receiveStatus(context: StatusTuiContext, options: { loadRuntime?
                   );
                 },
                 () => {
-                  closed = true;
-                  displaying = false;
+                  abandon();
                   ready();
                 },
               );
               context.ui.dialog.set({ size: "large", centered: true });
               await Promise.race([rendered, unavailable]);
-              if (closed || !current() || output.expiresAt <= Date.now()) return;
+              if (closed || !current() || output.expiresAt <= Date.now()) {
+                abandon();
+                return;
+              }
               await rpc.acknowledge(
                 { requestID: output.requestID, sessionID: output.sessionID, receiverID },
                 { location: context.location, signal: controller.signal },
@@ -193,8 +201,7 @@ export function receiveStatus(context: StatusTuiContext, options: { loadRuntime?
               clearTimeout(timer);
             }
           } catch {
-            closed = true;
-            displaying = false;
+            abandon();
             // A render failure is not acknowledged; server delivery expires honestly.
             // Never clear a replacement/unrelated dialog or enqueue model input.
           }

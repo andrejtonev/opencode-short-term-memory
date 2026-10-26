@@ -36,6 +36,21 @@ const host = (records: unknown, sessionModel: unknown = model, sessionID = "s1")
 };
 
 describe("readV2CurrentHistory", () => {
+  test("uses the selected primary request model without requiring a stored session model", async () => {
+    const h = host([user("msg_user")], undefined);
+    // Passing undefined to host uses its default; explicitly return model-free metadata.
+    h.context.session.get = async () => ({ id: "s1" }) as never;
+    expect(await readV2CurrentHistory(h.context, "s1", 5_000, model)).toMatchObject({
+      status: "ready",
+      history: { model, messages: [{ id: "msg_user", role: "user" }] },
+    });
+    expect(await readV2CurrentHistory(h.context, "s1")).toEqual({ status: "no-model", sessionID: "s1" });
+    h.context.session.get = async () => ({ id: "wrong" }) as never;
+    expect(await readV2CurrentHistory(h.context, "s1", 5_000, model)).toMatchObject({
+      status: "invalid-history",
+      reason: "session_id_mismatch",
+    });
+  });
   test("accepts the actual host context type without invoking unrelated APIs", () => {
     const read: (context: V2Context) => ReturnType<typeof readV2CurrentHistory> = (context) =>
       readV2CurrentHistory(context, "s1");

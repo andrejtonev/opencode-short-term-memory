@@ -337,6 +337,7 @@ export const SessionMemoryPlugin = async (
     sessionStates,
     globalState,
     clearSessionDeliveryMetadata: (sessionID) => childDeliveryMetadata.delete(sessionID),
+    getChildDeliveryMetadata: (sessionID) => childDeliveryMetadata.get(sessionID),
     resetSessionPersistence: async (sessionID, resetConfig) => {
       await withPersistenceLock(sessionID, async () => {
         if (isSessionTerminal(sessionID)) throw new Error("Cannot reset a deleted session.");
@@ -511,15 +512,6 @@ export const SessionMemoryPlugin = async (
       deleted,
       remaining: failedToDelete.length,
     });
-  }
-
-  async function isSessionDeleted(sessionID: string): Promise<boolean> {
-    try {
-      await runtime.getTemporarySession({ id: sessionID });
-      return false;
-    } catch {
-      return true;
-    }
   }
 
   // ── Helper functions that require instance state ──────────
@@ -1380,6 +1372,8 @@ export const SessionMemoryPlugin = async (
         return;
       }
 
+      if (!isCurrentGeneration(sessionID, generation)) return;
+
       const runtimeTurnID =
         input.messageID ||
         input.messageId ||
@@ -1427,6 +1421,7 @@ export const SessionMemoryPlugin = async (
         globalState,
         s,
         executionMetadata,
+        () => isCurrentGeneration(sessionID, generation) && sessionStates.get(sessionID) === s,
       );
     },
 
@@ -1441,18 +1436,33 @@ export const SessionMemoryPlugin = async (
       await awaitChildInitialization(sessionID);
       if (isInternalSession(sessionID)) return;
       if (isSessionTerminal(sessionID)) return;
+      const generation = lifecycleFor(sessionID).generation;
       if (sessionParents.has(sessionID)) {
         if (!config.injectInSubagents) return;
         const metadata = childDeliveryMetadata.get(sessionID);
         if (!metadata) return;
         const snapshot = metadata.startupSnapshot;
         if (metadata.startupInjectionPending) {
-          const appended = await appendChildMemoryToSystem(output, sessionID, snapshot, config, globalState);
+          const appended = await appendChildMemoryToSystem(
+            output,
+            sessionID,
+            snapshot,
+            config,
+            globalState,
+            () => isCurrentGeneration(sessionID, generation) && childDeliveryMetadata.get(sessionID) === metadata,
+          );
           if (appended) metadata.startupInjectionPending = false;
           return;
         }
         if (metadata.dcpInjectionPending) {
-          const appended = await appendChildMemoryToSystem(output, sessionID, snapshot, config, globalState);
+          const appended = await appendChildMemoryToSystem(
+            output,
+            sessionID,
+            snapshot,
+            config,
+            globalState,
+            () => isCurrentGeneration(sessionID, generation) && childDeliveryMetadata.get(sessionID) === metadata,
+          );
           if (appended) metadata.dcpInjectionPending = false;
         }
         return;
@@ -1466,6 +1476,7 @@ export const SessionMemoryPlugin = async (
         sessionStates,
         sessionStatesOrder,
         client,
+        () => isCurrentGeneration(sessionID, generation),
       );
     },
 
@@ -1492,11 +1503,9 @@ export const SessionMemoryPlugin = async (
 
       // Wait for any in-flight update to finish (with retry)
       const drainTimeout = Math.max(3000, config.debounceMs * 5);
-      let drained = false;
       for (let attempt = 0; attempt < 2; attempt++) {
         await waitForSessionUpdateDrain(sessionID, attempt === 0 ? drainTimeout : drainTimeout * 2, waitForIdleCtx);
         if (!updateInFlight.has(sessionID)) {
-          drained = true;
           break;
         }
         if (attempt === 0) {
@@ -1504,11 +1513,20 @@ export const SessionMemoryPlugin = async (
         }
       }
 
-      // Always run a fresh update if no update is pending (even if drain timed out we still try)
+      // Bound the compaction caller, not the updater. A slow active request retains
+      // generation ownership and can commit after compaction uses the stored memory.
       if (!updateInFlight.has(sessionID)) {
-        await updateMemory(client, sessionID, "before_compaction", config);
-        // Wait for the new update to finish
-        await waitForSessionUpdateDrain(sessionID, drainTimeout, waitForIdleCtx);
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        try {
+          await Promise.race([
+            updateMemory(client, sessionID, "before_compaction", config, generation),
+            new Promise<void>((resolve) => {
+              timer = setTimeout(resolve, drainTimeout);
+            }),
+          ]);
+        } finally {
+          if (timer !== undefined) clearTimeout(timer);
+        }
       }
 
       // If still busy, use whatever is on disk and log a warning
@@ -1520,7 +1538,7 @@ export const SessionMemoryPlugin = async (
       }
 
       const memory = await readText(memoryPathFor(sessionID, config.memoryDir), "");
-      if (!memory.trim()) return;
+      if (!memory.trim() || !isCurrentGeneration(sessionID, generation)) return;
       output.context.push(`${MEMORY_HEADER}\n\n${memory.slice(0, config.maxMemoryLength)}`);
       await logEvent(config, "compaction_context_pushed", { sessionID, bytes: memory.length });
     },

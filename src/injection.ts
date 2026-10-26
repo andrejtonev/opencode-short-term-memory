@@ -87,7 +87,11 @@ export async function deliverMemoryViaNoReply(
   }
 
   try {
-    if (isDeliveryStillValid && !isDeliveryStillValid()) {
+    if (
+      state.deliveryClaim !== claim ||
+      state.memoryRevision !== claim.memoryRevision ||
+      (isDeliveryStillValid && !isDeliveryStillValid())
+    ) {
       releaseMemoryDelivery(state, claim);
       await logEvent(config, "memory_inject_skipped", { sessionID, reason: "delivery_context_changed" });
       return false;
@@ -121,6 +125,7 @@ export async function appendChildMemoryToSystem(
   memory: string,
   config: SessionMemoryConfig,
   globalState: RuntimeState,
+  isDeliveryStillValid?: () => boolean,
 ): Promise<boolean> {
   if (!config.enabled || !memory.trim()) return false;
   try {
@@ -150,6 +155,7 @@ export async function appendChildMemoryToSystem(
     });
   }
   try {
+    if (isDeliveryStillValid && !isDeliveryStillValid()) return false;
     output.system.push(injectedMessage);
   } catch (error) {
     await logEvent(config, "memory_inject_failed", {
@@ -171,6 +177,7 @@ export async function injectMemoryIntoSystemTransform(
   sessionStates: Map<string, SessionRuntimeState>,
   sessionStatesOrder: string[],
   client: Client,
+  isDeliveryStillValid?: () => boolean,
 ): Promise<void> {
   if (!config.enabled) return;
   const sessionID = input.sessionID;
@@ -179,7 +186,7 @@ export async function injectMemoryIntoSystemTransform(
     return;
   }
   const memory = await readText(memoryPathFor(sessionID, config.memoryDir), "");
-  if (!memory.trim()) return;
+  if (!memory.trim() || (isDeliveryStillValid && !isDeliveryStillValid())) return;
   if (!Array.isArray(output.system)) output.system = [];
   const remindEveryN = Math.max(1, Math.trunc(config.remindEveryN || 1));
   const messageID = String(input.messageID || (input.message as { id?: string } | undefined)?.id || input.id || "");
@@ -234,6 +241,7 @@ export async function injectMemoryIntoSystemTransform(
       injectedMessage: injectedSystemMessage,
     });
   }
+  if (sessionStates.get(sessionID) !== s || (isDeliveryStillValid && !isDeliveryStillValid())) return;
   output.system.push(injectedSystemMessage);
   s.lastInjectedSignature = { signature, at: now };
   await recordMemoryInjection(sessionID, memory, injectedSystemMessage, config, globalState);

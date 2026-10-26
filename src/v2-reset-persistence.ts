@@ -10,7 +10,7 @@ import {
   removeRawFileIfCurrent,
   safeSessionID,
 } from "./memory-utils";
-import { withV2MemoryMutation } from "./v2-mutation-coordination";
+import { invalidateV2MemoryReads, withV2MemoryMutation } from "./v2-mutation-coordination";
 
 export type V2MemoryResetTestHooks = {
   readonly beforePrepare?: () => void | Promise<void>;
@@ -32,16 +32,25 @@ export async function resetV2MemoryPersistence(
   anchor: string | (() => Promise<string>),
   config?: ResetConfig,
   hooks: V2MemoryResetTestHooks = {},
+  lifetimeSignal?: AbortSignal,
 ): Promise<string> {
   if (typeof sessionID !== "string" || !sessionID.trim()) throw new Error("reset sessionID must be a nonempty string");
   if (safeSessionID(sessionID) !== sessionID) throw new Error("reset sessionID contains unsafe path characters");
   if (typeof anchor !== "function" && (typeof anchor !== "string" || !anchor.trim())) {
     throw new Error("reset anchor ID must be nonempty");
   }
-  return await withV2MemoryMutation(directory, sessionID, async () => {
+  const assertCurrent = () => lifetimeSignal?.throwIfAborted();
+  assertCurrent();
+  const resetting = withV2MemoryMutation(directory, sessionID, async () => {
+    assertCurrent();
+    // Readers admitted before this reset must not publish their old snapshot.
+    // Refused/failed resets conservatively invalidate pending reads as well.
+    invalidateV2MemoryReads(directory, sessionID);
     const anchorID = typeof anchor === "function" ? await anchor() : anchor;
+    assertCurrent();
     if (typeof anchorID !== "string" || !anchorID.trim()) throw new Error("reset anchor ID must be nonempty");
     const resolvedConfig = config ?? (await readConfig(undefined, directory));
+    assertCurrent();
     const memoryPath = memoryPathFor(sessionID, resolvedConfig.memoryDir);
     const checkpointPath = checkpointPathFor(sessionID, resolvedConfig.memoryDir);
     const boundaryPath = resetBoundaryPathFor(sessionID, resolvedConfig.memoryDir);
@@ -49,16 +58,20 @@ export async function resetV2MemoryPersistence(
     const previousCheckpoint = await readRawFile(checkpointPath);
     const previousBoundary = await readRawFile(boundaryPath);
     await hooks.beforePrepare?.();
+    assertCurrent();
 
     const memoryPrepared = await prepareRawFile(memoryPath, Buffer.from(STANDARD_MEMORY_TEMPLATE, "utf8"));
     let checkpointPrepared: Awaited<ReturnType<typeof prepareRawFile>> | undefined;
     let boundaryPrepared: Awaited<ReturnType<typeof prepareRawFile>> | undefined;
     try {
+      assertCurrent();
       checkpointPrepared = await prepareRawFile(checkpointPath, Buffer.alloc(0));
+      assertCurrent();
       boundaryPrepared = await prepareRawFile(
         boundaryPath,
         Buffer.from(JSON.stringify({ version: 1, anchorID }) + "\n", "utf8"),
       );
+      assertCurrent();
     } catch (originalError) {
       const cleanupErrors: unknown[] = [];
       for (const prepared of [memoryPrepared, checkpointPrepared, boundaryPrepared]) {
@@ -86,10 +99,12 @@ export async function resetV2MemoryPersistence(
     try {
       for (const operation of operations) {
         await hooks.beforeCommit?.(operation.kind);
+        assertCurrent();
         if (!(await operation.prepared.commit(operation.previous))) {
           throw new Error(`reset forward conflict: ${operation.kind} changed externally`);
         }
         committed.push(operation);
+        assertCurrent();
       }
     } catch (originalError) {
       const rollbackErrors: unknown[] = [];
@@ -137,4 +152,6 @@ export async function resetV2MemoryPersistence(
     for (const operation of operations) await operation.prepared.discard();
     return anchorID;
   });
+  // Invalidate reads started while the reset was preparing/committing as well.
+  return await resetting.finally(() => invalidateV2MemoryReads(directory, sessionID));
 }
