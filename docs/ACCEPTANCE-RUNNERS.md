@@ -2,6 +2,8 @@
 
 Use this map when choosing a check. A source test, a fresh package consumer and a native host run prove different things. [RC Readiness](RC-READINESS.md) records frozen release results; [Feature Parity](FEATURE-PARITY.md) describes current contracts. Historical receipts do not qualify a new archive.
 
+For interactive testing with your own provider, use the [isolated Windows V1/V2 launchers](ISOLATED-MANUAL-SETUP.md). They install the local candidate into separate profiles and open the real TUI; they do not run the deterministic acceptance fixture.
+
 ## Local release gate
 
 Build and freeze the candidate tarball, then run the fresh package consumer and native integration checks against that exact file:
