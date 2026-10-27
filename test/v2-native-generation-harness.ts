@@ -16,10 +16,12 @@ export interface V2NativeGenerationHarnessOptions {
   readonly clean?: CleanProvider;
   readonly active?: ActiveProvider;
   readonly defaultModel?: LegacyModel;
+  readonly cleanSystem?: V2SessionContext["system"];
   readonly createdSessionID?: string;
   readonly activeRequest?: (input: NativeGenerateInput) => V2SessionContext;
   readonly dispatchHooks?: boolean;
   readonly remove?: (sessionID: string) => Promise<void>;
+  readonly beforeCreate?: (sessionID: string) => void;
 }
 
 type NativeSessionRecord = {
@@ -102,6 +104,7 @@ export function installV2NativeGenerationHarness(context: V2Context, options: V2
 
   const create = async (input: NativeCreateInput): Promise<NativeSessionRecord> => {
     const requestedID = input.id ?? `ses_test_${++generatedID}`;
+    options.beforeCreate?.(requestedID);
     const id = options.createdSessionID ?? requestedID;
     if (sessions.has(id)) throw new Error(`session_already_exists:${id}`);
     const sessionRecord: NativeSessionRecord = {
@@ -157,7 +160,7 @@ export function installV2NativeGenerationHarness(context: V2Context, options: V2
         sessionID: input.sessionID,
         agent: typeof record(sessionInfo).agent === "string" ? (record(sessionInfo).agent as string) : "build",
         model,
-        system: [] as V2SessionContext["system"],
+        system: structuredClone(options.cleanSystem ?? [{ type: "text", text: "native OpenCode agent identity" }]),
         messages: [{ role: "user", content: [{ type: "text", text: input.prompt }] }],
         options: {} as V2SessionContext["options"],
         tools: { stm_memory_update: { description: "Update memory", input: {} } },

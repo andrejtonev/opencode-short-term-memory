@@ -14,6 +14,7 @@ const {
   conversationDelta,
   assertGeneratedMemoryInjection,
   assertOrdinaryConversationDelta,
+  assertNativeSummarySystem,
 } = require("./acceptance-memory-fixture.cjs");
 const { cleanupOwnedChildren, applyCleanupVerdict, closeOwnedServer } = require("./windows-owned-process.cjs");
 
@@ -599,6 +600,12 @@ async function main() {
   );
   check("future automatic generation resumes from reset boundary");
   for (const row of evidence.requests.filter((row) => row.summary)) assertOrdinaryConversationDelta(row.body);
+  if (generation === "v2") {
+    const ordinary = evidence.requests.find((row) => !row.summary);
+    for (const row of evidence.requests.filter((row) => row.summary))
+      assertNativeSummarySystem(row.body, ordinary.body);
+    check("clean summaries preserve native agent identity without implicit project system instructions");
+  }
   assert.equal(crypto.createHash("sha256").update(fs.readFileSync(archive)).digest("hex"), evidence.archiveSha256);
   evidence.verdict = "PASS";
 }

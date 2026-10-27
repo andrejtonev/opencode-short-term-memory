@@ -2,7 +2,13 @@
 
 Maintained and historical verification commands are mapped in [Acceptance Runners](ACCEPTANCE-RUNNERS.md). Review fixes require their own qualification; the frozen receipts below remain scoped to their named archives.
 
-## Local candidate: 2026-10-27, RC12
+## Local candidate: 2026-10-27, RC13
+
+`1.4.0-rc.13` fixes V2 clean-summary requests rejected by OpenCode's free-model service. It preselects native-format session IDs and preserves the native agent system instruction while excluding implicit project instructions and conversation history. Internal sessions remain fenced before creation.
+
+RC13 is prepared locally. Qualification and exact archive identity are recorded in [RC13 Local Acceptance](RC13-LOCAL-ACCEPTANCE.md). No Git push or npm publication is part of this preparation.
+
+## Historical local candidate: 2026-10-27, RC12
 
 `1.4.0-rc.12` includes V2 feature parity with V1, native slash-menu
 reachability during autocomplete, and a fresh-install release gate. RC12 is

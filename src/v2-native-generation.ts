@@ -1,11 +1,9 @@
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import type { V2Context, V2SessionContext } from "./v2-adapter";
 
 export const V2_OWNED_SUMMARY_SESSION_METADATA_KEY = "stmInternalSummary";
 const OWNED_SUMMARY_MARKER = "v1";
 const OWNED_SESSION_TITLE = "STM internal summary";
-const CLEAN_SUMMARY_SYSTEM =
-  "You are a clean short-term memory summarizer. Return only the updated Session Memory markdown.";
 const CLEANUP_TIMEOUT_MS = 5_000;
 
 type NativeSessionModel = { readonly providerID: string; readonly id: string; readonly variant?: string };
@@ -114,8 +112,28 @@ function nativeSession(context: V2Context): NativeSessionRuntime {
   return context.session as unknown as NativeSessionRuntime;
 }
 
+let lastIDTimestamp = 0;
+let idCounter = 0;
+
 function newSessionID(): string {
-  return `ses_${randomUUID().replaceAll("-", "").slice(0, 26)}`;
+  // Match OpenCode's descending Identifier format: six timestamp/counter bytes
+  // followed by fourteen base62 characters. UUID-derived IDs pass the host's
+  // loose schema but are rejected by its free-model service.
+  // https://github.com/anomalyco/opencode/blob/v2.0.32/packages/schema/src/identifier.ts
+  const timestamp = Date.now();
+  if (timestamp !== lastIDTimestamp) {
+    lastIDTimestamp = timestamp;
+    idCounter = 0;
+  }
+  const value = ~(BigInt(timestamp) * 0x1000n + BigInt(++idCounter));
+  const time = Array.from({ length: 6 }, (_, index) =>
+    Number((value >> BigInt(40 - 8 * index)) & 0xffn)
+      .toString(16)
+      .padStart(2, "0"),
+  ).join("");
+  const chars = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+  const random = Array.from(randomBytes(14), (byte) => chars[byte % chars.length]).join("");
+  return `ses_${time}${random}`;
 }
 
 function marker(kind: string): string {
@@ -292,7 +310,10 @@ export function generateV2CleanMemory(
         const messages = stripMarkerFromFinalPrompt(request, markedPrompt, input.prompt);
         if (messages.length !== 1 || messages[0]?.role !== "user")
           throw new Error("clean_summary_context_not_isolated");
-        request.system = [{ type: "text", text: CLEAN_SUMMARY_SYSTEM }];
+        // Keep the native agent identity required by OpenCode's free models.
+        // Later native system parts contain project instructions; the summary
+        // prompt supplies any explicitly requested AGENTS.md context itself.
+        request.system = request.system.slice(0, 1);
         request.messages = messages;
         request.options = {};
         return true;

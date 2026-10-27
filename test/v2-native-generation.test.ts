@@ -51,13 +51,66 @@ describe("V2 native summary generation", () => {
       expect(request?.system).toEqual([
         {
           type: "text",
-          text: "You are a clean short-term memory summarizer. Return only the updated Session Memory markdown.",
+          text: "native OpenCode agent identity",
         },
       ]);
       expect(request?.messages).toEqual([{ role: "user", content: [{ type: "text", text: "summarize this delta" }] }]);
       expect(Object.keys(request?.tools ?? {}).length).toBeGreaterThan(0);
       expect(harness.calls.remove).toHaveLength(1);
       expect(isV2OwnedSummarySession(fixture, harness.calls.create[0]!.session.id)).toBe(false);
+    } finally {
+      await harness.dispose();
+      disposeV2NativeGeneration(fixture);
+    }
+  });
+
+  test("preselects unique native timestamp IDs and fences them before session creation", async () => {
+    const fixture = context();
+    const harness = installV2NativeGenerationHarness(fixture, {
+      beforeCreate: (sessionID) => expect(isV2OwnedSummarySession(fixture, sessionID)).toBe(true),
+      clean: async () => ({ text: "updated memory" }),
+    });
+    const earliest = Date.now();
+    try {
+      for (let index = 0; index < 3; index++) {
+        await generateV2CleanMemory(fixture, { prompt: "summarize" }, new AbortController().signal);
+      }
+      const latest = Date.now();
+      const ids = harness.calls.create.map(({ input }) => input.id!);
+      expect(new Set(ids).size).toBe(3);
+      for (const id of ids) {
+        expect(id).toMatch(/^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$/);
+        // OpenCode stores the low 36 timestamp bits above a 12-bit counter.
+        const encoded = BigInt("0x" + id.slice(4, 16));
+        const timestamp = Number((~encoded & ((1n << 48n) - 1n)) >> 12n);
+        expect(timestamp).toBeGreaterThanOrEqual(earliest % 2 ** 36);
+        expect(timestamp).toBeLessThanOrEqual(latest % 2 ** 36);
+      }
+    } finally {
+      await harness.dispose();
+      disposeV2NativeGeneration(fixture);
+    }
+  });
+
+  test("keeps native agent identity without importing project instructions or changing another session", async () => {
+    const fixture = context();
+    const nativeSystem = [
+      { type: "text" as const, text: "native OpenCode agent identity", providerOptions: { cacheControl: true } },
+      { type: "text" as const, text: "PROJECT_INSTRUCTION_SHOULD_NOT_LEAK" },
+    ];
+    const harness = installV2NativeGenerationHarness(fixture, {
+      cleanSystem: nativeSystem,
+      clean: async (_input, _signal, request) => {
+        expect(request?.system).toEqual([nativeSystem[0]!]);
+        expect(JSON.stringify(request)).not.toContain("PROJECT_INSTRUCTION_SHOULD_NOT_LEAK");
+        expect(request?.messages).toEqual([{ role: "user", content: [{ type: "text", text: "summary delta only" }] }]);
+        return { text: "updated memory" };
+      },
+    });
+    try {
+      await generateV2CleanMemory(fixture, { prompt: "summary delta only" }, new AbortController().signal);
+      expect(nativeSystem).toHaveLength(2);
+      expect(nativeSystem[1]?.text).toBe("PROJECT_INSTRUCTION_SHOULD_NOT_LEAK");
     } finally {
       await harness.dispose();
       disposeV2NativeGeneration(fixture);

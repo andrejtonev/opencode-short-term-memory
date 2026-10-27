@@ -48,4 +48,30 @@ function assertOrdinaryConversationDelta(body) {
   }
 }
 
-module.exports = { conversationDelta, assertGeneratedMemoryInjection, assertOrdinaryConversationDelta };
+function assertNativeSummarySystem(body, ordinaryBody) {
+  const nativeSystem = ordinaryBody.messages.find((message) => message.role === "system");
+  assert.ok(nativeSystem, "Ordinary native request has no agent identity to compare");
+  const systems = body.messages.filter((message) => message.role === "system");
+  // OpenCode 2.0.32 combines its agent and initial model/project parts into
+  // one wire message. Compare the native agent prefix, before the model block.
+  const boundary = "\n# Your Model\n";
+  assert.ok(
+    nativeSystem.content.includes(boundary),
+    "Native agent/model boundary not found; requalify host wire format",
+  );
+  const expected = nativeSystem.content.slice(0, nativeSystem.content.indexOf(boundary)).trimEnd();
+  assert.ok(expected, "Empty native agent identity");
+  assert.equal(systems.length, 1, "Summary must preserve only the first native agent system instruction");
+  assert.equal(
+    systems[0].content.trimEnd(),
+    expected,
+    "Summary must preserve only the first native agent system instruction",
+  );
+}
+
+module.exports = {
+  conversationDelta,
+  assertGeneratedMemoryInjection,
+  assertOrdinaryConversationDelta,
+  assertNativeSummarySystem,
+};

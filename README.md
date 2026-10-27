@@ -1,6 +1,6 @@
 # OpenCode Short-Term Memory Plugin
 
-Automatically summarizes conversation context into structured session memory and delivers saved memory back into the conversation. RC12 (`1.4.0-rc.12`) aligns V2 features and controls with V1. Memory quality still depends on the model and inputs.
+Automatically summarizes conversation context into structured session memory and delivers saved memory back into the conversation. RC13 (`1.4.0-rc.13`) preserves native OpenCode request identity for V2 clean memory generation, including free models. V2 features and controls align with V1. Memory quality still depends on the model and inputs.
 
 > **Unofficial plugin:** This project is not affiliated with or maintained by the OpenCode team.
 
@@ -16,13 +16,13 @@ Both generations support automatic idle and pre-compaction updates, clean and ac
 - **Children and compression:** Observed child creation freezes a parent-memory snapshot; children never summarize. Completed `compress` events schedule a primary refresh or arm child snapshot delivery. This does not qualify the external DCP package on every host.
 - **Controls:** One native `/stm` picker offers Show, Logs, Settings, Status, Update, Reset and optional example Setup. Read results use native scrolling; only Update can invoke the memory model. Eight agent-facing tools remain available. V2 commands require the companion connected to the matching session and project, with admission before actions run.
 
-See [feature parity](https://github.com/andrejtonev/opencode-short-term-memory/blob/dev/docs/FEATURE-PARITY.md) for implementation details and qualification limits, [RC Readiness](https://github.com/andrejtonev/opencode-short-term-memory/blob/dev/docs/RC-READINESS.md) for exact archive results, and the [feature matrix](https://github.com/andrejtonev/opencode-short-term-memory/blob/dev/docs/FEATURE-MATRIX.md) for the historical RC11 comparison. Repository documents are not included in the npm archive. RC12 is prepared locally; this README does not claim publication or live-provider acceptance.
+See [feature parity](https://github.com/andrejtonev/opencode-short-term-memory/blob/dev/docs/FEATURE-PARITY.md) for implementation details and qualification limits, [RC Readiness](https://github.com/andrejtonev/opencode-short-term-memory/blob/dev/docs/RC-READINESS.md) for exact archive results, and the [feature matrix](https://github.com/andrejtonev/opencode-short-term-memory/blob/dev/docs/FEATURE-MATRIX.md) for the historical RC11 comparison. Repository documents are not included in the npm archive. RC13 is prepared locally; this README does not claim publication or live-provider acceptance.
 
 **V2 TUI loading:** On the pinned V2 host, add the same package entry to both the server's `opencode.json` and the CLI/TUI's global `cli.json` `plugins` lists, preserving existing entries. For a minimal global configuration, put the following in each of `~/.config/opencode/opencode.json` and `~/.config/opencode/cli.json` (or the corresponding `$XDG_CONFIG_HOME/opencode/` paths):
 
 ```json
 {
-  "plugins": ["@atonev/opencode-short-term-memory@1.4.0-rc.12"]
+  "plugins": ["@atonev/opencode-short-term-memory@1.4.0-rc.13"]
 }
 ```
 
@@ -41,7 +41,7 @@ The packaged plugin supplies separate server, `/tui` and `/rpc` exports resolved
 The [pinned authoritative CLI specification](https://github.com/anomalyco/opencode/blob/2670273ff17da96f85c5826ced57aa1b368754fa/packages/cli/src/commands/commands.ts) defines `plugin add <package>` as installing a plugin and adding it to global configuration, with no `--global` flag. Install this testing version explicitly:
 
 ```bash
-opencode plugin add '@atonev/opencode-short-term-memory@1.4.0-rc.12'
+opencode plugin add '@atonev/opencode-short-term-memory@1.4.0-rc.13'
 ```
 
 Verify both server and TUI configuration against [V2 TUI loading](#v1--v2-support) above, preserving existing entries. Keep their package versions aligned.
@@ -51,9 +51,9 @@ Verify both server and TUI configuration against [V2 TUI loading](#v1--v2-suppor
 The [V1 CLI documentation](https://opencode.ai/docs/cli/#plugin) and hosts `1.14.25`, `1.18.23`, and `1.18.35` support a local install by default and `--global` for a user-wide install. Run the local command from the project:
 
 ```bash
-opencode plugin '@atonev/opencode-short-term-memory@1.4.0-rc.12' --force
+opencode plugin '@atonev/opencode-short-term-memory@1.4.0-rc.13' --force
 # Or install globally:
-opencode plugin '@atonev/opencode-short-term-memory@1.4.0-rc.12' --global --force
+opencode plugin '@atonev/opencode-short-term-memory@1.4.0-rc.13' --global --force
 ```
 
 Local installation writes OpenCode configuration under `<git-worktree>/.opencode/`, or `<directory>/.opencode/` outside Git. Global installation uses OpenCode's global configuration directory, normally `~/.config/opencode/`, respecting XDG configuration. `--force` replaces the plugin version; it does not reset STM memory or overwrite STM configuration. V2's `plugin add` syntax is a different command.
@@ -62,7 +62,7 @@ For manual V1 configuration, add the published prerelease to the singular `plugi
 
 ```json
 {
-  "plugin": ["@atonev/opencode-short-term-memory@1.4.0-rc.12"]
+  "plugin": ["@atonev/opencode-short-term-memory@1.4.0-rc.13"]
 }
 ```
 
