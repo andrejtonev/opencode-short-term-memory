@@ -1,16 +1,18 @@
 # STM Feature Matrix
 
-Current source operational comparison for **RC11 (`1.4.0-rc.11`)**, reviewed on 2026-10-26, with published RC9 differences identified explicitly. Publication and exact-archive qualification are recorded in [RC Readiness](RC-READINESS.md). V1 and V2 share configuration and memory utilities but use different runtime APIs. Implementation descriptions do not establish live qualification. Historical records retain their original release identities.
+Historical operational comparison for **RC11 (`1.4.0-rc.11`)** at commit `45335e3`, reviewed on 2026-10-27, with earlier release differences identified explicitly. Publication and exact-archive qualification are recorded in [RC Readiness](RC-READINESS.md). V1 and V2 share configuration and memory utilities but use different runtime APIs. Implementation descriptions do not establish live qualification. Historical records retain their original release identities.
+
+**Product requirement:** V1 and V2 must support the same STM feature set, including both system/context transformation and appended session-message injection without a model reply. Differences recorded below describe RC11, not blanket acceptance of reduced V2 functionality. The [development parity report](FEATURE-PARITY.md) records the subsequent implementation and qualification limits. Historical records retain the acceptance decisions made at their original dates.
 
 RC11 branch-review fixes have separate source regression coverage; the frozen RC10 qualification does not cover those later changes. See [Acceptance Runners](ACCEPTANCE-RUNNERS.md) for maintained checks and historical probes.
 
-The current development source atomically initializes only missing memory files and preserves existing empty files. V1 active mode uses message-aware NoReply injection even with the legacy selector enabled. V2 active updates and clean-to-active fallbacks install a temporary generate hook for a uniquely marked STM request, remove its tool definitions, and dispose the hook when the operation settles. Unmatched requests keep their tools and native context. The native OpenCode 2.0.32 deterministic check proved tool removal, concurrent-request preservation and disposal; it does not qualify live providers or the published archive.
+The RC11 source atomically initializes only missing memory files and preserves existing empty files. V1 active mode uses message-aware NoReply injection even with the legacy selector enabled. V2 active updates and clean-to-active fallbacks install a temporary generate hook for a uniquely marked STM request, remove its tool definitions, and dispose the hook when the operation settles. Unmatched requests keep their tools and native context. The native OpenCode 2.0.32 deterministic check proved tool removal, concurrent-request preservation and disposal; it does not qualify live providers or the published archive.
 
 ## Scope
 
 | Area     | Scope                                                                                                                                                                                             |
 | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Release  | Published RC10; immutable archive and exact host evidence are recorded in [RC Readiness](RC-READINESS.md).                                                                                        |
+| Release  | Published RC11; immutable archive and separately scoped source, consumer and host evidence are recorded in [RC Readiness](RC-READINESS.md).                                                       |
 | Pins     | V1 plugin/SDK `1.14.25`; V2 plugin API `2.0.8`. Native RC10 UI checks used OpenCode `1.18.35` and `2.0.32` respectively; these do not establish minimum or universal compatibility.               |
 | UI       | V1: one native `/stm` menu and paged reader. V2: native slash actions and scrollable results. Both return only a log file path for Logs.                                                          |
 | Evidence | RC10 source, fresh package consumer, extracted-archive native UI and registry byte verification are separate checks. Historical artifact records below retain their original versions and hashes. |
