@@ -3,10 +3,49 @@ import {
   isV2MemoryUpdateInFlight,
   tryAcquireV2MemoryUpdate,
   withV2MemoryMutation,
+  retainV2MemoryCoordination,
+  deleteV2MemorySession,
+  getV2MemorySessionSignal,
+  getV2MemoryGenerationSignal,
+  tryReserveV2MemoryUpdate,
 } from "../src/v2-mutation-coordination";
 import { deferred } from "./async-helpers";
 
 describe("process-local V2 mutation coordination", () => {
+  test("deletion revokes both controllers and runtime owners retain late-work fences", async () => {
+    const first = retainV2MemoryCoordination("owned-project");
+    const second = retainV2MemoryCoordination("owned-project");
+    const session = getV2MemorySessionSignal("owned-project", "deleted");
+    const generation = getV2MemoryGenerationSignal("owned-project", "deleted");
+    await deleteV2MemorySession("owned-project", "deleted", async () => {});
+    expect(session.aborted).toBe(true);
+    expect(generation.aborted).toBe(true);
+    first();
+    first();
+    expect(getV2MemorySessionSignal("owned-project", "deleted").aborted).toBe(true);
+    expect(tryReserveV2MemoryUpdate("owned-project", "deleted")).toBeUndefined();
+    second();
+    const fresh = retainV2MemoryCoordination("owned-project");
+    expect(getV2MemorySessionSignal("owned-project", "deleted").aborted).toBe(false);
+    fresh();
+  });
+
+  test("disposal aborts old work but retains provider reservations until settlement", () => {
+    const dispose = retainV2MemoryCoordination("reserved-project");
+    const session = getV2MemorySessionSignal("reserved-project", "pending");
+    const generation = getV2MemoryGenerationSignal("reserved-project", "pending");
+    const release = tryReserveV2MemoryUpdate("reserved-project", "pending")!;
+    dispose();
+    expect(session.aborted).toBe(true);
+    expect(generation.aborted).toBe(true);
+    const fresh = retainV2MemoryCoordination("reserved-project");
+    expect(tryReserveV2MemoryUpdate("reserved-project", "pending")).toBeUndefined();
+    release();
+    const next = tryReserveV2MemoryUpdate("reserved-project", "pending")!;
+    expect(next).toBeFunction();
+    next();
+    fresh();
+  });
   test("queues explicit mutations FIFO behind an updater without barging at handoff", async () => {
     const release = tryAcquireV2MemoryUpdate("project", "fifo")!;
     expect(release).toBeFunction();

@@ -21,6 +21,7 @@ import { supportsFileSymlinks } from "./platform-capabilities";
 import { writeLastProcessedMessageID } from "../src/message-collector";
 import type { V2CommandDefinition, V2Context, V2SessionContext } from "../src/v2-adapter";
 import { createV2MemoryUpdater, isV2MemoryUpdateInFlight, V2TransientGenerationError } from "../src/v2-memory-update";
+import { readV2MemoryStatus } from "../src/v2-memory-tools";
 import { withV2MemoryMutation } from "../src/v2-mutation-coordination";
 import { readV2CurrentHistory, type V2CurrentHistoryContext } from "../src/v2-current-history";
 import { resetV2MemoryPersistence } from "../src/v2-reset-persistence";
@@ -498,6 +499,10 @@ describe("V2 fresh memory updater", () => {
     expect(calls.clean).toHaveLength(0);
     expect(await readText(memoryPathFor("active", memoryDir))).toContain(MEMORY_HEADER);
     expect(await readText(checkpointPathFor("active", memoryDir))).toBe("a1\n");
+    const status = await readV2MemoryStatus("active", directory, context);
+    expect(status).toContain("updateCount: 1");
+    expect(status).not.toContain("lastUpdateAt: never");
+    expect(status).toContain("lastError: none");
   });
 
   test("quoted memory-tool instructions produce text through the fenced active request", async () => {
@@ -588,6 +593,7 @@ describe("V2 fresh memory updater", () => {
       input("unavailable", [message("u1", "user", "Question"), message("a1", "assistant", "Answer")]),
     );
     expect(result).toMatchObject({ status: "error", reason: "operational_failure", detail: "model unavailable" });
+    expect(await readV2MemoryStatus("unavailable", directory, context)).toContain("lastError: model unavailable");
     expect(calls.clean).toHaveLength(2);
     expect(await readText(memoryPathFor("unavailable", memoryDir))).toBe(existing);
     expect(await readText(checkpointPathFor("unavailable", memoryDir))).toBe("before\n");
@@ -832,9 +838,11 @@ describe("V2 fresh memory updater", () => {
         writeCheckpoint: async (sessionID, checkpointID, config) => {
           await writeLastProcessedMessageID(sessionID, checkpointID, config);
           // Filesystem log failures are swallowed by logEvent; fail entry construction instead.
-          clock.mockImplementationOnce(() => {
+          const failTimestamp = () => {
             throw new Error("log construction failure");
-          });
+          };
+          // Fail both telemetry and logging clocks. Diagnostics must never interrupt persistence.
+          clock.mockImplementationOnce(failTimestamp).mockImplementationOnce(failTimestamp);
         },
       })(input("log-failure", [message("u1", "user", "Q"), message("a1", "assistant", "A")]));
       expect(result).toEqual({
@@ -1968,8 +1976,13 @@ describe("V2 fresh memory updater", () => {
     expect(await readText(checkpointPathFor("setup", memoryDir))).toBe("msg_a2\n");
     expect(compactionInput.result).toBe(result);
     expect(compactionInput.system.some((part) => part.text.includes("[MEMORY_SYSTEM]"))).toBe(true);
+    const status = await readV2MemoryStatus("setup", directory, base.context);
+    expect(status).toContain("compactCount: 1");
+    expect(status).toContain("updateCount: 2");
+    expect(status).toContain("injectCount: 2");
     await cleanup?.();
     await cleanup?.();
+    expect(await readV2MemoryStatus("setup", directory, base.context)).toContain("compactCount: 0");
     expect(base.calls.disposed).toEqual(["rpc"]);
   });
 

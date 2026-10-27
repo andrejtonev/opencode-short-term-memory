@@ -1,17 +1,10 @@
 import type { StatusActionRequest, StatusLocation } from "./v2-status-output";
+import { MEMORY_MENU_OPTIONS } from "./memory-menu";
 
 type Action = StatusActionRequest["action"];
 type Scope = StatusLocation & { sessionID: string };
 
-export const V2_TUI_MENU_OPTIONS: readonly { readonly title: string; readonly value: Action }[] = [
-  { title: "Show memory", value: "show" },
-  { title: "Show log file path", value: "logs" },
-  { title: "Show settings and config paths", value: "settings" },
-  { title: "Show status and live counters", value: "status" },
-  { title: "Update memory (uses memory model)", value: "update" },
-  { title: "Reset saved memory...", value: "reset" },
-  { title: "Create optional example config...", value: "setup" },
-];
+export const V2_TUI_MENU_OPTIONS: readonly { readonly title: string; readonly value: Action }[] = MEMORY_MENU_OPTIONS;
 
 type ActionRpc = (
   input: StatusActionRequest,

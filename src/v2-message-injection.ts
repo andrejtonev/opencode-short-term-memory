@@ -13,6 +13,7 @@ import {
   withV2MemoryMutation,
 } from "./v2-mutation-coordination";
 import { boundedV2Operation } from "./v2-bounded-operation";
+import { recordV2Telemetry } from "./v2-telemetry";
 import type { ReturnTypeOfReminderCadence } from "./v2-reminder-cadence";
 
 type DeliveryClaim = {
@@ -225,12 +226,14 @@ export function createV2MessageInjection(
                 memoryChars: memory.length,
                 injectedChars: taggedMemory.length,
               });
+              if (live(sessionID, revision)) recordV2Telemetry(context, "inject", taggedMemory.length);
               return true;
             }),
           admissionSignal,
           5_000,
         );
       } catch (error) {
+        if (live(sessionID, revision)) recordV2Telemetry(context, "error", errorMessage(error));
         finishClaim(sessionID, messageID, revision, claim, false);
         await logEvent(config, "v2_message_injection_error", {
           sessionID,
@@ -243,6 +246,7 @@ export function createV2MessageInjection(
       }
       finishClaim(sessionID, messageID, revision, claim, delivered);
     } catch (error) {
+      if (!disposed && !lifetimeSignal?.aborted) recordV2Telemetry(context, "error", errorMessage(error));
       try {
         await logEvent(config ?? DEFAULT_CONFIG, "v2_message_injection_error", {
           sessionID,

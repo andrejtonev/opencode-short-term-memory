@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { runInNewContext } from "node:vm";
 import { cleanupCleanToolsRun } from "../scripts/clean-tools-cleanup.mjs";
 
-test("clean-tools cleanup records signal exit without signalling a terminal PID", async () => {
+test("clean-tools cleanup records signal exit as unverified without signalling a terminal PID", async () => {
   let kills = 0;
   const evidence = { verdict: "PASS", hostExited: false };
   const cleanup = await cleanupCleanToolsRun(
@@ -23,9 +23,9 @@ test("clean-tools cleanup records signal exit without signalling a terminal PID"
     },
   );
   expect(kills).toBe(0);
-  expect(cleanup.complete).toBe(true);
+  expect(cleanup.complete).toBe(false);
   expect(evidence.hostExited).toBe(true);
-  expect(evidence.verdict).toBe("PASS");
+  expect(evidence.verdict).toBe("FAIL");
 });
 
 test("clean-tools cleanup fails a stuck mock independently of functional success", async () => {

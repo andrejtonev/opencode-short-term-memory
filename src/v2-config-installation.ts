@@ -61,10 +61,10 @@ async function replayInstallation(locationDirectory: string): Promise<
     configDirectory: string;
   }>
 > {
-  if (configDiscoveryDisabled("OPENCODE_CONFIG_PROJECT_DISABLE")) {
-    return fail("Native project config discovery is disabled; no config file created.");
-  }
-  if (configDiscoveryDisabled("OPENCODE_CONFIG_GLOBAL_DISABLE")) {
+  const projectEnabled = !configDiscoveryDisabled(
+    process.env.OPENCODE_CONFIG_PROJECT_DISABLE ?? process.env.OPENCODE_DISABLE_PROJECT_CONFIG,
+  );
+  if (configDiscoveryDisabled(process.env.OPENCODE_CONFIG_GLOBAL_DISABLE)) {
     return fail("Native global config discovery is disabled; no config file created.");
   }
   const override = explicitConfigOverride();
@@ -74,14 +74,17 @@ async function replayInstallation(locationDirectory: string): Promise<
 
   const location = resolve(locationDirectory);
   const globalDirectory = nativeGlobalConfigDirectory();
-  if ((await pathHasSymlinkComponent(location)) || (await pathHasSymlinkComponent(globalDirectory))) {
+  if (
+    (projectEnabled && (await pathHasSymlinkComponent(location))) ||
+    (await pathHasSymlinkComponent(globalDirectory))
+  ) {
     return fail("A symlinked native config root prevents safe origin matching; no config file created.");
   }
 
   // Native config entries are ordered: global directory, explicit file,
   // direct ancestor files, project .opencode directories, then virtual content.
   // Explicit and virtual sources were rejected above because V2 has no origin API.
-  const discovered = await discoverDocuments(location, globalDirectory);
+  const discovered = await discoverDocuments(location, globalDirectory, projectEnabled);
   if (!discovered.ok) return discovered;
   if (await hasPluginSourceDirectory(discovered.value.directoryEntries)) {
     return fail("A native plugin source directory is present, so STM provenance is ambiguous; no config file created.");
@@ -146,8 +149,8 @@ async function replayInstallation(locationDirectory: string): Promise<
   return ok({ declaration, configDirectory });
 }
 
-function configDiscoveryDisabled(name: "OPENCODE_CONFIG_PROJECT_DISABLE" | "OPENCODE_CONFIG_GLOBAL_DISABLE"): boolean {
-  const value = process.env[name]?.trim().toLowerCase();
+function configDiscoveryDisabled(raw: string | undefined): boolean {
+  const value = raw?.trim().toLowerCase();
   return value !== undefined && value !== "" && value !== "0" && value !== "false";
 }
 
@@ -173,6 +176,7 @@ function nativeGlobalConfigDirectory(): string {
 async function discoverDocuments(
   location: string,
   globalDirectory: string,
+  projectEnabled: boolean,
 ): Promise<
   Result<{
     documents: Document[];
@@ -186,6 +190,8 @@ async function discoverDocuments(
     if (!existing.ok) return existing;
     if (existing.value) globalDocuments.push({ path, scope: "global" });
   }
+
+  if (!projectEnabled) return ok({ documents: globalDocuments, directoryEntries: [globalDirectory] });
 
   const ancestors: string[] = [];
   for (let current = location; ; ) {

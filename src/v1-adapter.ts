@@ -1,13 +1,6 @@
 import type { Hooks, PluginInput } from "@opencode-ai/plugin";
 import { SessionMemoryPlugin as createSessionMemoryHooks } from "./session-memory";
-import type {
-  RuntimeContract,
-  RuntimeDisposer,
-  RuntimeMutation,
-  RuntimeNamedRegistration,
-  RuntimeSessionMessagesOptions,
-  RuntimeSessionMetadata,
-} from "./runtime-contract";
+import type { RuntimeContract, RuntimeSessionMessagesOptions, RuntimeSessionMetadata } from "./runtime-contract";
 import { unsupportedRuntimeOperation } from "./runtime-contract";
 
 type V1Client = PluginInput["client"];
@@ -22,16 +15,7 @@ type V1Tool = NonNullable<Hooks["tool"]>[string];
 type V1PluginInput = Parameters<typeof createSessionMemoryHooks>[0];
 type V1Hooks = Awaited<ReturnType<typeof createSessionMemoryHooks>>;
 
-type V1SystemMutation = RuntimeMutation<unknown, unknown>;
-type V1CompactionMutation = RuntimeMutation<unknown, unknown>;
 type V1Command = unknown;
-
-export interface V1RegistrationCollector {
-  readonly systemContextMutations: readonly V1SystemMutation[];
-  readonly compactionMutations: readonly V1CompactionMutation[];
-  readonly tools: readonly RuntimeNamedRegistration<V1Tool>[];
-  readonly commands: readonly RuntimeNamedRegistration<V1Command>[];
-}
 
 export type V1RuntimeContract = RuntimeContract<
   V1Message,
@@ -46,9 +30,7 @@ export type V1RuntimeContract = RuntimeContract<
   V1Command,
   undefined,
   V1PromptResponse
-> & {
-  readonly registrations: V1RegistrationCollector;
-};
+>;
 
 export interface V1Adapter {
   readonly runtime: V1RuntimeContract;
@@ -73,10 +55,10 @@ const capabilities = Object.freeze({
   deleteTemporarySessionForCleanup: true,
   listTemporarySessions: true,
   getTemporarySession: true,
-  registerSystemContextMutation: true,
-  registerCompactionMutation: true,
-  registerTool: true,
-  registerCommand: true,
+  registerSystemContextMutation: false,
+  registerCompactionMutation: false,
+  registerTool: false,
+  registerCommand: false,
   dispose: true,
 } as const);
 
@@ -114,39 +96,6 @@ function normalizeSession(session: V1SessionRow): RuntimeSessionMetadata {
 }
 
 export function createV1RuntimeContract(input: PluginInput): V1RuntimeContract {
-  const systemContextMutations: V1SystemMutation[] = [];
-  const compactionMutations: V1CompactionMutation[] = [];
-  const tools: RuntimeNamedRegistration<V1Tool>[] = [];
-  const commands: RuntimeNamedRegistration<V1Command>[] = [];
-
-  const registrationCollector: V1RegistrationCollector = Object.freeze({
-    get systemContextMutations() {
-      return Object.freeze([...systemContextMutations]);
-    },
-    get compactionMutations() {
-      return Object.freeze([...compactionMutations]);
-    },
-    get tools() {
-      return Object.freeze([...tools]);
-    },
-    get commands() {
-      return Object.freeze([...commands]);
-    },
-  });
-
-  function register<T>(collection: T[], registration: T): RuntimeDisposer {
-    collection.push(registration);
-    let active = true;
-    return Object.freeze({
-      dispose() {
-        if (!active) return;
-        active = false;
-        const index = collection.indexOf(registration);
-        if (index !== -1) collection.splice(index, 1);
-      },
-    });
-  }
-
   async function readSessionMetadata(sessionId: string): Promise<RuntimeSessionMetadata> {
     const response = await input.client.session.get({ path: { id: sessionId } });
     return normalizeSession(unwrapV1Response<V1SessionRow>(response, "session.get"));
@@ -174,7 +123,6 @@ export function createV1RuntimeContract(input: PluginInput): V1RuntimeContract {
     }),
     capabilities,
     config: Object.freeze({ options: undefined }),
-    registrations: registrationCollector,
 
     readSessionMetadata,
     readSessionMessages,
@@ -239,24 +187,19 @@ export function createV1RuntimeContract(input: PluginInput): V1RuntimeContract {
       const response = await input.client.session.get({ path: { id } });
       return normalizeSession(unwrapV1Response<V1SessionRow>(response, "session.get"));
     },
-    registerSystemContextMutation(mutation) {
-      return register(systemContextMutations, mutation);
+    registerSystemContextMutation() {
+      return unsupportedRuntimeOperation("registerSystemContextMutation", "systemContext.register");
     },
-    registerCompactionMutation(mutation) {
-      return register(compactionMutations, mutation);
+    registerCompactionMutation() {
+      return unsupportedRuntimeOperation("registerCompactionMutation", "compaction.register");
     },
-    registerTool(registration) {
-      return register(tools, Object.freeze({ ...registration }));
+    registerTool() {
+      return unsupportedRuntimeOperation("registerTool", "tool.register");
     },
-    registerCommand(registration) {
-      return register(commands, Object.freeze({ ...registration }));
+    registerCommand() {
+      return unsupportedRuntimeOperation("registerCommand", "command.register");
     },
-    dispose() {
-      systemContextMutations.length = 0;
-      compactionMutations.length = 0;
-      tools.length = 0;
-      commands.length = 0;
-    },
+    dispose() {},
   };
 }
 

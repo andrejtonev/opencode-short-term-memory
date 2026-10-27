@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Net changes from `main` (v1.3.0) through the locally prepared RC13 candidate. The prerelease entries below retain their historical release details.
+
+### Added
+
+- **OpenCode V2 support alongside V1:** automatic background updates, clean and active summaries, explicit memory models, session-message and system-context delivery, runtime status diagnostics, child-session snapshots, compaction and DCP completion hooks, and durable reset boundaries.
+- **Native `/stm` menus in both versions:** inspect Status, Show, Settings and Logs without invoking the chat model; confirm Reset and optional Setup locally. Update invokes the memory model. V1 uses paged readers and V2 uses scrollable dialogs for long results; argument-based slash commands remain model-mediated.
+- **Dedicated `stm_memory_*` tools** for the seven memory actions, while retaining `short_term_memory` compatibility.
+- **Installation-scoped configuration:** automatically create a minimal `stm.json` for supported global or project installations, preserve existing settings, and expose configuration paths and bootstrap diagnostics. Setup remains optional.
+- **Isolated Windows launchers and release acceptance:** install frozen candidates into private V1/V2 environments for manual testing; verify archive consumers and native generation, injection, reset and UI behavior separately.
+
+### Changed
+
+- **Session-message delivery is now the default.** Tagged memory reminders preserve the current agent, model and tools. Periodic system-context delivery remains available through `enableLegacyPeriodicSystemTransform`; active summaries use message delivery.
+- **Logs returns the absolute log-file path**, keeping log contents out of dialogs and model prompts. Successful Update displays refreshed memory; deferred, failed and partially completed updates report their actual outcome.
+- **Child sessions receive a parent-memory startup snapshot**, with controlled restoration after compaction or DCP compression.
+
+### Fixed
+
+- **Reset no longer replays the old conversation into cleared memory.** A persistent history boundary and stale-update fencing prevent background work from restoring pre-reset memory.
+- **Memory and checkpoints stay consistent under races and write failures:** preserve concurrent external edits and existing empty files, reject stale generations, and roll back prepared memory if checkpoint persistence fails.
+- **Clean summaries cannot execute tools or recursively summarize themselves.** Exclude internal summary traffic from collection and bound cleanup waits while retaining orphan-session recovery.
+- **Provider failures retain actionable diagnostics**, including authentication and model restrictions, instead of appearing as empty summaries. Permanent failures stop retries and fallback; transient failures retain bounded recovery.
+
 ## [1.4.0-rc.11] - 2026-10-26
 
 Published under `rc` from release commit `64c2bc3e0887d5f7eeaa54e92a5a904e3fef2447` and local tag `v1.4.0-rc.11`, with `latest` left at `1.3.0`. Registry bytes match the validated frozen archive. RC11 includes the branch-review fixes below. Source and deterministic native-host checks are separate from exact-archive consumer checks and live-provider qualification; see [RC Readiness](docs/RC-READINESS.md). Git push was not part of this publication.

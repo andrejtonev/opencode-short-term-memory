@@ -24,6 +24,7 @@ import {
 } from "./message-collector";
 import { buildMemoryPrompt, CLEAN_SUMMARIZER_TIMEOUT, normalizeMemory } from "./summarizer";
 import type { V2Context, V2SessionContext } from "./v2-adapter";
+import { recordV2Telemetry } from "./v2-telemetry";
 import {
   getV2MemorySessionSignal,
   getV2MemoryGenerationSignal,
@@ -346,12 +347,6 @@ function generateWithTimeout(
   return { result: waitPromise.then(({ text }) => text), operation: operationPromise, started: !preflightError };
 }
 
-function isRetryableSettledGenerationError(error: unknown): boolean {
-  const classified = providerGenerationError(error);
-  if (classified) return classified.retryable;
-  return error instanceof V2TransientGenerationError || error instanceof V2MalformedGenerationError;
-}
-
 export function createV2MemoryUpdater(
   context: V2Context,
   directory?: string,
@@ -455,6 +450,7 @@ export function createV2MemoryUpdater(
       while (consumed < retainedDelta.length) {
         const bounded = boundedChunk(retainedDelta.slice(consumed), config);
         if (!bounded) {
+          recordV2Telemetry(context, "error", `unable_to_bound_delta_at:${consumed}`);
           return {
             status: "error",
             reason: "empty_bounded_chunk",
@@ -644,6 +640,7 @@ export function createV2MemoryUpdater(
             }
             progress.checkpointedChunks += 1;
             progress.checkpointedMessages += bounded.consumed;
+            recordV2Telemetry(context, "update");
             if (lifetimeSignal?.aborted) throw new V2GenerationCancelledError();
           }
           return true;
@@ -657,6 +654,7 @@ export function createV2MemoryUpdater(
             checkpointID: bounded.checkpointID,
           });
         } catch (error) {
+          recordV2Telemetry(context, "error", errorMessage(error));
           await safeLog(config, "v2_memory_update_error", {
             sessionID,
             reason: "operational_failure",
@@ -673,6 +671,7 @@ export function createV2MemoryUpdater(
       }
       return { status: "committed", ...progress };
     } catch (error) {
+      if (!lifetimeSignal?.aborted) recordV2Telemetry(context, "error", errorMessage(error));
       const classified = providerGenerationError(error);
       await safeLog(config ?? DEFAULT_CONFIG, "v2_memory_update_error", {
         sessionID,

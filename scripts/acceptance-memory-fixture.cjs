@@ -20,8 +20,8 @@ function assertGeneratedMemoryInjection(body, mode) {
   });
   assert.ok(injected.length, "Primary request missing generated memory injection");
   assert.equal(
-    injected.some((message) => message.role === "system"),
-    mode === "system",
+    injected.every((message) => message.role === (mode === "system" ? "system" : "user")),
+    true,
     "Wrong memory injection transport",
   );
   if (mode === "message")

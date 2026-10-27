@@ -1,9 +1,68 @@
 import { expect, test } from "bun:test";
 import type { ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { cleanupOwnedChildren, isOwnedTreeGone } from "../scripts/windows-owned-process.cjs";
+import { cleanupOwnedChildren, isOwnedTreeGone, trackOwnedChild } from "../scripts/windows-owned-process.cjs";
 
 const activeChild = (pid = 12001) => ({ pid, exitCode: null, signalCode: null }) as ChildProcess;
+
+test.each([true, false])("a tracked root's normal exit requires descendant verification: gone=%s", async (gone) => {
+  const child = activeChild();
+  const snapshot = {
+    complete: true,
+    rootPids: [12001],
+    identities: [{ pid: 12001, created: "100", commandLine: "node host" }],
+  };
+  await trackOwnedChild(child, { captureTree: async () => snapshot });
+  Object.assign(child, { exitCode: 0 });
+  const cleanup = await cleanupOwnedChildren([child], {
+    verifyTreeGone: async (value) => {
+      expect(value).toBe(snapshot);
+      return gone;
+    },
+    killTree: async () => {
+      throw new Error("must never signal an exited parent");
+    },
+  });
+  expect(cleanup.complete).toBe(gone);
+  expect(cleanup.children[0]?.signalled).toBe(false);
+});
+
+test("an already-exited root cannot prove complete tree cleanup or signal its stale PID", async () => {
+  let touched = false;
+  const cleanup = await cleanupOwnedChildren([{ pid: 12001, exitCode: 0, signalCode: null } as ChildProcess], {
+    captureTree: async () => {
+      touched = true;
+      throw new Error("stale root");
+    },
+    killTree: async () => {
+      touched = true;
+      return { succeeded: true, error: null };
+    },
+  });
+  expect(touched).toBe(false);
+  expect(cleanup.childrenExited).toBe(true);
+  expect(cleanup.children[0]?.treeStatus).toBe("already-terminal-unverified");
+  expect(cleanup.complete).toBe(false);
+});
+
+test("exit during ownership capture is unqualified and never authorizes stale-PID signalling", async () => {
+  const child = activeChild();
+  await expect(
+    trackOwnedChild(child, {
+      captureTree: async () => {
+        Object.assign(child, { exitCode: 0 });
+        return {
+          complete: true,
+          rootPids: [12001],
+          identities: [{ pid: 12001, created: "999", commandLine: "reused PID" }],
+        };
+      },
+    }),
+  ).rejects.toThrow("exited before ownership capture");
+  const cleanup = await cleanupOwnedChildren([child]);
+  expect(cleanup.complete).toBe(false);
+  expect(cleanup.children[0]?.signalled).toBe(false);
+});
 
 test("parent exit and closed ports do not prove the process tree is gone after taskkill fails", async () => {
   const cleanup = await cleanupOwnedChildren([activeChild()], {

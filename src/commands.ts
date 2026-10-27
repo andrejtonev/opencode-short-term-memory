@@ -63,7 +63,7 @@ export async function statusText(sessionID: string | undefined, ctx: CommandCont
     `- cleanFallbackToActiveSession: ${config.cleanFallbackToActiveSession}`,
     `- includeAgentsMdOnFirstUpdate: ${config.includeAgentsMdOnFirstUpdate}`,
     `- injectInSubagents: ${config.injectInSubagents}`,
-    `- effectiveDeliveryMode: ${config.enableLegacyPeriodicSystemTransform ? "legacySystemTransform" : "promptNoReply"}`,
+    `- effectiveDeliveryMode: ${config.enableLegacyPeriodicSystemTransform && config.summarizerMode !== "active" ? "legacySystemTransform" : "promptNoReply"}`,
     `- sideSessionRetries: ${config.sideSessionRetries}`,
     `- remindEveryN: ${config.remindEveryN}`,
     `- maxDeltaMessages: ${config.maxDeltaMessages}`,

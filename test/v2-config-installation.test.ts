@@ -28,6 +28,7 @@ describe("V2 installation-scoped config bootstrap", () => {
       "OPENCODE_CONFIG",
       "OPENCODE_CONFIG_CONTENT",
       "OPENCODE_CONFIG_PROJECT_DISABLE",
+      "OPENCODE_DISABLE_PROJECT_CONFIG",
       "OPENCODE_CONFIG_GLOBAL_DISABLE",
     ]) {
       originalEnvironment.set(name, process.env[name]);
@@ -155,9 +156,23 @@ describe("V2 installation-scoped config bootstrap", () => {
     const result = await bootstrapV2InstalledConfig(context);
 
     expect(result.status).toBe("skipped");
-    expect(result.message).toContain("project config discovery is disabled");
+    expect(result.message).toContain("No active file-backed STM");
     expect(await exists(join(project, ".opencode", "stm.json"))).toBe(false);
   });
+
+  test.each(["OPENCODE_CONFIG_PROJECT_DISABLE", "OPENCODE_DISABLE_PROJECT_CONFIG"])(
+    "global bootstrap ignores disabled project declarations with %s",
+    async (flag) => {
+      await writeConfig(join(globalDirectory, "opencode.json"), JSON.stringify({ plugins: [STM] }));
+      await writeConfig(join(project, ".opencode", "opencode.json"), '{ "plugins": [invalid project JSON');
+      process.env[flag] = "1";
+      const result = await bootstrapV2InstalledConfig(context);
+      expect(result.status).toBe("created");
+      expect(result.scope).toBe("global");
+      expect(await exists(join(globalDirectory, "stm.json"))).toBe(true);
+      expect(await exists(join(project, ".opencode", "stm.json"))).toBe(false);
+    },
+  );
 
   test("substitution targets and malformed native JSONC are skipped", async () => {
     await writeConfig(join(globalDirectory, "opencode.json"), JSON.stringify({ plugins: ["${STM_PLUGIN}"] }));

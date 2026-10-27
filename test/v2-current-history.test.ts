@@ -242,7 +242,18 @@ describe("readV2CurrentHistory", () => {
         timeoutSignal = options?.signal ?? undefined;
         return await new Promise<never>(() => undefined);
       };
-      expect((await readV2CurrentHistory(h.context, "s1", 5)).status).toBe("error");
+      let watchdog: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const outcome = await Promise.race([
+          readV2CurrentHistory(h.context, "s1", 5),
+          new Promise<never>((_, reject) => {
+            watchdog = setTimeout(() => reject(new Error("history deadline did not settle")), 1_000);
+          }),
+        ]);
+        expect(outcome.status).toBe("error");
+      } finally {
+        if (watchdog !== undefined) clearTimeout(watchdog);
+      }
       expect(timeoutSignal?.aborted).toBe(true);
     }
   });

@@ -15,6 +15,8 @@ import { readV2CurrentHistory } from "./v2-current-history";
 import { registerV2DcpCompletion } from "./v2-dcp";
 import { bootstrapV2InstalledConfig } from "./v2-config-installation";
 import { DEFAULT_CONFIG, logEvent, readConfig } from "./memory-utils";
+import { initializeV2Telemetry, recordV2Telemetry } from "./v2-telemetry";
+import { retainV2MemoryCoordination } from "./v2-mutation-coordination";
 
 export type V1MemoryPlugin = (input: {
   client: OpencodeClient;
@@ -34,6 +36,8 @@ export default {
   async setup(context) {
     const adapter = createV2Adapter(context);
     const lifetime = new AbortController();
+    initializeV2Telemetry(context, lifetime.signal);
+    const releaseCoordination = retainV2MemoryCoordination(context.location.directory);
     await bootstrapV2InstalledConfig(context);
     const cadence = createV2ReminderCadence(context, context.location.directory);
     const isOwnedSession = (sessionID: string) => isV2OwnedSummarySession(context, sessionID);
@@ -66,6 +70,7 @@ export default {
       sessionID: string,
       reason: string,
     ) => {
+      recordV2Telemetry(context, "error", reason);
       try {
         await logEvent(await readConfig(undefined, context.location.directory), event, { sessionID, reason });
       } catch {
@@ -85,6 +90,8 @@ export default {
       if (lifetime.signal.aborted) return;
       if (isOwnedSession(input.sessionID)) return;
       try {
+        const compactionConfig = await readConfig(undefined, context.location.directory);
+        if (compactionConfig.enabled) recordV2Telemetry(context, "compact");
         const current = await readV2CurrentHistory(context, input.sessionID, 1_000);
         if (lifetime.signal.aborted) return;
         if (current.status !== "ready") {
@@ -140,6 +147,7 @@ export default {
       disposeStatus = await setupStatusCommand(context, adapter.runtime, lifetime.signal);
     } catch (error) {
       lifetime.abort();
+      releaseCoordination();
       disposeV2NativeGeneration(context);
       messageInjection.dispose();
       await disposeDcp?.().catch(() => undefined);
@@ -177,6 +185,7 @@ export default {
           if (failure?.status === "rejected") throw failure.reason;
         } finally {
           cadence.dispose();
+          releaseCoordination();
         }
       })());
   },

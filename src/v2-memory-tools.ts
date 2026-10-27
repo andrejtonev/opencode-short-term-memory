@@ -22,6 +22,7 @@ import { getV2MemoryReadRevision, getV2MemorySessionSignal } from "./v2-mutation
 import { parseV2ResetBoundary } from "./v2-reset-boundary";
 import { resetV2MemoryPersistence } from "./v2-reset-persistence";
 import { getV2ConfigInstallation } from "./v2-config-installation";
+import { readV2Telemetry } from "./v2-telemetry";
 
 const EMPTY_INPUT = {
   type: "object",
@@ -91,7 +92,7 @@ async function readMemory(sessionID: string, directory: string, lifetimeSignal?:
   return memory;
 }
 
-export async function readV2MemoryStatus(sessionID: string, directory: string): Promise<string> {
+export async function readV2MemoryStatus(sessionID: string, directory: string, context?: V2Context): Promise<string> {
   if (typeof sessionID !== "string" || !sessionID.trim() || safeSessionID(sessionID) !== sessionID) {
     throw new Error("STM status sessionID must be nonempty and path-safe.");
   }
@@ -117,6 +118,7 @@ export async function readV2MemoryStatus(sessionID: string, directory: string): 
     boundaryState = "unreadable";
   }
   const selection = memoryModelSelection(config);
+  const telemetry = readV2Telemetry(context);
   const markdown = [
     "generation: v2",
     `enabled: ${config.enabled}`,
@@ -135,6 +137,14 @@ export async function readV2MemoryStatus(sessionID: string, directory: string): 
     `memoryBytes: ${Buffer.byteLength(text, "utf8")}`,
     `checkpoint: ${checkpoint || "none"}`,
     `updaterBusy: ${isV2MemoryUpdateInFlight(directory, sessionID)}`,
+    "counterScope: plugin-runtime",
+    `updateCount: ${telemetry.updateCount}`,
+    `injectCount: ${telemetry.injectCount}`,
+    `injectCharCount: ${telemetry.injectCharCount}`,
+    `compactCount: ${telemetry.compactCount}`,
+    `lastUpdateAt: ${telemetry.lastUpdateAt || "never"}`,
+    `lastInjectAt: ${telemetry.lastInjectAt || "never"}`,
+    `lastError: ${telemetry.lastError || "none"}`,
   ].join("\n");
   return markdown;
 }
@@ -276,7 +286,7 @@ export function createV2MemoryActions(pluginContext: V2Context, lifetimeSignal?:
   const updater = createV2MemoryUpdater(pluginContext, directory, { lifetimeSignal });
   return {
     show: (sessionID: string) => readMemory(sessionID, directory, lifetimeSignal),
-    status: (sessionID: string) => readV2MemoryStatus(sessionID, directory),
+    status: (sessionID: string) => readV2MemoryStatus(sessionID, directory, pluginContext),
     update: (sessionID: string) => updateMemory(sessionID, pluginContext, directory, updater),
     reset: (sessionID: string, input: { readonly confirm?: unknown; readonly messageID?: string }) =>
       resetMemory(sessionID, input.confirm, pluginContext, directory, input.messageID, lifetimeSignal),

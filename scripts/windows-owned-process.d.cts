@@ -17,6 +17,20 @@ export type CleanupResult = {
   complete: boolean;
 };
 export function canSignalOwnedChild(child: ChildProcess | undefined): boolean;
+export function trackOwnedChild(
+  child: ChildProcess,
+  options?: {
+    timeoutMs?: number;
+    captureTree?: (
+      child: ChildProcess,
+      timeoutMs: number,
+    ) => Promise<{
+      complete: boolean;
+      rootPids?: number[];
+      identities: { pid: number; created: string; commandLine: string }[];
+    }>;
+  },
+): Promise<unknown> | undefined;
 export function isOwnedTreeGone(
   snapshot: { rootPids?: number[]; identities: { pid: number; created: string; commandLine: string }[] },
   rows: { pid: number; parentPid: number; created: string; commandLine: string }[],

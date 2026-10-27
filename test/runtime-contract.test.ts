@@ -19,10 +19,10 @@ const expectedCapabilities = {
   deleteTemporarySessionForCleanup: true,
   listTemporarySessions: true,
   getTemporarySession: true,
-  registerSystemContextMutation: true,
-  registerCompactionMutation: true,
-  registerTool: true,
-  registerCommand: true,
+  registerSystemContextMutation: false,
+  registerCompactionMutation: false,
+  registerTool: false,
+  registerCommand: false,
   dispose: true,
 } as const satisfies RuntimeCapabilities;
 
@@ -309,57 +309,12 @@ describe("runtime contract V1 conformance", () => {
     }
   });
 
-  test("collects registrations and supports individual, aggregate, and post-disposal behavior", async () => {
+  test("V1 adapter refuses registrations that cannot affect its independently constructed native hooks", async () => {
     const { runtime } = createFixture();
-    const systemCalls: unknown[] = [];
-    const compactionCalls: unknown[] = [];
-    const systemMutation = (input: unknown, output: unknown) => {
-      systemCalls.push([input, output]);
-    };
-    const compactionMutation = async (input: unknown, output: unknown) => {
-      compactionCalls.push([input, output]);
-    };
-    const toolDefinition = { description: "tool", args: {}, execute: async () => "result" } as never;
-    const commandDefinition = { description: "command", template: "run" };
-
-    const systemDisposer = await runtime.registerSystemContextMutation(systemMutation);
-    const compactionDisposer = await runtime.registerCompactionMutation(compactionMutation);
-    const toolDisposer = await runtime.registerTool({ name: "test_tool", definition: toolDefinition });
-    const commandDisposer = await runtime.registerCommand({ name: "test.command", definition: commandDefinition });
-
-    expect(runtime.registrations.systemContextMutations).toEqual([systemMutation]);
-    expect(runtime.registrations.compactionMutations).toEqual([compactionMutation]);
-    expect(runtime.registrations.tools).toEqual([{ name: "test_tool", definition: toolDefinition }]);
-    expect(runtime.registrations.commands).toEqual([{ name: "test.command", definition: commandDefinition }]);
-    expect(Object.isFrozen(runtime.registrations.systemContextMutations)).toBe(true);
-    expect(Object.isFrozen(runtime.registrations.tools[0])).toBe(true);
-
-    await runtime.registrations.systemContextMutations[0]("system-input", "system-output");
-    await runtime.registrations.compactionMutations[0]("compaction-input", "compaction-output");
-    expect(systemCalls).toEqual([["system-input", "system-output"]]);
-    expect(compactionCalls).toEqual([["compaction-input", "compaction-output"]]);
-
-    await systemDisposer.dispose();
-    await toolDisposer.dispose();
-    await systemDisposer.dispose();
-    await toolDisposer.dispose();
-    expect(runtime.registrations.systemContextMutations).toEqual([]);
-    expect(runtime.registrations.compactionMutations).toEqual([compactionMutation]);
-    expect(runtime.registrations.tools).toEqual([]);
-    expect(runtime.registrations.commands).toHaveLength(1);
-
+    expect(() => runtime.registerSystemContextMutation(() => {})).toThrow(RuntimeCapabilityError);
+    expect(() => runtime.registerCompactionMutation(() => {})).toThrow(RuntimeCapabilityError);
+    expect(() => runtime.registerTool({ name: "ignored", definition: {} as never })).toThrow(RuntimeCapabilityError);
+    expect(() => runtime.registerCommand({ name: "ignored", definition: {} })).toThrow(RuntimeCapabilityError);
     await runtime.dispose();
-    expect(runtime.registrations.systemContextMutations).toEqual([]);
-    expect(runtime.registrations.compactionMutations).toEqual([]);
-    expect(runtime.registrations.tools).toEqual([]);
-    expect(runtime.registrations.commands).toEqual([]);
-
-    await compactionDisposer.dispose();
-    await commandDisposer.dispose();
-    const postDisposeMutation = () => {};
-    const postDisposeDisposer = await runtime.registerSystemContextMutation(postDisposeMutation);
-    expect(runtime.registrations.systemContextMutations).toEqual([postDisposeMutation]);
-    await postDisposeDisposer.dispose();
-    expect(runtime.registrations.systemContextMutations).toEqual([]);
   });
 });

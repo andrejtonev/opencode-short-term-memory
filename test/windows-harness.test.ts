@@ -60,7 +60,7 @@ test("Windows cleanup never signals terminal children or invalid process IDs", a
     verifyTreeGone: async () => true,
   });
   expect(killed).toEqual([]);
-  expect(cleanup.complete).toBe(true);
+  expect(cleanup.complete).toBe(false);
   const invalid = await cleanupOwnedChildren([child(0), child(-1), child(Number.NaN)], {
     killTree: async (value) => {
       killed.push(value.pid!);
@@ -132,7 +132,7 @@ test("owned cleanup waits for listener closure after child exit within its deadl
     });
     expect(connections).toBe(1);
     expect(cleanup.portsClosed).toBe(true);
-    expect(cleanup.complete).toBe(true);
+    expect(cleanup.complete).toBe(false); // Closed listeners do not prove an untracked tree is gone.
   } finally {
     clearTimeout(closeTimer);
     await closeOwnedServer(server as unknown as Server);

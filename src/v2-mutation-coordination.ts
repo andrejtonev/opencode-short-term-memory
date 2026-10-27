@@ -7,6 +7,36 @@ const sessionControllers = new Map<string, AbortController>();
 const readRevisions = new WeakMap<AbortSignal, number>();
 const generationControllers = new Map<string, AbortController>();
 const updateReservations = new Map<string, object>();
+const deletedSessions = new Set<string>();
+const deletedSignal = AbortSignal.abort(new Error("session_deleted"));
+const runtimeOwners = new Map<string, number>();
+
+/** Keep fences shared by live runtimes; release controller objects when the last owner exits. */
+export function retainV2MemoryCoordination(directory: string): Release {
+  runtimeOwners.set(directory, (runtimeOwners.get(directory) ?? 0) + 1);
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    const remaining = (runtimeOwners.get(directory) ?? 1) - 1;
+    if (remaining > 0) {
+      runtimeOwners.set(directory, remaining);
+      return;
+    }
+    runtimeOwners.delete(directory);
+    const prefix = JSON.stringify([directory]).slice(0, -1) + ",";
+    for (const controllers of [sessionControllers, generationControllers]) {
+      for (const [key, controller] of controllers) {
+        if (!key.startsWith(prefix)) continue;
+        controller.abort(new Error("memory_runtime_disposed"));
+        controllers.delete(key);
+      }
+    }
+    for (const key of deletedSessions) if (key.startsWith(prefix)) deletedSessions.delete(key);
+    // Pending operations retain their own mutation/reservation releases. A new
+    // runtime must not start an overlapping provider while the old call settles.
+  };
+}
 
 function mutationKey(directory: string, sessionID: string): string {
   return JSON.stringify([directory, sessionID]);
@@ -14,6 +44,7 @@ function mutationKey(directory: string, sessionID: string): string {
 
 export function getV2MemorySessionSignal(directory: string, sessionID: string): AbortSignal {
   const key = mutationKey(directory, sessionID);
+  if (deletedSessions.has(key)) return deletedSignal;
   let controller = sessionControllers.get(key);
   if (!controller) {
     controller = new AbortController();
@@ -23,7 +54,7 @@ export function getV2MemorySessionSignal(directory: string, sessionID: string): 
 }
 
 export function isV2MemorySessionDeleted(directory: string, sessionID: string): boolean {
-  return sessionControllers.get(mutationKey(directory, sessionID))?.signal.aborted === true;
+  return deletedSessions.has(mutationKey(directory, sessionID));
 }
 
 export function getV2MemoryReadRevision(directory: string, sessionID: string): number {
@@ -37,6 +68,7 @@ export function invalidateV2MemoryReads(directory: string, sessionID: string): v
 
 export function getV2MemoryGenerationSignal(directory: string, sessionID: string): AbortSignal {
   const key = mutationKey(directory, sessionID);
+  if (deletedSessions.has(key)) return deletedSignal;
   let controller = generationControllers.get(key);
   if (!controller) {
     controller = new AbortController();
@@ -49,6 +81,7 @@ export function getV2MemoryGenerationSignal(directory: string, sessionID: string
 // The updater separately retains its provider reservation until that call settles.
 export function invalidateV2MemoryGeneration(directory: string, sessionID: string): void {
   const key = mutationKey(directory, sessionID);
+  if (deletedSessions.has(key)) return;
   generationControllers.get(key)?.abort(new Error("memory_reset"));
   generationControllers.set(key, new AbortController());
 }
@@ -122,9 +155,13 @@ export async function deleteV2MemorySession(
   sessionID: string,
   operation: () => void | Promise<void>,
 ): Promise<void> {
-  getV2MemorySessionSignal(directory, sessionID);
-  sessionControllers.get(mutationKey(directory, sessionID))!.abort(new Error("session_deleted"));
-  const release = await acquireMutation(mutationKey(directory, sessionID));
+  const key = mutationKey(directory, sessionID);
+  deletedSessions.add(key);
+  sessionControllers.get(key)?.abort(new Error("session_deleted"));
+  generationControllers.get(key)?.abort(new Error("session_deleted"));
+  sessionControllers.delete(key);
+  generationControllers.delete(key);
+  const release = await acquireMutation(key);
   try {
     await operation();
   } finally {

@@ -1,5 +1,21 @@
 const { execFile } = require("node:child_process");
 const { createConnection } = require("node:net");
+const trackedTrees = new WeakMap();
+
+/** Acquire ownership while the root is live, before normal exit can erase its ancestry. */
+function trackOwnedChild(child, options = {}) {
+  if (trackedTrees.has(child)) return trackedTrees.get(child);
+  if (!canSignalOwnedChild(child)) return;
+  const snapshot = Promise.resolve()
+    .then(() => (options.captureTree ?? captureOwnedTree)(child, options.timeoutMs ?? 5000))
+    .then((value) => {
+      if (!canSignalOwnedChild(child)) throw new Error("Owned root exited before ownership capture completed");
+      return value;
+    });
+  trackedTrees.set(child, snapshot);
+  snapshot.catch(() => undefined);
+  return snapshot;
+}
 
 function canSignalOwnedChild(child) {
   return (
@@ -154,6 +170,27 @@ async function cleanupOwnedChildren(children, options = {}) {
         // This cleanup invocation did not observe a live root and therefore
         // cannot safely take a creation-time snapshot or signal its stale PID.
         record.treeStatus = "already-terminal-unverified";
+        const tracked = trackedTrees.get(child);
+        if (tracked) {
+          let timer;
+          try {
+            const snapshot = await Promise.race([
+              tracked,
+              new Promise((_, reject) => {
+                timer = setTimeout(() => reject(new Error("Owned tree snapshot timed out")), remaining());
+              }),
+            ]);
+            if (snapshot?.complete && snapshot.identities?.length) {
+              record.treeProcessCount = snapshot.identities.length;
+              const gone = await (options.verifyTreeGone ?? verifyTreeGone)(snapshot, remaining());
+              record.treeStatus = gone ? "verified-gone" : "unconfirmed";
+            }
+          } catch (error) {
+            record.treeVerificationError = String(error);
+          } finally {
+            if (timer !== undefined) clearTimeout(timer);
+          }
+        }
         return record;
       }
       let treeSnapshot;
@@ -243,7 +280,6 @@ async function cleanupOwnedChildren(children, options = {}) {
     records.every(
       (record) =>
         record.treeStatus === "taskkill-succeeded" ||
-        record.treeStatus === "already-terminal-unverified" ||
         (record.treeStatus === "verified-gone" && !record.treeVerificationError),
     );
   return { children: records, ports, childrenExited, portsClosed, complete };
@@ -283,4 +319,11 @@ function closeOwnedServer(server, timeoutMs = 1000) {
   });
 }
 
-module.exports = { canSignalOwnedChild, cleanupOwnedChildren, applyCleanupVerdict, closeOwnedServer, isOwnedTreeGone };
+module.exports = {
+  canSignalOwnedChild,
+  trackOwnedChild,
+  cleanupOwnedChildren,
+  applyCleanupVerdict,
+  closeOwnedServer,
+  isOwnedTreeGone,
+};

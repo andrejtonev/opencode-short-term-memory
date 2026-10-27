@@ -47,6 +47,21 @@ test("acceptance verifies the transport of generated memory independently of ord
   expect(() => assertGeneratedMemoryInjection({ messages: [{ role: "system", content }] }, "system")).not.toThrow();
 });
 
+test.each(["message", "system"])("fresh fixed-%s acceptance rejects dual delivery", (mode) => {
+  const content = "[MEMORY_SYSTEM] ACCEPTANCE_MEMORY_LINE_000";
+  expect(() =>
+    assertGeneratedMemoryInjection(
+      {
+        messages: [
+          { role: "user", content },
+          { role: "system", content },
+        ],
+      },
+      mode,
+    ),
+  ).toThrow("Wrong memory injection transport");
+});
+
 test("summary provenance permits V1 user-only updates while rejecting summarizer recursion", () => {
   const body = (delta: string) => ({
     messages: [

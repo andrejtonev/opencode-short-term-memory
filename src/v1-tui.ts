@@ -1,4 +1,5 @@
 import { isAbsolute } from "node:path";
+import { MEMORY_MENU_OPTIONS } from "./memory-menu";
 import { openTextReader, type ReaderHost } from "./tui-text-reader";
 import {
   decodeV1Response,
@@ -190,15 +191,7 @@ export async function setupV1Tui<Node>(api: V1TuiContext<Node>, _options?: unkno
     api.ui.dialog.replace(() =>
       api.ui.DialogSelect({
         title: "STM session memory",
-        options: [
-          { title: "Show memory", value: "show" },
-          { title: "Show log file path", value: "logs" },
-          { title: "Show settings and config paths", value: "settings" },
-          { title: "Show status and live counters", value: "status" },
-          { title: "Update memory (uses memory model)", value: "update" },
-          { title: "Reset saved memory...", value: "reset" },
-          { title: "Create optional example config...", value: "setup" },
-        ],
+        options: MEMORY_MENU_OPTIONS.map((option) => ({ ...option })),
         onSelect: (option) => select(option.value),
       }),
     );

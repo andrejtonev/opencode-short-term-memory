@@ -16,7 +16,12 @@ const {
   assertOrdinaryConversationDelta,
   assertNativeSummarySystem,
 } = require("./acceptance-memory-fixture.cjs");
-const { cleanupOwnedChildren, applyCleanupVerdict, closeOwnedServer } = require("./windows-owned-process.cjs");
+const {
+  cleanupOwnedChildren,
+  applyCleanupVerdict,
+  closeOwnedServer,
+  trackOwnedChild,
+} = require("./windows-owned-process.cjs");
 
 const [generation, nativeArg, archiveArg, mode = "message", scope = "global"] = process.argv.slice(2);
 assert.equal(process.platform, "win32", "This runner uses Windows ConPTY containment");
@@ -91,6 +96,7 @@ fs.mkdirSync(configDir, { recursive: true });
 if (generation === "v2") env.OPENCODE_CONFIG_DIR = configDir;
 const password = crypto.randomUUID();
 if (generation === "v2") env.OPENCODE_SERVER_PASSWORD = password;
+const installers = [];
 let host,
   terminal,
   installer,
@@ -119,6 +125,8 @@ async function run(args, timeout = 240000) {
   const row = { args, output: "", exit: null };
   evidence.commands.push(row);
   installer = cp.spawn(native, args, { cwd: project, env, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
+  trackOwnedChild(installer);
+  installers.push(installer);
   for (const stream of [installer.stdout, installer.stderr])
     stream.on("data", (chunk) => {
       row.output += chunk.toString();
@@ -207,6 +215,7 @@ async function startHost() {
     windowsHide: true,
     stdio: ["ignore", "pipe", "pipe"],
   });
+  trackOwnedChild(host);
   for (const stream of [host.stdout, host.stderr])
     stream.on("data", (chunk) => {
       hostLog += chunk.toString();
@@ -276,6 +285,7 @@ async function startTerminal(sessionID) {
     { cwd: project, env, windowsHide: true, stdio: ["pipe", "pipe", "pipe"] },
   );
   let buffered = "";
+  trackOwnedChild(terminal);
   terminal.stdout.on("data", (chunk) => {
     buffered += chunk.toString();
     const lines = buffered.split("\n");
@@ -617,7 +627,7 @@ async function main() {
   } finally {
     releaseHeld?.();
     heldResponse?.destroy();
-    const cleanup = await cleanupOwnedChildren([terminal, host, installer], { endpoints: base ? [base] : [] });
+    const cleanup = await cleanupOwnedChildren([terminal, host, ...installers], { endpoints: base ? [base] : [] });
     cleanup.fixture = await closeOwnedServer(fixture);
     cleanup.complete &&= cleanup.fixture.closed;
     applyCleanupVerdict(evidence, cleanup);

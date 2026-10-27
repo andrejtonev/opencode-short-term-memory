@@ -6,6 +6,7 @@ import type { SessionPrompt } from "@opencode/plugin/promise/session";
 import type { V2Context } from "../src/v2-adapter";
 import { INJECTION_PREFIX, MEMORY_HEADER, memoryPathFor, writeText } from "../src/memory-utils";
 import { createV2MessageInjection } from "../src/v2-message-injection";
+import { readV2MemoryStatus } from "../src/v2-memory-tools";
 import { createV2ReminderCadence } from "../src/v2-reminder-cadence";
 import { resetV2MemoryPersistence } from "../src/v2-reset-persistence";
 import { deferred } from "./async-helpers";
@@ -111,6 +112,10 @@ describe("V2 appended no-reply memory injection", () => {
       resume: false,
     });
     expect(calls[0]?.id).toMatch(/^msg_/);
+    const status = await readV2MemoryStatus(sessionID, projectDir, context);
+    expect(status).toContain("injectCount: 1");
+    expect(status).toMatch(/injectCharCount: [1-9]\d*/);
+    expect(status).not.toContain("lastInjectAt: never");
     cadence.dispose();
     inject.dispose();
   });
@@ -283,6 +288,9 @@ describe("V2 appended no-reply memory injection", () => {
     expect(calls.slice(0, 2).map((call) => call.metadata?.primaryMessageID)).toEqual(["msg_order_1", "msg_order_2"]);
 
     await inject(prompt(sessionID, "msg_retry"));
+    const status = await readV2MemoryStatus(sessionID, projectDir, context);
+    expect(status).toContain("injectCount: 2");
+    expect(status).toContain("lastError: simulated admission response loss");
     const failedID = calls.at(-1)?.id;
     const failedText = calls.at(-1)?.text;
     await writeText(memoryPathFor(sessionID, memoryDir), `${MEMORY}\n- Changed after the response was lost.\n`);

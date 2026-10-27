@@ -12,6 +12,7 @@ import {
 } from "./v2-child-memory";
 import { getV2MemoryReadRevision, isV2MemorySessionDeleted } from "./v2-mutation-coordination";
 import type { ReturnTypeOfReminderCadence } from "./v2-reminder-cadence";
+import { recordV2Telemetry } from "./v2-telemetry";
 
 export type V2ContextInjectionTarget = "context" | "compaction";
 
@@ -131,6 +132,7 @@ export function createV2ContextInjection(
           return;
         }
         input.system.push({ type: "text", text: taggedMemory });
+        recordV2Telemetry(context, "inject", taggedMemory.length);
         if (delivery) completeV2ChildSystemDelivery(resolvedDirectory, input.sessionID, delivery);
       } catch (error) {
         if (delivery) releaseV2ChildSystemDelivery(resolvedDirectory, input.sessionID, delivery);
@@ -145,6 +147,7 @@ export function createV2ContextInjection(
         ...(target === "compaction" && lineage.kind === "task-child" ? { childDelivery: "compaction" } : {}),
       });
     } catch (error) {
+      if (current()) recordV2Telemetry(context, "error", errorMessage(error));
       try {
         await logEvent(config ?? DEFAULT_CONFIG, "v2_context_injection_error", {
           sessionID: input.sessionID,
