@@ -6,6 +6,19 @@ export const STATUS_MAX_CHARS = 16_384;
 
 const string = { type: "string", minLength: 1 } as const;
 const identity = { requestID: string, sessionID: string };
+const actionInput = {
+  type: "object",
+  properties: {
+    // Native V2 rejects regex patterns in portable RPC schemas. The action
+    // parser still validates path-safe IDs before admission or persistence.
+    requestID: { type: "string", minLength: 1, maxLength: 128 },
+    sessionID: string,
+    action: { type: "string", enum: ["show", "status", "logs", "update", "reset", "settings", "setup"] },
+    confirm: { type: "boolean" },
+  },
+  required: ["requestID", "sessionID", "action"],
+  additionalProperties: false,
+} as const;
 const receiver = {
   type: "object",
   properties: { ...identity, receiverID: string },
@@ -23,6 +36,7 @@ const accepted = {
 export const statusOutputDefinition = {
   id: "stm.status-output",
   methods: {
+    action: { input: actionInput, output: accepted },
     claim: { input: receiver, output: accepted },
     acknowledge: { input: receiver, output: accepted },
     cancel: { input: receiver, output: accepted },
@@ -54,6 +68,12 @@ export const statusOutputDefinition = {
 } as const satisfies Rpc.PortableDefinition;
 
 export type StatusReceiver = { requestID: string; sessionID: string; receiverID: string };
+export type StatusActionRequest = {
+  requestID: string;
+  sessionID: string;
+  action: "show" | "status" | "logs" | "update" | "reset" | "settings" | "setup";
+  confirm?: boolean;
+};
 export type StatusOffer = { requestID: string; sessionID: string; expiresAt: number };
 export type StatusOutput = StatusOffer & { receiverID: string; message: string; title: string };
 export type StatusLocation = { directory: string; workspaceID?: string };

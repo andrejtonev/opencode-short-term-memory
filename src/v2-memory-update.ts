@@ -26,13 +26,16 @@ import { buildMemoryPrompt, CLEAN_SUMMARIZER_TIMEOUT, normalizeMemory } from "./
 import type { V2Context, V2SessionContext } from "./v2-adapter";
 import {
   getV2MemorySessionSignal,
+  getV2MemoryGenerationSignal,
   isV2MemorySessionDeleted,
-  tryAcquireV2MemoryUpdate,
+  tryReserveV2MemoryUpdate,
+  withV2MemoryMutation,
 } from "./v2-mutation-coordination";
 import { parseV2ResetBoundary } from "./v2-reset-boundary";
-import { generationErrorMessage, providerGenerationError } from "./provider-error";
+import { generationErrorMessage, isPermanentGenerationError, providerGenerationError } from "./provider-error";
 import { taskChildUpdaterSkip } from "./v2-child-memory";
 import { generateV2ActiveMemory } from "./v2-active-generation";
+import { generateV2CleanMemory, isV2OwnedSummarySession } from "./v2-native-generation";
 
 export { isV2MemoryUpdateInFlight } from "./v2-mutation-coordination";
 
@@ -86,7 +89,7 @@ export type V2MemoryUpdateProgress = {
   readonly checkpointedChunks: number;
   // Visible entries covered by those writes; a completed oversized entry counts once.
   readonly checkpointedMessages: number;
-  // Cumulative fragment writes without a checkpoint, including fragments of entries later completed.
+  // Legacy result field retained for API compatibility; V1 truncates oversized entries, so V2 keeps this at zero.
   readonly persistedPartialFragments: number;
 };
 
@@ -107,7 +110,6 @@ type ChunkUnit = {
   readonly entries: VisibleEntry[];
   readonly consumed: number;
   readonly checkpointID: string;
-  readonly fragments?: readonly VisibleEntry[];
 };
 
 function errorMessage(error: unknown): string {
@@ -169,27 +171,21 @@ function collapseAssistantBursts(entries: VisibleEntry[]): VisibleEntry[] {
   return collapsed;
 }
 
-function oversizedFragments(entry: VisibleEntry, maxLength: number): VisibleEntry[] {
-  const prefix = `${entry.role.toUpperCase()}:\n[OVERSIZED_ENTRY_CONTINUATION]\n`;
-  const payloadLength = Math.max(1, maxLength - prefix.length);
-  const fragments: VisibleEntry[] = [];
-  for (let offset = 0; offset < entry.rendered.length; offset += payloadLength) {
-    fragments.push({ ...entry, rendered: `${prefix}${entry.rendered.slice(offset, offset + payloadLength)}` });
-  }
-  return fragments;
-}
-
 function boundedChunk(entries: VisibleEntry[], config: SessionMemoryConfig): ChunkUnit | undefined {
   const result: VisibleEntry[] = [];
   let length = 0;
-  for (let index = 0; index < entries.length && index < config.maxDeltaMessages; index += 1) {
+  for (let index = 0; index < entries.length; index += 1) {
     const entry = entries[index]!;
     if (entry.rendered.length > config.maxUpdateInputLength) {
       if (result.length) {
         return { entries: result, consumed: result.length, checkpointID: result[result.length - 1]!.id };
       }
-      const fragments = oversizedFragments(entry, config.maxUpdateInputLength);
-      return { entries: [fragments[0]!], consumed: 0, checkpointID: "", fragments };
+      const room = Math.max(64, config.maxUpdateInputLength);
+      const truncated = {
+        ...entry,
+        rendered: `${entry.rendered.slice(0, room)}\n[TRUNCATED_FOR_MAX_UPDATE_INPUT_LENGTH]`,
+      };
+      return { entries: [truncated], consumed: 1, checkpointID: entry.id };
     }
     const separator = result.length ? "\n\n---\n\n" : "";
     if (length + separator.length + entry.rendered.length <= config.maxUpdateInputLength) {
@@ -215,10 +211,27 @@ export class V2MalformedGenerationError extends Error {
 function validateRawMemory(raw: string): void {
   if (!raw.trim()) throw new V2MalformedGenerationError("empty_generation");
   if (!raw.includes(MEMORY_HEADER)) throw new V2MalformedGenerationError("missing_memory_header");
+  if (TEMPLATE_MARKERS.test(raw)) throw new V2MalformedGenerationError("raw_template_marker");
+}
+
+function validateRequiredMemoryHeadings(raw: string): void {
   for (const heading of REQUIRED_HEADINGS) {
     if (!raw.includes(`### ${heading}`)) throw new V2MalformedGenerationError(`missing_heading:${heading}`);
   }
-  if (TEMPLATE_MARKERS.test(raw)) throw new V2MalformedGenerationError("raw_template_marker");
+}
+
+function canRetryCleanGenerationFailure(
+  error: unknown,
+  lifetimeSignal: AbortSignal | undefined,
+  deadline: number,
+): boolean {
+  return (
+    !lifetimeSignal?.aborted &&
+    !(error instanceof V2GenerationCancelledError) &&
+    !(error instanceof V2GenerationTimeoutError) &&
+    !isPermanentGenerationError(error) &&
+    Date.now() < deadline
+  );
 }
 
 const AGENTS_MD_MAX_BYTES = 20_000;
@@ -336,13 +349,7 @@ function generateWithTimeout(
 function isRetryableSettledGenerationError(error: unknown): boolean {
   const classified = providerGenerationError(error);
   if (classified) return classified.retryable;
-  return (
-    error instanceof V2TransientGenerationError ||
-    error instanceof V2MalformedGenerationError ||
-    // Native V2 generation reports a settled provider 503 with this error name.
-    // Match the host's specific category, never message text or arbitrary errors.
-    (error instanceof Error && error.name === "Generate.UnavailableError")
-  );
+  return error instanceof V2TransientGenerationError || error instanceof V2MalformedGenerationError;
 }
 
 export function createV2MemoryUpdater(
@@ -360,6 +367,9 @@ export function createV2MemoryUpdater(
     let rollback: "restored" | "conflict" | "failed" | undefined;
     const sessionID = input.sessionID;
     const directoryPath = directory ?? context.location.directory;
+    if (isV2OwnedSummarySession(context, sessionID)) {
+      return { status: "skipped", reason: "internal_summary_session", ...progress };
+    }
     if (isV2MemorySessionDeleted(directoryPath, sessionID)) {
       return { status: "skipped", reason: "session_deleted", ...progress };
     }
@@ -367,13 +377,14 @@ export function createV2MemoryUpdater(
       hooks?.lifetimeSignal,
       input.lifetimeSignal,
       getV2MemorySessionSignal(directoryPath, sessionID),
+      getV2MemoryGenerationSignal(directoryPath, sessionID),
     );
     const key = generationKey(directoryPath, sessionID);
     if (inFlightGenerations.has(key)) return { status: "busy", reason: "update_in_flight", ...progress };
-    const release = tryAcquireV2MemoryUpdate(directoryPath, sessionID);
+    const release = tryReserveV2MemoryUpdate(directoryPath, sessionID);
     if (!release) return { status: "busy", reason: "update_in_flight", ...progress };
     try {
-      config = await readConfig(undefined, directory);
+      config = await readConfig(undefined, directoryPath);
       if (lifetimeSignal?.aborted) throw new V2GenerationCancelledError();
       if (!config.enabled) return { status: "skipped", reason: "disabled", ...progress };
       const childSkip = await taskChildUpdaterSkip(context, sessionID);
@@ -381,7 +392,7 @@ export function createV2MemoryUpdater(
       if (childSkip) return { status: "skipped", reason: childSkip, ...progress };
       const boundaryRaw = await readRawFile(resetBoundaryPathFor(sessionID, config.memoryDir));
       let boundedInput = input;
-      if (boundaryRaw !== null) {
+      if (boundaryRaw !== null && parseV2ResetBoundary(boundaryRaw).anchorID !== null) {
         const boundary = parseV2ResetBoundary(boundaryRaw);
         const matches = input.messages.reduce<number[]>((indices, message, index) => {
           if (typeof message.id === "string" && message.id === boundary.anchorID) indices.push(index);
@@ -401,14 +412,9 @@ export function createV2MemoryUpdater(
         }
         boundedInput = { ...input, messages: input.messages.slice(matches[0]! + 1) };
       }
-      const visible = visibleMessages(boundedInput);
-      if (!visible) {
-        await logEvent(config, "v2_memory_update_skipped", { sessionID, reason: "invalid_visible_ids" });
-        return { status: "skipped", reason: "invalid_visible_ids", ...progress };
-      }
+      const recentMessages = boundedInput.messages.slice(-config.maxDeltaMessages);
       const checkpoint = await readLastProcessedMessageID(sessionID, config);
-      const checkpointIndex = checkpoint ? visible.findIndex((entry) => entry.id === checkpoint) : -1;
-      const delta = checkpoint && checkpointIndex >= 0 ? visible.slice(checkpointIndex + 1) : visible;
+      const checkpointIndex = checkpoint ? recentMessages.findIndex((entry) => entry.id === checkpoint) : -1;
       if (checkpoint && checkpointIndex < 0) {
         await logEvent(config, "v2_memory_update_skipped", {
           sessionID,
@@ -416,6 +422,13 @@ export function createV2MemoryUpdater(
           absentCheckpoint: checkpoint,
         });
       }
+      const deltaMessages = checkpointIndex >= 0 ? recentMessages.slice(checkpointIndex + 1) : recentMessages;
+      const visible = visibleMessages({ ...boundedInput, messages: deltaMessages });
+      if (!visible) {
+        await logEvent(config, "v2_memory_update_skipped", { sessionID, reason: "invalid_visible_ids" });
+        return { status: "skipped", reason: "invalid_visible_ids", ...progress };
+      }
+      const delta = visible;
       if (!delta.some((entry) => entry.role === "assistant")) {
         await logEvent(config, "v2_memory_update_skipped", { sessionID, reason: "no_assistant_in_delta" });
         return { status: "skipped", reason: "no_assistant_in_delta", ...progress };
@@ -431,23 +444,16 @@ export function createV2MemoryUpdater(
       if (configuredModel && (!parsedModel || !parsedModel.providerID.trim() || !parsedModel.modelID.trim())) {
         throw new Error(`invalid_memory_model:${configuredModel}`);
       }
-      if (config.summarizerMode === "active" && parsedModel) {
-        return { status: "skipped", reason: "active_model_override_unsupported", ...progress };
-      }
 
       if (lifetimeSignal?.aborted) throw new V2GenerationCancelledError();
-      const memoryPath = await ensureMemoryFile(sessionID, config);
+      const memoryPath = await withV2MemoryMutation(directoryPath, sessionID, async () => {
+        if (lifetimeSignal?.aborted) throw new V2GenerationCancelledError();
+        return await ensureMemoryFile(sessionID, config!, () => !lifetimeSignal?.aborted);
+      });
       if (lifetimeSignal?.aborted) throw new V2GenerationCancelledError();
       let consumed = 0;
-      let fragmentState: { fragments: readonly VisibleEntry[]; index: number; entryID: string } | undefined;
       while (consumed < retainedDelta.length) {
-        const bounded = fragmentState
-          ? {
-              entries: [fragmentState.fragments[fragmentState.index]!],
-              consumed: 0,
-              checkpointID: fragmentState.index === fragmentState.fragments.length - 1 ? fragmentState.entryID : "",
-            }
-          : boundedChunk(retainedDelta.slice(consumed), config);
+        const bounded = boundedChunk(retainedDelta.slice(consumed), config);
         if (!bounded) {
           return {
             status: "error",
@@ -466,8 +472,13 @@ export function createV2MemoryUpdater(
         const generationMetadata = {
           sessionID,
           mode: activeGeneration ? "active" : "clean",
-          providerID: model.providerID,
-          modelID: model.id,
+          providerID: parsedModel || activeGeneration ? model.providerID : undefined,
+          modelID: parsedModel || activeGeneration ? model.id : undefined,
+          memoryModelSelection: parsedModel
+            ? "explicit-override"
+            : activeGeneration
+              ? "current-session"
+              : "host-default",
           visibleCount: visible.length,
           deltaCount: delta.length,
           chunkCount: bounded.entries.length,
@@ -479,8 +490,8 @@ export function createV2MemoryUpdater(
             (signal) => {
               if (signal.aborted || lifetimeSignal?.aborted) throw new V2GenerationCancelledError();
               return active
-                ? generateV2ActiveMemory(context, { sessionID, prompt }, signal)
-                : context.generate.text({ prompt, model }, { signal });
+                ? generateV2ActiveMemory(context, { sessionID, prompt, ...(parsedModel ? { model } : {}) }, signal)
+                : generateV2CleanMemory(context, { prompt, ...(parsedModel ? { model } : {}) }, signal);
             },
             chunkDeadline,
             hooks?.generationTimeoutMs ?? CLEAN_SUMMARIZER_TIMEOUT.ms,
@@ -489,8 +500,9 @@ export function createV2MemoryUpdater(
           if (attempt.started) reserveGeneration(key, attempt.operation);
           return attempt.result;
         };
-        const maxAttempts = 1 + Math.max(0, Math.trunc(config.sideSessionRetries || 0));
+        const maxAttempts = activeGeneration ? 1 : 1 + Math.max(0, Math.trunc(config.sideSessionRetries || 0));
         let raw = "";
+        let generationFailed = false;
         let generationFailure: unknown;
         for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
           await debugLog(config, "v2_generation_attempt_start", {
@@ -502,6 +514,7 @@ export function createV2MemoryUpdater(
             raw = await generate(activeGeneration);
             if (lifetimeSignal?.aborted) throw new V2GenerationCancelledError();
             validateRawMemory(raw);
+            generationFailed = false;
             generationFailure = undefined;
             await debugLog(config, "v2_generation_attempt_outcome", {
               ...generationMetadata,
@@ -513,6 +526,7 @@ export function createV2MemoryUpdater(
             if (lifetimeSignal?.aborted) throw new V2GenerationCancelledError();
             break;
           } catch (error) {
+            generationFailed = true;
             generationFailure = error;
             await debugLog(config, "v2_generation_attempt_outcome", {
               ...generationMetadata,
@@ -520,17 +534,19 @@ export function createV2MemoryUpdater(
               outcome: "failure",
               failureKind: error instanceof Error ? error.name : "unknown",
             });
-            if (!isRetryableSettledGenerationError(error) || attempt >= maxAttempts || Date.now() >= chunkDeadline)
+            if (
+              activeGeneration ||
+              attempt >= maxAttempts ||
+              !canRetryCleanGenerationFailure(error, lifetimeSignal, chunkDeadline)
+            )
               break;
           }
         }
-        if (generationFailure !== undefined) {
+        if (generationFailed) {
           if (
             config.summarizerMode === "clean" &&
             config.cleanFallbackToActiveSession &&
-            !parsedModel &&
-            isRetryableSettledGenerationError(generationFailure) &&
-            Date.now() < chunkDeadline
+            canRetryCleanGenerationFailure(generationFailure, lifetimeSignal, chunkDeadline)
           ) {
             const fallbackAttempt = maxAttempts + 1;
             await debugLog(config, "v2_generation_attempt_start", {
@@ -566,82 +582,74 @@ export function createV2MemoryUpdater(
             throw generationFailure;
           }
         }
+        validateRequiredMemoryHeadings(raw);
         const nextMemory = normalizeMemory(raw, config);
-        if (lifetimeSignal?.aborted) throw new V2GenerationCancelledError();
-        if (!(await compareAndReplaceTextAtomic(memoryPath, existingMemory, nextMemory))) {
-          await logEvent(config, "v2_memory_update_skipped", { sessionID, reason: "concurrent_memory_change" });
-          return { status: "skipped", reason: "concurrent_memory_change", ...progress };
-        }
-        const rollbackCancelledCommit = async (): Promise<void> => {
-          try {
-            await hooks?.beforeRollback?.();
-            if (!(await compareAndReplaceTextAtomic(memoryPath, nextMemory, existingMemory))) {
-              rollback = "conflict";
-            } else {
-              rollback = "restored";
-            }
-          } catch {
-            rollback = "failed";
+        const commitConfig = config;
+        const committed = await withV2MemoryMutation(directoryPath, sessionID, async () => {
+          if (lifetimeSignal?.aborted) throw new V2GenerationCancelledError();
+          if (!(await compareAndReplaceTextAtomic(memoryPath, existingMemory, nextMemory))) {
+            await logEvent(commitConfig, "v2_memory_update_skipped", { sessionID, reason: "concurrent_memory_change" });
+            return false;
           }
-        };
-        if (lifetimeSignal?.aborted) {
-          await rollbackCancelledCommit();
-          throw new V2GenerationCancelledError();
-        }
-        if (bounded.checkpointID) {
-          await hooks?.beforeCheckpoint?.();
-          if (lifetimeSignal?.aborted) {
-            await rollbackCancelledCommit();
-            throw new V2GenerationCancelledError();
-          }
-          try {
-            await (hooks?.writeCheckpoint ?? writeLastProcessedMessageID)(sessionID, bounded.checkpointID, config);
-          } catch (error) {
+          const rollbackCancelledCommit = async (): Promise<void> => {
             try {
               await hooks?.beforeRollback?.();
               if (!(await compareAndReplaceTextAtomic(memoryPath, nextMemory, existingMemory))) {
                 rollback = "conflict";
-                await safeLog(config, "v2_memory_update_error", {
-                  sessionID,
-                  reason: "checkpoint_write_failed_restore_conflict",
-                  detail: "memory_changed_before_rollback",
-                });
               } else {
                 rollback = "restored";
               }
-            } catch (restoreError) {
+            } catch {
               rollback = "failed";
-              await safeLog(config, "v2_memory_update_error", {
-                sessionID,
-                reason: "checkpoint_write_failed_restore_failed",
-                detail: `${errorMessage(error)}; ${errorMessage(restoreError)}`,
-              });
             }
-            throw error;
+          };
+          if (lifetimeSignal?.aborted) {
+            await rollbackCancelledCommit();
+            throw new V2GenerationCancelledError();
           }
-          progress.checkpointedChunks += 1;
-          progress.checkpointedMessages += bounded.consumed || 1;
-          if (lifetimeSignal?.aborted) throw new V2GenerationCancelledError();
-        }
-        if (fragmentState) {
-          if (fragmentState.index === fragmentState.fragments.length - 1) {
-            consumed += 1;
-            fragmentState = undefined;
-          } else {
-            fragmentState = { ...fragmentState, index: fragmentState.index + 1 };
+          if (bounded.checkpointID) {
+            await hooks?.beforeCheckpoint?.();
+            if (lifetimeSignal?.aborted) {
+              await rollbackCancelledCommit();
+              throw new V2GenerationCancelledError();
+            }
+            try {
+              await (hooks?.writeCheckpoint ?? writeLastProcessedMessageID)(
+                sessionID,
+                bounded.checkpointID,
+                commitConfig,
+              );
+            } catch (error) {
+              try {
+                await hooks?.beforeRollback?.();
+                if (!(await compareAndReplaceTextAtomic(memoryPath, nextMemory, existingMemory))) {
+                  rollback = "conflict";
+                  await safeLog(commitConfig, "v2_memory_update_error", {
+                    sessionID,
+                    reason: "checkpoint_write_failed_restore_conflict",
+                    detail: "memory_changed_before_rollback",
+                  });
+                } else {
+                  rollback = "restored";
+                }
+              } catch (restoreError) {
+                rollback = "failed";
+                await safeLog(commitConfig, "v2_memory_update_error", {
+                  sessionID,
+                  reason: "checkpoint_write_failed_restore_failed",
+                  detail: `${errorMessage(error)}; ${errorMessage(restoreError)}`,
+                });
+              }
+              throw error;
+            }
+            progress.checkpointedChunks += 1;
+            progress.checkpointedMessages += bounded.consumed;
+            if (lifetimeSignal?.aborted) throw new V2GenerationCancelledError();
           }
-        } else if (bounded.fragments) {
-          fragmentState = { fragments: bounded.fragments, index: 1, entryID: retainedDelta[consumed]!.id };
-          if (bounded.fragments.length === 1) {
-            consumed += 1;
-            fragmentState = undefined;
-          }
-        } else {
-          consumed += bounded.consumed;
-        }
-        if (!bounded.checkpointID) {
-          progress.persistedPartialFragments += 1;
-        }
+          return true;
+        });
+        if (!committed) return { status: "skipped", reason: "concurrent_memory_change", ...progress };
+        consumed += bounded.consumed;
         try {
           await logEvent(config, "v2_memory_update_committed", {
             sessionID,

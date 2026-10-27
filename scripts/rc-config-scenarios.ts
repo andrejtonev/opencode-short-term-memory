@@ -41,6 +41,7 @@ export interface SettingsMetadata {
     | "explicit-override"
     | "invalid-override"
     | "inherited-current-session"
+    | "current-session"
     | "active-override-unsupported";
   readonly effectiveDeliveryMode: "legacySystemTransform" | "promptNoReply";
   readonly effectiveMemoryModel: string | null;
@@ -118,21 +119,16 @@ const modelMetadata = (generation: ConfigGeneration, value: SessionMemoryConfig)
   const [provider, ...rest] = model.split("/");
   const valid = Boolean(provider && rest.join("/"));
   const memoryModelSelection = !model
-    ? generation === "v1"
+    ? generation === "v1" || value.summarizerMode === "clean"
       ? "host-default"
-      : "inherited-current-session"
+      : "current-session"
     : !valid
       ? "invalid-override"
-      : value.summarizerMode === "active" && generation === "v2"
-        ? "active-override-unsupported"
-        : "explicit-override";
+      : "explicit-override";
   return {
     memoryModelSelection,
     effectiveDeliveryMode: value.enableLegacyPeriodicSystemTransform ? "legacySystemTransform" : "promptNoReply",
-    effectiveMemoryModel:
-      memoryModelSelection === "explicit-override" && (generation === "v1" || value.summarizerMode === "clean")
-        ? model
-        : null,
+    effectiveMemoryModel: memoryModelSelection === "explicit-override" ? model : null,
   };
 };
 

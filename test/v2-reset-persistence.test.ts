@@ -20,6 +20,7 @@ import { resetV2MemoryPersistence } from "../src/v2-reset-persistence";
 import type { V2Context, V2SessionContext } from "../src/v2-adapter";
 import { withV2MemoryMutation } from "../src/v2-mutation-coordination";
 import { deferred, type Deferred } from "./async-helpers";
+import { installV2NativeGenerationHarness } from "./v2-native-generation-harness";
 
 const VALID_MEMORY = `${MEMORY_FORMAT_VERSION}
 ${MEMORY_HEADER}
@@ -68,7 +69,7 @@ function updaterContext(
   started?: Deferred<void>,
   calls?: { count: number },
 ): V2Context {
-  return {
+  const context = {
     location: { directory, project: { id: "project", directory, canonical: directory } },
     options: {},
     session: {
@@ -85,9 +86,58 @@ function updaterContext(
     },
     tool: { transform: async () => ({ dispose: async () => undefined }) },
   } as unknown as V2Context;
+  installV2NativeGenerationHarness(context, {
+    clean: async () => {
+      if (calls) calls.count += 1;
+      started?.resolve();
+      return result;
+    },
+    active: async () => result,
+  });
+  return context;
 }
 
 describe("V2 reset persistence", () => {
+  test("verified empty reset persists a null boundary and accepts later conversation", async () => {
+    await writeText(join(directory, ".opencode", "stm.json"), JSON.stringify({ memoryDir }));
+    expect(await resetV2MemoryPersistence("empty-verified", directory, null, { memoryDir })).toBeNull();
+    expect(JSON.parse(await readFile(resetBoundaryPathFor("empty-verified", memoryDir), "utf8"))).toEqual({
+      version: 1,
+      anchorID: null,
+    });
+    const calls = { count: 0 };
+    const updater = createV2MemoryUpdater(
+      updaterContext(directory, Promise.resolve({ text: VALID_MEMORY }), undefined, calls),
+      directory,
+    );
+    expect((await updater(input("empty-verified"))).status).toBe("committed");
+    expect(calls.count).toBe(1);
+    expect(await readText(checkpointPathFor("empty-verified", memoryDir))).toBe("a1\n");
+  });
+
+  test("reset fences a completed summary even when reset restores identical memory bytes", async () => {
+    await writeText(join(directory, ".opencode", "stm.json"), JSON.stringify({ memoryDir }));
+    await writeText(memoryPathFor("identical-reset", memoryDir), STANDARD_MEMORY_TEMPLATE);
+    const outcome = deferred<void>();
+    const resume = deferred<void>();
+    const updater = createV2MemoryUpdater(
+      updaterContext(directory, Promise.resolve({ text: VALID_MEMORY })),
+      directory,
+      {
+        afterGenerationOutcome: async () => {
+          outcome.resolve();
+          await resume.promise;
+        },
+      },
+    );
+    const update = updater(input("identical-reset"));
+    await outcome.promise;
+    await resetV2MemoryPersistence("identical-reset", directory, "a1", { memoryDir });
+    resume.resolve();
+    expect(await update).toMatchObject({ status: "error", detail: "summarizer_cancelled" });
+    expect(await readText(memoryPathFor("identical-reset", memoryDir))).toBe(STANDARD_MEMORY_TEMPLATE);
+    expect(await readText(checkpointPathFor("identical-reset", memoryDir))).toBe("");
+  });
   let directory = "";
   let memoryDir = "";
 
@@ -152,7 +202,7 @@ describe("V2 reset persistence", () => {
     expect(await readFile(memoryPathFor("queued-config", secondMemoryDir), "utf8")).toBe(STANDARD_MEMORY_TEMPLATE);
   });
 
-  test("resolves the latest anchor after an active updater releases and denies updates during resolution", async () => {
+  test("revokes an active update before resolving reset and retains the pending provider reservation", async () => {
     const sessionID = "resolved-anchor";
     await writeText(join(directory, ".opencode", "stm.json"), JSON.stringify({ memoryDir }));
     await writeText(memoryPathFor(sessionID, memoryDir), ORIGINAL_MEMORY);
@@ -180,21 +230,24 @@ describe("V2 reset persistence", () => {
       { memoryDir },
     );
     try {
-      await Promise.resolve();
-      expect(resolverCalls).toBe(0);
-      generation.resolve({ text: VALID_MEMORY });
-      expect((await update).status).toBe("committed");
       await resolverEntered.promise;
+      expect(await update).toMatchObject({ status: "error", detail: "summarizer_cancelled" });
       expect(resolverCalls).toBe(1);
-      expect(resolvedAnchor).toBe("a1");
-      expect(await readFile(memoryPathFor(sessionID, memoryDir), "utf8")).toBe(VALID_MEMORY);
+      expect(resolvedAnchor).toBe("before");
+      expect(await readFile(memoryPathFor(sessionID, memoryDir), "utf8")).toBe(ORIGINAL_MEMORY);
       expect(await updater(input(sessionID))).toMatchObject({ status: "busy", reason: "update_in_flight" });
       expect(calls.count).toBe(1);
       releaseResolver.resolve();
-      expect(await reset).toBe("a1");
+      expect(await reset).toBe("before");
       expect(await readFile(resetBoundaryPathFor(sessionID, memoryDir), "utf8")).toBe(
-        JSON.stringify({ version: 1, anchorID: "a1" }) + "\n",
+        JSON.stringify({ version: 1, anchorID: "before" }) + "\n",
       );
+      expect(await readFile(memoryPathFor(sessionID, memoryDir), "utf8")).toBe(STANDARD_MEMORY_TEMPLATE);
+      expect(await readFile(checkpointPathFor(sessionID, memoryDir))).toEqual(Buffer.alloc(0));
+      expect(await updater(input(sessionID))).toMatchObject({ status: "busy", reason: "update_in_flight" });
+      generation.resolve({ text: VALID_MEMORY });
+      await generation.promise;
+      await Promise.resolve();
       expect(await readFile(memoryPathFor(sessionID, memoryDir), "utf8")).toBe(STANDARD_MEMORY_TEMPLATE);
       expect(await readFile(checkpointPathFor(sessionID, memoryDir))).toEqual(Buffer.alloc(0));
     } finally {
@@ -226,7 +279,7 @@ describe("V2 reset persistence", () => {
       const resolver = async () => {
         resolverCalls += 1;
         if (scenario === "failure") throw new Error("anchor resolution failed");
-        if (scenario === "invalid-type") return null as unknown as string;
+        if (scenario === "invalid-type") return 42 as unknown as string;
         return scenario === "whitespace" ? " \n\t" : "";
       };
       await expect(
@@ -463,7 +516,7 @@ describe("V2 reset persistence", () => {
     expect(await withV2MemoryMutation(directory, "forward", () => "released")).toBe("released");
   });
 
-  test("waits for an updater pair, then rollback restores the updater-committed pair", async () => {
+  test("failed reset restores the original pair while the revoked provider settles late", async () => {
     await writeText(join(directory, ".opencode", "stm.json"), JSON.stringify({ memoryDir }));
     await writeText(memoryPathFor("updater", memoryDir), ORIGINAL_MEMORY);
     await writeText(checkpointPathFor("updater", memoryDir), "before\n");
@@ -487,8 +540,8 @@ describe("V2 reset persistence", () => {
     generation.resolve({ text: VALID_MEMORY });
     await update;
     await expect(reset).rejects.toThrow("reset after updater");
-    expect(await readFile(memoryPathFor("updater", memoryDir), "utf8")).toBe(VALID_MEMORY);
-    expect(await readFile(checkpointPathFor("updater", memoryDir), "utf8")).toBe("a1\n");
+    expect(await readFile(memoryPathFor("updater", memoryDir), "utf8")).toBe(ORIGINAL_MEMORY);
+    expect(await readFile(checkpointPathFor("updater", memoryDir), "utf8")).toBe("before\n");
   });
 
   test("a real updater skips while reset owns the shared mutation", async () => {

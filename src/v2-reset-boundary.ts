@@ -1,4 +1,4 @@
-export type V2ResetBoundary = { readonly version: 1; readonly anchorID: string };
+export type V2ResetBoundary = { readonly version: 1; readonly anchorID: string | null };
 
 export function parseV2ResetBoundary(raw: Buffer): V2ResetBoundary {
   let parsed: unknown;
@@ -13,8 +13,9 @@ export function parseV2ResetBoundary(raw: Buffer): V2ResetBoundary {
     Array.isArray(parsed) ||
     Object.keys(parsed).length !== 2 ||
     (parsed as Record<string, unknown>).version !== 1 ||
-    typeof (parsed as Record<string, unknown>).anchorID !== "string" ||
-    !(parsed as Record<string, string>).anchorID.trim()
+    ((parsed as Record<string, unknown>).anchorID !== null &&
+      (typeof (parsed as Record<string, unknown>).anchorID !== "string" ||
+        !(parsed as Record<string, string>).anchorID.trim()))
   ) {
     throw new Error("malformed_reset_boundary");
   }

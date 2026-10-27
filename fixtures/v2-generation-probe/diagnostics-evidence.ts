@@ -37,7 +37,6 @@ export function expectedDiagnosticsSettings(memoryDir: string) {
       memoryModel: "stm-probe/deterministic",
       memoryModelSelection: "explicit-override",
       summarizerMode: "clean",
-      activeWithExplicitMemoryModel: "unsupported",
       maxMemoryLength: 10000,
       maxUpdateInputLength: 20000,
       maxDeltaMessages: 200,
@@ -52,9 +51,9 @@ export function expectedDiagnosticsSettings(memoryDir: string) {
       collapseAssistantBursts: false,
       debug: false,
       logMaxLines: 300,
-      updateHook: "context",
-      updateHooks: ["context", "idle", "compaction"],
-      injectionHooks: ["context", "compaction"],
+      updateHook: "idle",
+      updateHooks: ["idle", "compaction", "manual"],
+      injectionHooks: ["context", "prompt", "compaction"],
     },
     inactiveSettings: [],
   };
@@ -201,8 +200,10 @@ export function evaluateDiagnosticsEvidence(input: {
       } catch {
         /* Fail below. */
       }
+      const parsedSettings = object(settings);
+      const { configuration: _configuration, ...policySettings } = parsedSettings ?? {};
       require(equal(
-        settings,
+        policySettings,
         input.expectedSettings,
       ), "settings: response differs from independent configured/effective oracle");
     }

@@ -239,11 +239,45 @@ export async function readV2CurrentHistory(
     const current = recordOf(session);
     if (current === undefined) return invalid(sessionID, "invalid_session_record");
     if (current.id !== sessionID) return invalid(sessionID, "session_id_mismatch");
-    const model = selectedModel ?? current.model;
+    // A native session using the host default may leave session.model unset.
+    // Its durable assistant/model-switch records retain the actual model used.
+    const latestModel = Array.isArray(records)
+      ? [...records].reverse().find((row) => {
+          const value = recordOf(row);
+          return (value?.type === "assistant" || value?.type === "model-switched") && isCurrentModel(value.model);
+        })
+      : undefined;
+    const model = selectedModel ?? current.model ?? recordOf(latestModel)?.model;
     if (!isCurrentModel(model)) return { status: "no-model", sessionID };
     // These independent reads are durable history, not an atomic model-facing snapshot.
     return project(sessionID, model, records);
   } catch (error) {
     return { status: "error", sessionID, reason: error instanceof Error ? error.message : String(error) };
   }
+}
+
+/** Reset needs durable identities, not a model or a completed assistant reply. */
+export async function readV2ResetAnchor(
+  context: V2CurrentHistoryContext,
+  sessionID: string,
+  timeoutMs = 5_000,
+): Promise<string | null> {
+  if (!sessionID.trim() || safeSessionID(sessionID) !== sessionID) throw new Error("invalid_session_id");
+  const signal = AbortSignal.timeout(timeoutMs);
+  const [records, session] = await Promise.all([
+    bounded(() => context.session.context({ sessionID }, { signal }), signal),
+    bounded(() => context.session.get({ sessionID }, { signal }), signal),
+  ]);
+  if (recordOf(session)?.id !== sessionID) throw new Error("session_id_mismatch");
+  if (!Array.isArray(records)) throw new Error("invalid_history_records");
+  const ids = new Set<string>();
+  let anchor: string | null = null;
+  for (const row of records) {
+    const record = recordOf(row);
+    if (typeof record?.id !== "string" || !record.id.startsWith("msg_") || ids.has(record.id))
+      throw new Error("reset_history_ambiguous_ids");
+    ids.add(record.id);
+    anchor = record.id;
+  }
+  return anchor;
 }

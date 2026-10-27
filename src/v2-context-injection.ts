@@ -2,9 +2,18 @@ import type { SessionMemoryConfig } from "./memory-utils";
 import type { V2Context, V2SessionContext } from "./v2-adapter";
 import { buildTaggedMemoryForInjection } from "./injection";
 import { DEFAULT_CONFIG, INJECTION_PREFIX, logEvent, memoryPathFor, readConfig, readText } from "./memory-utils";
-import { classifyV2Session, readTaskChildMemory } from "./v2-child-memory";
+import {
+  claimV2ChildSystemDelivery,
+  classifyV2Session,
+  completeV2ChildSystemDelivery,
+  getV2ChildSystemDelivery,
+  readTaskChildMemory,
+  releaseV2ChildSystemDelivery,
+} from "./v2-child-memory";
 import { getV2MemoryReadRevision, isV2MemorySessionDeleted } from "./v2-mutation-coordination";
 import type { ReturnTypeOfReminderCadence } from "./v2-reminder-cadence";
+
+export type V2ContextInjectionTarget = "context" | "compaction";
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error ?? "");
@@ -22,20 +31,30 @@ export function createV2ContextInjection(
   directory?: string,
   cadence?: ReturnTypeOfReminderCadence,
   lifetimeSignal?: AbortSignal,
+  isOwnedSession?: (sessionID: string) => boolean,
+  target: V2ContextInjectionTarget = "context",
 ): (input: V2SessionContext) => Promise<void> {
   const resolvedDirectory = directory ?? context.location.directory;
   return async (input) => {
     const revision = getV2MemoryReadRevision(resolvedDirectory, input.sessionID);
+    const owned = () => {
+      try {
+        return isOwnedSession?.(input.sessionID) === true;
+      } catch {
+        return true;
+      }
+    };
     const current = () =>
       !lifetimeSignal?.aborted &&
+      !owned() &&
       !isV2MemorySessionDeleted(resolvedDirectory, input.sessionID) &&
       getV2MemoryReadRevision(resolvedDirectory, input.sessionID) === revision;
     if (!current()) return;
     let config: SessionMemoryConfig | undefined;
     try {
       config = await readConfig(undefined, resolvedDirectory);
-      if (!current() || !config.enabled || !config.enableLegacyPeriodicSystemTransform) return;
-      const lineage = cadence ? await classifyV2Session(context, input.sessionID) : undefined;
+      if (!current() || !config.enabled) return;
+      const lineage = await classifyV2Session(context, input.sessionID);
       if (!current()) return;
       if (lineage?.kind === "metadata-error") {
         await debugLog(config, "v2_context_injection_skip", {
@@ -45,9 +64,23 @@ export function createV2ContextInjection(
         });
         return;
       }
+      const isPrimary = lineage.kind === "primary";
+      const isSystemPrimary =
+        target === "compaction" || (config.enableLegacyPeriodicSystemTransform && config.summarizerMode !== "active");
+      if (isPrimary && !isSystemPrimary) return;
+      const isChildContext = target === "context" && lineage.kind === "task-child";
       if (
+        isChildContext &&
+        (!config.injectInSubagents || !getV2ChildSystemDelivery(resolvedDirectory, input.sessionID))
+      )
+        return;
+      if (target === "context" && isPrimary && cadence) {
+        cadence.selectTransport(input.sessionID, "system", input.messages);
+      }
+      if (
+        target === "context" &&
         cadence &&
-        lineage?.kind === "primary" &&
+        isPrimary &&
         !(await cadence.shouldInject(input, config.remindEveryN, config.memoryDir))
       ) {
         await debugLog(config, "v2_context_injection_skip", {
@@ -69,6 +102,7 @@ export function createV2ContextInjection(
         });
         return;
       }
+      if (isChildContext && child.status !== "injected") return;
       const memory = child.memory ?? (await readText(memoryPathFor(input.sessionID, config.memoryDir), ""));
       const taggedMemory = buildTaggedMemoryForInjection(memory, config.maxMemoryLength);
       if (!taggedMemory.trim()) {
@@ -89,12 +123,26 @@ export function createV2ContextInjection(
       }
 
       if (!current()) return;
-      input.system.push({ type: "text", text: taggedMemory });
+      const delivery = isChildContext ? claimV2ChildSystemDelivery(resolvedDirectory, input.sessionID) : undefined;
+      if (isChildContext && !delivery) return;
+      try {
+        if (!current()) {
+          if (delivery) releaseV2ChildSystemDelivery(resolvedDirectory, input.sessionID, delivery);
+          return;
+        }
+        input.system.push({ type: "text", text: taggedMemory });
+        if (delivery) completeV2ChildSystemDelivery(resolvedDirectory, input.sessionID, delivery);
+      } catch (error) {
+        if (delivery) releaseV2ChildSystemDelivery(resolvedDirectory, input.sessionID, delivery);
+        throw error;
+      }
       await debugLog(config, "v2_context_injection_success", {
         sessionID: input.sessionID,
         transport: "system",
         memoryChars: memory.length,
         injectedChars: taggedMemory.length,
+        ...(delivery ? { childDelivery: delivery } : {}),
+        ...(target === "compaction" && lineage.kind === "task-child" ? { childDelivery: "compaction" } : {}),
       });
     } catch (error) {
       try {

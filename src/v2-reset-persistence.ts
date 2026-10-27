@@ -10,7 +10,11 @@ import {
   removeRawFileIfCurrent,
   safeSessionID,
 } from "./memory-utils";
-import { invalidateV2MemoryReads, withV2MemoryMutation } from "./v2-mutation-coordination";
+import {
+  invalidateV2MemoryGeneration,
+  invalidateV2MemoryReads,
+  withV2MemoryMutation,
+} from "./v2-mutation-coordination";
 
 export type V2MemoryResetTestHooks = {
   readonly beforePrepare?: () => void | Promise<void>;
@@ -29,18 +33,19 @@ function causeMessage(error: unknown): string {
 export async function resetV2MemoryPersistence(
   sessionID: string,
   directory: string,
-  anchor: string | (() => Promise<string>),
+  anchor: string | null | (() => Promise<string | null>),
   config?: ResetConfig,
   hooks: V2MemoryResetTestHooks = {},
   lifetimeSignal?: AbortSignal,
-): Promise<string> {
+): Promise<string | null> {
   if (typeof sessionID !== "string" || !sessionID.trim()) throw new Error("reset sessionID must be a nonempty string");
   if (safeSessionID(sessionID) !== sessionID) throw new Error("reset sessionID contains unsafe path characters");
-  if (typeof anchor !== "function" && (typeof anchor !== "string" || !anchor.trim())) {
+  if (anchor !== null && typeof anchor !== "function" && (typeof anchor !== "string" || !anchor.trim())) {
     throw new Error("reset anchor ID must be nonempty");
   }
   const assertCurrent = () => lifetimeSignal?.throwIfAborted();
   assertCurrent();
+  invalidateV2MemoryGeneration(directory, sessionID);
   const resetting = withV2MemoryMutation(directory, sessionID, async () => {
     assertCurrent();
     // Readers admitted before this reset must not publish their old snapshot.
@@ -48,7 +53,8 @@ export async function resetV2MemoryPersistence(
     invalidateV2MemoryReads(directory, sessionID);
     const anchorID = typeof anchor === "function" ? await anchor() : anchor;
     assertCurrent();
-    if (typeof anchorID !== "string" || !anchorID.trim()) throw new Error("reset anchor ID must be nonempty");
+    if (anchorID !== null && (typeof anchorID !== "string" || !anchorID.trim()))
+      throw new Error("reset anchor ID must be nonempty");
     const resolvedConfig = config ?? (await readConfig(undefined, directory));
     assertCurrent();
     const memoryPath = memoryPathFor(sessionID, resolvedConfig.memoryDir);
@@ -91,9 +97,9 @@ export async function resetV2MemoryPersistence(
     }
 
     const operations = [
+      { kind: "boundary" as const, prepared: boundaryPrepared!, previous: previousBoundary },
       { kind: "memory" as const, prepared: memoryPrepared, previous: previousMemory },
       { kind: "checkpoint" as const, prepared: checkpointPrepared!, previous: previousCheckpoint },
-      { kind: "boundary" as const, prepared: boundaryPrepared!, previous: previousBoundary },
     ];
     const committed: typeof operations = [];
     try {

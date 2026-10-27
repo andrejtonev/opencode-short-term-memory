@@ -14,6 +14,7 @@ import {
 import type { V2Context, V2SessionContext } from "../src/v2-adapter";
 import { createV2MemoryUpdater } from "../src/v2-memory-update";
 import { resetV2MemoryPersistence } from "../src/v2-reset-persistence";
+import { installV2NativeGenerationHarness } from "./v2-native-generation-harness";
 
 const VALID_MEMORY = `${MEMORY_HEADER}
 
@@ -58,7 +59,12 @@ function context(directory: string, calls: { prompts: string[] }) {
     },
     tool: { transform: async () => ({ dispose: async () => undefined }) },
   };
-  return value as unknown as V2Context;
+  const context = value as unknown as V2Context;
+  installV2NativeGenerationHarness(context, {
+    clean: (input) => value.generate.text(input),
+    active: () => value.session.generate(),
+  });
+  return context;
 }
 
 function input(sessionID: string, messages: unknown[]): V2SessionContext {

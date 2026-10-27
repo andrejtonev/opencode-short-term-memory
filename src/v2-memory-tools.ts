@@ -1,9 +1,9 @@
 import { resolve } from "node:path";
 import type { Info as ToolDefinition, ToolContext } from "@opencode/plugin/promise/tool";
+import { readConfigDiagnostics } from "./memory-utils";
 import {
   checkpointPathFor,
   createProjectExampleConfig,
-  ensureMemoryFile,
   memoryPathFor,
   parseModel,
   readConfig,
@@ -17,10 +17,11 @@ import {
 import { readLastProcessedMessageID } from "./message-collector";
 import { createV2MemoryUpdater, isV2MemoryUpdateInFlight } from "./v2-memory-update";
 import type { V2Context } from "./v2-adapter";
-import { readV2CurrentHistory } from "./v2-current-history";
-import { withV2MemoryMutation } from "./v2-mutation-coordination";
+import { readV2CurrentHistory, readV2ResetAnchor } from "./v2-current-history";
+import { getV2MemoryReadRevision, getV2MemorySessionSignal } from "./v2-mutation-coordination";
 import { parseV2ResetBoundary } from "./v2-reset-boundary";
 import { resetV2MemoryPersistence } from "./v2-reset-persistence";
+import { getV2ConfigInstallation } from "./v2-config-installation";
 
 const EMPTY_INPUT = {
   type: "object",
@@ -50,7 +51,6 @@ const COMPATIBILITY_INPUT = {
     },
     confirm: { type: "boolean" },
   },
-  required: ["action"],
   additionalProperties: false,
 } satisfies ToolDefinition["input"];
 
@@ -61,14 +61,14 @@ function textResult(text: string) {
 function memoryModelSelection(config: SessionMemoryConfig) {
   const configuredModel = config.memoryModel.trim();
   if (!configuredModel) {
-    return { memoryModel: null, memoryModelSelection: "inherited-current-session" };
+    return {
+      memoryModel: null,
+      memoryModelSelection: config.summarizerMode === "clean" ? "host-default" : "current-session",
+    };
   }
   const parsedModel = parseModel(configuredModel);
   if (!parsedModel || !parsedModel.providerID.trim() || !parsedModel.modelID.trim()) {
     return { memoryModel: null, memoryModelSelection: "invalid-override" };
-  }
-  if (config.summarizerMode === "active") {
-    return { memoryModel: null, memoryModelSelection: "active-override-unsupported" };
   }
   return { memoryModel: configuredModel, memoryModelSelection: "explicit-override" };
 }
@@ -77,13 +77,18 @@ async function readMemory(sessionID: string, directory: string, lifetimeSignal?:
   if (typeof sessionID !== "string" || !sessionID.trim() || safeSessionID(sessionID) !== sessionID) {
     throw new Error("STM read sessionID must be nonempty and path-safe.");
   }
-  return await withV2MemoryMutation(directory, sessionID, async () => {
+  const revision = getV2MemoryReadRevision(directory, sessionID);
+  const assertCurrent = () => {
     lifetimeSignal?.throwIfAborted();
-    const config = await readConfig(undefined, directory);
-    lifetimeSignal?.throwIfAborted();
-    const memoryPath = await ensureMemoryFile(sessionID, config, () => !lifetimeSignal?.aborted);
-    return await readText(memoryPath, "");
-  });
+    getV2MemorySessionSignal(directory, sessionID).throwIfAborted();
+    if (getV2MemoryReadRevision(directory, sessionID) !== revision) throw new Error("memory_read_invalidated");
+  };
+  assertCurrent();
+  const config = await readConfig(undefined, directory);
+  assertCurrent();
+  const memory = await readText(memoryPathFor(sessionID, config.memoryDir), "No memory file exists yet.");
+  assertCurrent();
+  return memory;
 }
 
 export async function readV2MemoryStatus(sessionID: string, directory: string): Promise<string> {
@@ -97,7 +102,7 @@ export async function readV2MemoryStatus(sessionID: string, directory: string): 
   const text = await readText(memoryPath, "");
   const checkpoint = await readLastProcessedMessageID(sessionID, config);
   let boundaryState = "absent";
-  let boundaryAnchor: string | undefined;
+  let boundaryAnchor: string | null | undefined;
   try {
     const rawBoundary = await readRawFile(boundaryPath);
     if (rawBoundary !== null) {
@@ -117,7 +122,7 @@ export async function readV2MemoryStatus(sessionID: string, directory: string): 
     `enabled: ${config.enabled}`,
     `authoritative sessionID: ${sessionID}`,
     `configuredMemoryModel: ${config.memoryModel || "none"}`,
-    `effectiveMemoryModel: ${selection.memoryModel ?? (selection.memoryModelSelection === "inherited-current-session" ? "unresolved" : "unavailable")}`,
+    `effectiveMemoryModel: ${selection.memoryModel ?? (selection.memoryModelSelection === "host-default" ? "host default" : selection.memoryModelSelection === "current-session" ? "current session" : "unavailable")}`,
     `memoryModelSelection: ${selection.memoryModelSelection}`,
     `summarizerMode: ${config.summarizerMode}`,
     `memoryDir: ${config.memoryDir}`,
@@ -159,38 +164,21 @@ async function resetMemory(
   }
   authoritativeIdentity(sessionID, messageID);
   lifetimeSignal?.throwIfAborted();
-  if (isV2MemoryUpdateInFlight(directory, sessionID)) {
-    return "Refused to reset V2 short-term memory: an update is active for this session; retry after it finishes.";
-  }
   // Only snapshot eligibility failures are refusals; persistence failures still propagate.
   let refusal: string | undefined;
-  let anchor: string;
+  let anchor: string | null;
   try {
     anchor = await resetV2MemoryPersistence(
       sessionID,
       directory,
-      messageID ??
-        (async () => {
-          const current = await readV2CurrentHistory(pluginContext, sessionID);
-          if (current.status !== "ready") {
-            refusal = `Refused to reset V2 short-term memory: ${current.status}: ${JSON.stringify(current.status === "no-model" ? "current session model unavailable" : current.reason)}.`;
-          } else if (current.history.stoppedBeforeMessageID !== undefined) {
-            refusal = `Refused to reset V2 short-term memory: unfinished history stoppedBeforeMessageID: ${JSON.stringify(current.history.stoppedBeforeMessageID)}.`;
-          } else {
-            const messages = current.history.messages;
-            const lastID = messages.at(-1)?.id;
-            if (
-              typeof lastID === "string" &&
-              lastID.trim() &&
-              messages.filter(({ id }) => id === lastID).length === 1
-            ) {
-              return lastID;
-            }
-            refusal =
-              "Refused to reset V2 short-term memory: settled durable history has no nonempty unique last record anchor.";
-          }
-          throw new Error(refusal);
-        }),
+      async () => {
+        try {
+          return await readV2ResetAnchor(pluginContext, sessionID);
+        } catch (error) {
+          refusal = `Refused to reset V2 short-term memory: ${error instanceof Error ? error.message : String(error)}.`;
+          throw error;
+        }
+      },
       undefined,
       undefined,
       lifetimeSignal,
@@ -258,10 +246,17 @@ async function updateMemory(
   }
   // Do not queue a mutation lock around the updater: it acquires ownership itself.
   const result = await updater(current.history);
+  if (result.status === "committed") {
+    const config = await readConfig(undefined, directory);
+    return await readText(
+      memoryPathFor(sessionID, config.memoryDir),
+      "Memory update completed, but no memory file was found.",
+    );
+  }
   return [
     ...labels,
     `update: ${result.status}`,
-    `reason: ${result.status === "committed" ? "delta_exhausted" : result.reason}`,
+    `reason: ${result.reason}`,
     `source: ${current.history.source}`,
     ...(current.history.stoppedBeforeMessageID
       ? [`stoppedBeforeMessageID: ${current.history.stoppedBeforeMessageID}`]
@@ -291,15 +286,20 @@ export function createV2MemoryActions(pluginContext: V2Context, lifetimeSignal?:
     },
     settings: async (_sessionID: string) => {
       const config = await readConfig(undefined, directory);
+      const configuration = await readConfigDiagnostics(directory);
+      const installation = getV2ConfigInstallation(pluginContext);
       return JSON.stringify(
         {
           generation: "v2",
+          configuration: {
+            ...configuration,
+            ...(installation ? { installation } : {}),
+          },
           resolvedConfig: config,
           effective: {
             enabled: config.enabled,
             ...memoryModelSelection(config),
             summarizerMode: config.summarizerMode,
-            activeWithExplicitMemoryModel: "unsupported",
             maxMemoryLength: config.maxMemoryLength,
             maxUpdateInputLength: config.maxUpdateInputLength,
             maxDeltaMessages: config.maxDeltaMessages,
@@ -314,9 +314,9 @@ export function createV2MemoryActions(pluginContext: V2Context, lifetimeSignal?:
             collapseAssistantBursts: config.collapseAssistantBursts,
             debug: config.debug,
             logMaxLines: config.logMaxLines,
-            updateHook: "context",
-            updateHooks: ["context", "idle", "compaction"],
-            injectionHooks: ["context", "compaction"],
+            updateHook: "idle",
+            updateHooks: ["idle", "compaction", "manual"],
+            injectionHooks: ["context", "prompt", "compaction"],
           },
           inactiveSettings: [],
         },
@@ -333,7 +333,7 @@ export function createV2MemoryActions(pluginContext: V2Context, lifetimeSignal?:
       return [
         result.message,
         `configPath: ${result.configPath}`,
-        "Shared example: see stm_memory_settings for effective V2 settings; explicit memoryModel overrides apply to clean mode.",
+        "Shared example: see stm_memory_settings for effective V2 settings; explicit memoryModel overrides apply in either summarizer mode.",
       ].join("\n");
     },
   };
@@ -371,29 +371,19 @@ export function createV2MemoryTools(
   } satisfies ToolDefinition;
   const resetTool = {
     name: "stm_memory_reset",
-    description:
-      "Reset persisted V2 short-term memory after literal confirmation. If an update is active, retry after it finishes.",
+    description: "Reset persisted V2 short-term memory after literal confirmation.",
     input: RESET_INPUT,
     options: { codemode: false },
     execute: async (input: unknown, context: ToolContext) => {
       const confirm =
         input !== null && typeof input === "object" ? (input as { confirm?: unknown }).confirm : undefined;
-      if (confirm === true && (typeof context.messageID !== "string" || !context.messageID.trim())) {
-        authoritativeIdentity(context.sessionID);
-        throw new Error("reset messageID must be a nonempty string");
-      }
-      return textResult(
-        await actions.reset(confirm === true ? context.sessionID : "", {
-          confirm,
-          messageID: confirm === true ? context.messageID : undefined,
-        }),
-      );
+      return textResult(await actions.reset(confirm === true ? context.sessionID : "", { confirm }));
     },
   } satisfies ToolDefinition;
   const updateTool = {
     name: "stm_memory_update",
     description:
-      "Update current-session short-term memory from fresh settled durable visible text. Clean mode uses the current model unless a configured memoryModel override applies; active mode uses the current session model and does not support an explicit override. Preserves assistant and reset-boundary gates; reports skips, failures, and cumulative progress. Retry if busy.",
+      "Update short-term memory from fresh settled durable visible text. With no memoryModel override, clean mode uses the host default model and active mode uses the current session model; an explicit memoryModel override applies in either mode. Returns the resulting memory when committed and reports skips, failures, and cumulative progress otherwise. Retry if busy.",
     input: EMPTY_INPUT,
     options: { codemode: false },
     execute: async (_input: Record<string, never>, context: ToolContext) =>
@@ -418,7 +408,7 @@ export function createV2MemoryTools(
   const setupTool = {
     name: "stm_memory_setup",
     description:
-      "Create a project-local .opencode/stm.jsonc shared example without overwriting existing STM config. Requires confirm set to true. See stm_memory_settings for effective V2 settings; explicit memoryModel overrides apply to clean mode.",
+      "Create a project-local .opencode/stm.jsonc shared example without overwriting existing STM config. Requires confirm set to true. See stm_memory_settings for effective V2 settings; explicit memoryModel overrides apply in either summarizer mode.",
     input: SETUP_INPUT,
     options: { codemode: false },
     execute: async (input: unknown) => {
@@ -438,7 +428,7 @@ export function createV2MemoryTools(
         input !== null && typeof input === "object"
           ? (input as { readonly action?: unknown; readonly confirm?: unknown })
           : {};
-      const action = typeof value.action === "string" ? value.action : "";
+      const action = String(value.action || "status").toLowerCase();
       if (!["show", "status", "update", "reset", "logs", "settings", "setup"].includes(action)) {
         return textResult(
           `Refused to run short_term_memory: unknown action ${JSON.stringify(action)}. Use show, status, update, reset, logs, settings, or setup.`,
@@ -450,11 +440,7 @@ export function createV2MemoryTools(
             "Refused to reset V2 short-term memory: set confirm to literal true to confirm this destructive action.",
           );
         }
-        if (typeof context.messageID !== "string" || !context.messageID.trim()) {
-          authoritativeIdentity(context.sessionID);
-          throw new Error("reset messageID must be a nonempty string");
-        }
-        return textResult(await actions.reset(context.sessionID, { confirm: true, messageID: context.messageID }));
+        return textResult(await actions.reset(context.sessionID, { confirm: true }));
       }
       if (action === "show") return textResult(await actions.show(context.sessionID));
       if (action === "status") return textResult(await actions.status(context.sessionID));

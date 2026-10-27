@@ -3,7 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { V2Context, V2SessionContext } from "../src/v2-adapter";
-import { childStatePath, readTaskChildMemory } from "../src/v2-child-memory";
+import { captureV2ChildMemoryAtCreation, childStatePath, readTaskChildMemory } from "../src/v2-child-memory";
 import { createV2ContextInjection } from "../src/v2-context-injection";
 import { createV2ReminderCadence } from "../src/v2-reminder-cadence";
 import * as Coordination from "../src/v2-mutation-coordination";
@@ -41,7 +41,7 @@ describe("V2 injection cancellation and metadata policy", () => {
       session: { get: async () => ({ id: "child", parentID: "parent" }) },
     }) as unknown as V2Context;
 
-  test("disposed injection waiting behind a parent cannot freeze obsolete memory for the next instance", async () => {
+  test("cancelled creation capture leaves no snapshot and a later context cannot recapture", async () => {
     await writeText(memoryPathFor("parent", memoryDir), OLD_MEMORY);
     const lifetime = new AbortController();
     const ownerEntered = deferred<void>();
@@ -61,23 +61,41 @@ describe("V2 injection cancellation and metadata policy", () => {
     );
     const input = snapshot("child");
     const context = childContext();
+    const capture = captureV2ChildMemoryAtCreation(
+      context,
+      { sessionID: "child", parentID: "parent" },
+      directory,
+      {},
+      lifetime.signal,
+    );
     const injection = createV2ContextInjection(context, directory, undefined, lifetime.signal)(input);
     try {
       await parentReadEntered.promise;
       lifetime.abort();
       releaseOwner.resolve();
       await owner;
+      expect(await capture).toMatchObject({ status: "suppressed" });
       await injection;
       expect(input.system).toHaveLength(0);
       expect(await readRawFile(childStatePath("child", memoryDir))).toBeNull();
       await writeText(memoryPathFor("parent", memoryDir), NEW_MEMORY);
       const fresh = snapshot("child");
       await createV2ContextInjection(context, directory, undefined, new AbortController().signal)(fresh);
-      expect(JSON.stringify(fresh.system)).toContain("NEW_PARENT_DECISION");
-      expect(JSON.stringify(fresh.system)).not.toContain("OLD_PARENT_DECISION");
+      expect(JSON.stringify(fresh.system)).not.toContain("NEW_PARENT_DECISION");
+      expect(
+        await readTaskChildMemory(
+          context,
+          fresh,
+          { memoryDir, maxMemoryLength: 10_000, injectInSubagents: true },
+          directory,
+        ),
+      ).toEqual({
+        status: "missing-snapshot",
+      });
     } finally {
       releaseOwner.resolve();
       await owner;
+      await capture;
       await injection;
       interception.mockRestore();
     }
@@ -89,11 +107,9 @@ describe("V2 injection cancellation and metadata policy", () => {
       await writeText(memoryPathFor("parent", memoryDir), OLD_MEMORY);
       const lifetime = new AbortController();
       const path = childStatePath("child", memoryDir);
-      const config = { memoryDir, maxMemoryLength: 10_000, injectInSubagents: true };
-      const result = await readTaskChildMemory(
+      const result = await captureV2ChildMemoryAtCreation(
         childContext(),
-        { sessionID: "child" },
-        config,
+        { sessionID: "child", parentID: "parent" },
         directory,
         {
           afterSnapshotWrite: async () => {
@@ -114,7 +130,7 @@ describe("V2 injection cancellation and metadata policy", () => {
     await writeText(memoryPathFor("parent", memoryDir), OLD_MEMORY);
     const context = childContext();
     const config = { memoryDir, maxMemoryLength: 10_000, injectInSubagents: true };
-    await readTaskChildMemory(context, { sessionID: "child" }, config, directory);
+    await captureV2ChildMemoryAtCreation(context, { sessionID: "child", parentID: "parent" }, directory);
     const path = childStatePath("child", memoryDir);
     const previous = await readRawFile(path);
     const lifetime = new AbortController();

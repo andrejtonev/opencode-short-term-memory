@@ -353,9 +353,13 @@ describe("V2 adapter", () => {
     const compactionRegistration = deferred<{ dispose: () => Promise<void> }>();
     const compactionAttempted = deferred<void>();
     const hostDisposals: string[] = [];
+    const contextAttempted = deferred<void>();
     context.session.hook = async (name, callback) => {
       hooks.push({ name, callback });
-      if (name === "context") return contextRegistration.promise;
+      if (name === "context") {
+        contextAttempted.resolve();
+        return contextRegistration.promise;
+      }
       if (name === "compaction") {
         compactionAttempted.resolve();
         return compactionRegistration.promise;
@@ -379,7 +383,7 @@ describe("V2 adapter", () => {
     void setup.then(() => {
       setupResolved = true;
     });
-    await Promise.resolve();
+    await contextAttempted.promise;
 
     expect(setupResolved).toBe(false);
     expect(hooks.map(({ name }) => name)).toEqual(["context"]);
@@ -403,7 +407,7 @@ describe("V2 adapter", () => {
     const cleanup = await setup;
     expect(typeof cleanup).toBe("function");
     expect(hooks.map(({ name }) => name)).toEqual(["context", "compaction", "prompt"]);
-    expect(transforms).toHaveLength(9);
+    expect(transforms).toHaveLength(8);
     expect(transforms.map(({ kind }) => kind)).toEqual([
       "tool",
       "tool",
@@ -413,7 +417,6 @@ describe("V2 adapter", () => {
       "tool",
       "tool",
       "tool",
-      "command",
     ]);
     await expect(cleanup()).resolves.toBeUndefined();
     await expect(cleanup()).resolves.toBeUndefined();

@@ -20,9 +20,18 @@ export type V2ReaderHost = {
   keymap: {
     layer(
       input: () => {
-        mode: string;
+        mode?: string;
         enabled: () => boolean;
-        commands: { bind: string; title: string; group: string; run: () => void }[];
+        commands: {
+          id?: string;
+          bind?: false | string;
+          title: string;
+          description?: string;
+          group: string;
+          palette?: true;
+          slash?: { name: string; aliases?: string[]; arguments?: true };
+          run: (input?: string, event?: unknown) => void | false | Promise<void>;
+        }[];
       },
     ): void;
   };

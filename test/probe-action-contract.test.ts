@@ -15,7 +15,10 @@ test("maintained probe oracle matches real public settings and path-only Logs", 
     await mkdir(join(directory, ".opencode"));
     await writeFile(join(directory, ".opencode", "stm.json"), JSON.stringify(expected.resolvedConfig));
     const actions = createV2MemoryActions({ location: { directory } } as V2Context);
-    expect(JSON.parse(await actions.settings(""))).toEqual(expected);
+    const { configuration, ...settings } = JSON.parse(await actions.settings(""));
+    expect(settings).toEqual(expected);
+    expect(configuration.configPaths).toContain(join(directory, ".opencode", "stm.json"));
+    expect(configuration.configFiles).toContain(join(directory, ".opencode", "stm.json"));
     expect(await actions.logs("")).toBe(join(memoryDir, "session-memory.log"));
   } finally {
     await rm(directory, { recursive: true, force: true });
@@ -27,7 +30,7 @@ test("maintained setup oracle describes the actual clean override contract", asy
   try {
     const actions = createV2MemoryActions({ location: { directory } } as V2Context);
     expect(await actions.setup("", { confirm: true })).toContain(SETUP_CAVEAT);
-    expect(SETUP_CAVEAT).toContain("explicit memoryModel overrides apply to clean mode");
+    expect(SETUP_CAVEAT).toContain("explicit memoryModel overrides apply in either summarizer mode");
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

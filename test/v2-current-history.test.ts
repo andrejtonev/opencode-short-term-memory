@@ -36,6 +36,24 @@ const host = (records: unknown, sessionModel: unknown = model, sessionID = "s1")
 };
 
 describe("readV2CurrentHistory", () => {
+  test("resolves an unset native default model from durable assistant history and subsequent model switches", async () => {
+    const records = [user("msg_u"), assistant("msg_a", "completed", 2)];
+    const h = host(records, null);
+    expect(await readV2CurrentHistory(h.context, "s1")).toMatchObject({ status: "ready", history: { model } });
+    const switched = { providerID: "offline", id: "new-model" };
+    const next = host(
+      [...records, { id: "msg_switch", type: "model-switched", model: switched, time: { created: 3 } }],
+      null,
+    );
+    expect(await readV2CurrentHistory(next.context, "s1")).toMatchObject({
+      status: "ready",
+      history: { model: switched },
+    });
+    expect(await readV2CurrentHistory(host([user("msg_u")], null).context, "s1")).toEqual({
+      status: "no-model",
+      sessionID: "s1",
+    });
+  });
   test("uses the selected primary request model without requiring a stored session model", async () => {
     const h = host([user("msg_user")], undefined);
     // Passing undefined to host uses its default; explicitly return model-free metadata.
@@ -140,9 +158,8 @@ describe("readV2CurrentHistory", () => {
     });
   });
 
-  test("requires the current model and never falls back to historical assistant model", async () => {
+  test("rejects malformed current models and prefers a valid current model over history", async () => {
     for (const unavailable of [
-      null,
       {},
       { providerID: "openai", model: "legacy" },
       { ...model, id: "" },

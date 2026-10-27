@@ -15,7 +15,9 @@ import {
   writeText,
 } from "../src/memory-utils";
 import type { V2Context, V2SessionContext } from "../src/v2-adapter";
+import { captureV2ChildMemoryAtCreation } from "../src/v2-child-memory";
 import { createV2ContextInjection } from "../src/v2-context-injection";
+import { createV2ReminderCadence } from "../src/v2-reminder-cadence";
 
 function sessionContext(sessionID: string, system: V2SessionContext["system"] = []): V2SessionContext {
   return {
@@ -131,40 +133,130 @@ describe("V2 context injection", () => {
     expect(input.system[0]).toBe(existing);
   });
 
+  test("keeps the active legacy selector on the primary message fallback", async () => {
+    const sessionID = "active-system-fallback";
+    const memoryDir = join(testDir, "active-system-fallback-memory");
+    await writeText(
+      join(projectDir, ".opencode", "stm.json"),
+      JSON.stringify({ memoryDir, enableLegacyPeriodicSystemTransform: true, summarizerMode: "active" }),
+    );
+    await writeText(memoryPathFor(sessionID, memoryDir), `${MEMORY_HEADER}\n\n### Decisions\n- Fallback.\n`);
+    const context = injectionContext(projectDir);
+    const cadence = createV2ReminderCadence(context, projectDir);
+    cadence.record({ sessionID, messageID: "msg_active" });
+    const input = sessionContext(sessionID);
+    input.messages.push({ id: "msg_active", role: "user", content: [{ type: "text", text: "hello" }] } as never);
+
+    await createV2ContextInjection(context, projectDir, cadence)(input);
+
+    expect(input.system).toEqual([]);
+    cadence.dispose();
+  });
+
+  test("keeps child snapshot context injection independent of the primary selector", async () => {
+    const childID = "child-selector-off";
+    const parentID = "parent-selector-off";
+    const memoryDir = join(testDir, "child-selector-off-memory");
+    const memory = `${MEMORY_HEADER}\n\n### Decisions\n- Frozen parent memory.\n`;
+    await writeText(
+      join(projectDir, ".opencode", "stm.json"),
+      JSON.stringify({ memoryDir, enableLegacyPeriodicSystemTransform: false, injectInSubagents: true }),
+    );
+    await writeText(memoryPathFor(parentID, memoryDir), memory);
+    const context = injectionContext(projectDir);
+    context.session.get = async ({ sessionID }) =>
+      ({ id: sessionID, parentID: sessionID === childID ? parentID : null }) as Awaited<
+        ReturnType<typeof context.session.get>
+      >;
+    await captureV2ChildMemoryAtCreation(context, { sessionID: childID, parentID }, projectDir);
+    const input = sessionContext(childID);
+
+    await createV2ContextInjection(context, projectDir)(input);
+
+    expect(input.system).toEqual([
+      { type: "text", text: buildTaggedMemoryForInjection(memory, DEFAULT_CONFIG.maxMemoryLength) },
+    ]);
+  });
+
+  test("skips an owned summary session before reading or injecting its memory", async () => {
+    const sessionID = "owned-summary-context";
+    const memoryDir = join(testDir, "owned-summary-context-memory");
+    await writeText(
+      join(projectDir, ".opencode", "stm.json"),
+      JSON.stringify({ memoryDir, enableLegacyPeriodicSystemTransform: true }),
+    );
+    await writeText(memoryPathFor(sessionID, memoryDir), `${MEMORY_HEADER}\n\n### Decisions\n- Owned.\n`);
+    const context = injectionContext(projectDir);
+    let metadataReads = 0;
+    context.session.get = async ({ sessionID }) => {
+      metadataReads++;
+      return { id: sessionID, parentID: null } as Awaited<ReturnType<typeof context.session.get>>;
+    };
+    const input = sessionContext(sessionID);
+
+    await createV2ContextInjection(context, projectDir, undefined, undefined, (id) => id === sessionID)(input);
+
+    expect(metadataReads).toBe(0);
+    expect(input.system).toEqual([]);
+  });
+
   test.each([
     ["omitted", "normal", undefined],
     ["false", "normal", false],
     ["omitted", "compaction", undefined],
     ["false", "compaction", false],
-  ] as const)("suppresses populated memory with %s opt-in on %s input", async (_flagName, transport, optIn) => {
-    const sessionID = "gate-off-session";
-    const memoryDir = join(testDir, "gate-off-memory");
-    await writeText(
-      join(projectDir, ".opencode", "stm.json"),
-      JSON.stringify({ memoryDir, ...(optIn === undefined ? {} : { enableLegacyPeriodicSystemTransform: optIn }) }),
-    );
-    await writeText(memoryPathFor(sessionID, memoryDir), `${MEMORY_HEADER}\n\n### Decisions\n- Must not inject.\n`);
-    const existing = { type: "text" as const, text: "preserved system" };
-    const system = [existing];
-    const result = { summary: "preserved compaction result", metadata: { sentinel: true } };
-    const input =
-      transport === "compaction" ? sessionCompaction(sessionID, system, result) : sessionContext(sessionID, system);
-    const context = injectionContext(projectDir);
-    let lineageReads = 0;
-    context.session.get = async ({ sessionID }) => {
-      lineageReads++;
-      return { id: sessionID, parentID: null } as Awaited<ReturnType<typeof context.session.get>>;
-    };
+  ] as const)(
+    "uses selector and compaction semantics for %s opt-in on %s input",
+    async (_flagName, transport, optIn) => {
+      const sessionID = "gate-off-session";
+      const memoryDir = join(testDir, "gate-off-memory");
+      await writeText(
+        join(projectDir, ".opencode", "stm.json"),
+        JSON.stringify({ memoryDir, ...(optIn === undefined ? {} : { enableLegacyPeriodicSystemTransform: optIn }) }),
+      );
+      await writeText(memoryPathFor(sessionID, memoryDir), `${MEMORY_HEADER}\n\n### Decisions\n- Must not inject.\n`);
+      const existing = { type: "text" as const, text: "preserved system" };
+      const system = [existing];
+      const result = { summary: "preserved compaction result", metadata: { sentinel: true } };
+      const input =
+        transport === "compaction" ? sessionCompaction(sessionID, system, result) : sessionContext(sessionID, system);
+      const context = injectionContext(projectDir);
+      let lineageReads = 0;
+      context.session.get = async ({ sessionID }) => {
+        lineageReads++;
+        return { id: sessionID, parentID: null } as Awaited<ReturnType<typeof context.session.get>>;
+      };
 
-    await createV2ContextInjection(context, projectDir)(input);
+      await createV2ContextInjection(
+        context,
+        projectDir,
+        undefined,
+        undefined,
+        undefined,
+        transport === "compaction" ? "compaction" : "context",
+      )(input);
 
-    expect(input.system).toBe(system);
-    expect(input.system).toEqual([existing]);
-    expect(input.system[0]).toBe(existing);
-    expect("result" in input).toBe(transport === "compaction");
-    if ("result" in input) expect(input.result).toBe(result);
-    expect(lineageReads).toBe(0);
-  });
+      expect(input.system).toBe(system);
+      if (transport === "compaction") {
+        expect(input.system).toEqual([
+          existing,
+          {
+            type: "text",
+            text: buildTaggedMemoryForInjection(
+              `${MEMORY_HEADER}\n\n### Decisions\n- Must not inject.\n`,
+              DEFAULT_CONFIG.maxMemoryLength,
+            ),
+          },
+        ]);
+      } else {
+        expect(input.system).toEqual([existing]);
+        expect(input.system[0]).toBe(existing);
+      }
+      expect("result" in input).toBe(transport === "compaction");
+      if ("result" in input) expect(input.result).toBe(result);
+      expect(lineageReads).toBe(transport === "compaction" ? 2 : 1);
+    },
+  );
 
   test.each([
     ["missing memory", undefined],
@@ -263,7 +355,14 @@ describe("V2 context injection", () => {
     await writeText(memoryPathFor(sessionID, memoryDir), memory);
     const input = sessionCompaction(sessionID);
 
-    await createV2ContextInjection(injectionContext(projectDir), projectDir)(input);
+    await createV2ContextInjection(
+      injectionContext(projectDir),
+      projectDir,
+      undefined,
+      undefined,
+      undefined,
+      "compaction",
+    )(input);
 
     expect(input.system).toEqual([{ type: "text", text: tagged }]);
     expect(input.result).toBeUndefined();
@@ -283,7 +382,14 @@ describe("V2 context injection", () => {
     await writeText(memoryPathFor(sessionID, memoryDir), memory);
     const input = sessionCompaction(sessionID, [], result);
 
-    await createV2ContextInjection(injectionContext(projectDir), projectDir)(input);
+    await createV2ContextInjection(
+      injectionContext(projectDir),
+      projectDir,
+      undefined,
+      undefined,
+      undefined,
+      "compaction",
+    )(input);
 
     expect(input.system).toEqual([{ type: "text", text: tagged }]);
     expect(input.result).toBe(result);
@@ -300,7 +406,14 @@ describe("V2 context injection", () => {
       JSON.stringify({ memoryDir, enableLegacyPeriodicSystemTransform: true }),
     );
     await writeText(memoryPathFor(sessionID, memoryDir), memory);
-    const callback = createV2ContextInjection(injectionContext(projectDir), projectDir);
+    const callback = createV2ContextInjection(
+      injectionContext(projectDir),
+      projectDir,
+      undefined,
+      undefined,
+      undefined,
+      "compaction",
+    );
     const input = sessionCompaction(sessionID);
 
     await callback(input);

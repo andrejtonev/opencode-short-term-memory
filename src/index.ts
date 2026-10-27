@@ -4,13 +4,16 @@ import type { OpencodeClient } from "@opencode-ai/sdk/client";
 import { SessionMemoryPlugin as InternalSessionMemoryPlugin } from "./v1-adapter";
 import { createV2Adapter, type V2SessionCompaction, type V2SessionContext } from "./v2-adapter";
 import { createV2ContextInjection } from "./v2-context-injection";
-import { createV2MemoryUpdater, isV2MemoryUpdateInFlight } from "./v2-memory-update";
+import { createV2MessageInjection } from "./v2-message-injection";
+import { disposeV2NativeGeneration, isV2OwnedSummarySession } from "./v2-native-generation";
+import { createV2MemoryUpdater } from "./v2-memory-update";
 import { createV2MemoryToolRegistrations } from "./v2-memory-tools";
 import { setupStatusCommand } from "./v2-status-command";
 import { createV2ReminderCadence } from "./v2-reminder-cadence";
 import { createV2IdleUpdateScheduler } from "./v2-idle-update";
 import { readV2CurrentHistory } from "./v2-current-history";
-import { classifyV2Session } from "./v2-child-memory";
+import { registerV2DcpCompletion } from "./v2-dcp";
+import { bootstrapV2InstalledConfig } from "./v2-config-installation";
 import { DEFAULT_CONFIG, logEvent, readConfig } from "./memory-utils";
 
 export type V1MemoryPlugin = (input: {
@@ -31,13 +34,30 @@ export default {
   async setup(context) {
     const adapter = createV2Adapter(context);
     const lifetime = new AbortController();
+    await bootstrapV2InstalledConfig(context);
     const cadence = createV2ReminderCadence(context, context.location.directory);
-    const injection = createV2ContextInjection(context, context.location.directory, cadence, lifetime.signal);
+    const isOwnedSession = (sessionID: string) => isV2OwnedSummarySession(context, sessionID);
+    const messageInjection = createV2MessageInjection(
+      context,
+      context.location.directory,
+      cadence,
+      lifetime.signal,
+      isOwnedSession,
+    );
+    const injection = createV2ContextInjection(
+      context,
+      context.location.directory,
+      cadence,
+      lifetime.signal,
+      isOwnedSession,
+    );
     const compactionInjection = createV2ContextInjection(
       context,
       context.location.directory,
       undefined,
       lifetime.signal,
+      isOwnedSession,
+      "compaction",
     );
     const updater = createV2MemoryUpdater(context, context.location.directory, { lifetimeSignal: lifetime.signal });
     const idle = createV2IdleUpdateScheduler(context, context.location.directory, updater, lifetime.signal);
@@ -56,31 +76,14 @@ export default {
     };
     const callback = async (input: V2SessionContext) => {
       if (lifetime.signal.aborted) return;
-      try {
-        const config = await readConfig(undefined, context.location.directory);
-        if (config.enabled && !isV2MemoryUpdateInFlight(context.location.directory, input.sessionID)) {
-          const lineage = await classifyV2Session(context, input.sessionID);
-          if (lifetime.signal.aborted) return;
-          if (lineage.kind === "primary") {
-            // Model-facing messages have lost durable provenance: synthetic/skill/shell
-            // records can look like user text, while idle anchors disappear entirely.
-            const current = await readV2CurrentHistory(context, input.sessionID, 5_000, input.model);
-            if (lifetime.signal.aborted) return;
-            if (current.status === "ready") await updater(current.history);
-            else await logRefreshFailure("v2_context_refresh_failed", input.sessionID, `history_${current.status}`);
-          }
-        }
-      } catch {
-        await logRefreshFailure("v2_context_refresh_failed", input.sessionID, "refresh_error");
-        // Injection has its own conservative config/error handling and can still
-        // use existing memory if refreshing it is unavailable.
-      }
-      if (lifetime.signal.aborted) return;
-      // A background producer being busy must not suppress reading saved memory.
+      if (isOwnedSession(input.sessionID)) return;
+      // Like V1, primary context reads saved memory. Idle events own background
+      // updates; a slow summarizer must never hold up the user's model request.
       await injection(input);
     };
     const compactionCallback = async (input: V2SessionCompaction) => {
       if (lifetime.signal.aborted) return;
+      if (isOwnedSession(input.sessionID)) return;
       try {
         const current = await readV2CurrentHistory(context, input.sessionID, 1_000);
         if (lifetime.signal.aborted) return;
@@ -89,11 +92,22 @@ export default {
         } else if (current.history.stoppedBeforeMessageID !== undefined) {
           await logRefreshFailure("v2_compaction_refresh_failed", input.sessionID, "history_unfinished_prefix");
         } else {
-          await updater({
-            sessionID: input.sessionID,
-            model: current.history.model,
-            messages: current.history.messages,
-          });
+          const config = await readConfig(undefined, context.location.directory);
+          let timer: ReturnType<typeof setTimeout> | undefined;
+          try {
+            await Promise.race([
+              updater({
+                sessionID: input.sessionID,
+                model: current.history.model,
+                messages: current.history.messages,
+              }),
+              new Promise<void>((resolve) => {
+                timer = setTimeout(resolve, Math.max(3_000, config.debounceMs * 5));
+              }),
+            ]);
+          } finally {
+            if (timer !== undefined) clearTimeout(timer);
+          }
         }
       } catch {
         await logRefreshFailure("v2_compaction_refresh_failed", input.sessionID, "refresh_error");
@@ -104,10 +118,21 @@ export default {
     };
     let disposeStatus: (() => Promise<void>) | undefined;
     let disposePrompt: (() => Promise<void>) | undefined;
+    let disposeDcp: (() => Promise<void>) | undefined;
     try {
+      try {
+        disposeDcp = (await registerV2DcpCompletion(context, context.location.directory, updater, lifetime.signal))
+          .dispose;
+      } catch (error) {
+        try {
+          await logEvent(await readConfig(undefined, context.location.directory), "v2_dcp_hook_unavailable", {
+            reason: error instanceof Error ? error.message : String(error),
+          });
+        } catch {}
+      }
       await adapter.runtime.registerSystemContextMutation(callback);
       await adapter.runtime.registerCompactionMutation(compactionCallback);
-      const promptRegistration = await context.session.hook("prompt", (input) => cadence.record(input));
+      const promptRegistration = await context.session.hook("prompt", messageInjection);
       disposePrompt = promptRegistration.dispose;
       for (const registration of createV2MemoryToolRegistrations(context, lifetime.signal)) {
         await adapter.runtime.registerTool(registration);
@@ -115,6 +140,9 @@ export default {
       disposeStatus = await setupStatusCommand(context, adapter.runtime, lifetime.signal);
     } catch (error) {
       lifetime.abort();
+      disposeV2NativeGeneration(context);
+      messageInjection.dispose();
+      await disposeDcp?.().catch(() => undefined);
       await idle.dispose().catch(() => undefined);
       try {
         await adapter.dispose();
@@ -129,24 +157,27 @@ export default {
       } catch {}
       throw error;
     }
-    return async () => {
-      try {
-        lifetime.abort();
-        await idle.dispose();
-        await disposeStatus?.();
-      } finally {
+    let disposal: Promise<void> | undefined;
+    return () =>
+      (disposal ??= (async () => {
         try {
+          lifetime.abort();
+          disposeV2NativeGeneration(context);
+          messageInjection.dispose();
           const prompt = disposePrompt;
           disposePrompt = undefined;
-          await prompt?.();
+          const results = await Promise.allSettled([
+            Promise.resolve().then(() => disposeDcp?.()),
+            Promise.resolve().then(() => idle.dispose()),
+            Promise.resolve().then(() => disposeStatus?.()),
+            Promise.resolve().then(() => prompt?.()),
+            Promise.resolve().then(() => adapter.dispose()),
+          ]);
+          const failure = results.find((result) => result.status === "rejected");
+          if (failure?.status === "rejected") throw failure.reason;
         } finally {
-          try {
-            await adapter.dispose();
-          } finally {
-            cadence.dispose();
-          }
+          cadence.dispose();
         }
-      }
-    };
+      })());
   },
 } satisfies Plugin.Plugin & { readonly server: typeof SessionMemoryPlugin };

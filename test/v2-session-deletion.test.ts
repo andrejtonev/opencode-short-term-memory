@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, readdir, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -15,7 +15,7 @@ import {
   writeText,
 } from "../src/memory-utils";
 import type { V2Context, V2SessionContext } from "../src/v2-adapter";
-import { childStatePath, readTaskChildMemory } from "../src/v2-child-memory";
+import { captureV2ChildMemoryAtCreation, childStatePath, readTaskChildMemory } from "../src/v2-child-memory";
 import { createV2ContextInjection } from "../src/v2-context-injection";
 import { createV2IdleUpdateScheduler } from "../src/v2-idle-update";
 import { createV2MemoryActions } from "../src/v2-memory-tools";
@@ -29,6 +29,7 @@ import {
 } from "../src/v2-mutation-coordination";
 import { resetV2MemoryPersistence } from "../src/v2-reset-persistence";
 import { deleteV2SessionMemory } from "../src/v2-session-deletion";
+import { installV2NativeGenerationHarness } from "./v2-native-generation-harness";
 import { deferred } from "./async-helpers";
 
 async function bounded<T>(promise: Promise<T>): Promise<T> {
@@ -98,7 +99,7 @@ describe("V2 session deletion lifecycle", () => {
     generate: (signal?: AbortSignal) => Promise<{ text: string }> = async () => ({ text: STANDARD_MEMORY_TEMPLATE }),
     get: (sessionID: string) => Promise<unknown> = async (sessionID) => ({ id: sessionID, parentID: null }),
   ): V2Context {
-    return {
+    const host = {
       location: { directory, workspaceID: "workspace", project: { id: "project", directory, canonical: directory } },
       options: {},
       session: {
@@ -107,8 +108,9 @@ describe("V2 session deletion lifecycle", () => {
           throw new Error("unexpected active inference");
         },
       },
-      generate: { text: async (_input: unknown, request?: { signal?: AbortSignal }) => generate(request?.signal) },
     } as unknown as V2Context;
+    installV2NativeGenerationHarness(host, { clean: async (_input, signal) => generate(signal) });
+    return host;
   }
 
   function paths(sessionID: string): string[] {
@@ -136,6 +138,25 @@ describe("V2 session deletion lifecycle", () => {
     await absent("target");
     await absent("never-created");
     for (const path of preserved) expect(await readText(path)).toBe(`sentinel:${path}`);
+  });
+
+  test("refuses a linked child-state directory without deleting its target files", async () => {
+    const outside = join(directory, "outside-child-state");
+    await mkdir(outside, { recursive: true });
+    const externalState = join(outside, "child.json");
+    const externalContents = JSON.stringify({
+      version: 1,
+      sessionID: "child",
+      parentID: "parent",
+      memory: STANDARD_MEMORY_TEMPLATE,
+    });
+    await writeText(externalState, externalContents);
+    await mkdir(memoryDir, { recursive: true });
+    await symlink(outside, join(memoryDir, "task-children"), process.platform === "win32" ? "junction" : "dir");
+
+    await expect(deleteV2SessionMemory(directory, "parent")).rejects.toThrow("unsafe_child_state_directory");
+
+    expect(await readText(externalState)).toBe(externalContents);
   });
 
   test("tombstones synchronously and rejects queued/new normal mutations without running them", async () => {
@@ -320,10 +341,11 @@ describe("V2 session deletion lifecycle", () => {
     }
   });
 
-  test("parent deletion preserves a frozen surviving child, blocks new capture, and child deletion removes its snapshot", async () => {
+  test("parent deletion cascades through frozen child snapshots and blocks future child injection", async () => {
     const host = context(undefined, async (sessionID) => ({ id: sessionID, parentID: "parent" }));
     const config = { ...DEFAULT_CONFIG, memoryDir, injectInSubagents: true };
     await writeText(memoryPathFor("parent", memoryDir), STANDARD_MEMORY_TEMPLATE);
+    await captureV2ChildMemoryAtCreation(host, { sessionID: "frozen-child", parentID: "parent" }, directory);
     expect(await readTaskChildMemory(host, snapshot("frozen-child"), config, directory)).toEqual({
       status: "injected",
       memory: STANDARD_MEMORY_TEMPLATE,
@@ -331,11 +353,11 @@ describe("V2 session deletion lifecycle", () => {
     const frozen = await readRawFile(childStatePath("frozen-child", memoryDir));
     expect(frozen).not.toBeNull();
     await deleteV2SessionMemory(directory, "parent");
-    expect(await readRawFile(childStatePath("frozen-child", memoryDir))).toEqual(frozen);
+    expect(await readRawFile(childStatePath("frozen-child", memoryDir))).toBeNull();
     expect(await readTaskChildMemory(host, snapshot("frozen-child"), config, directory)).toEqual({
-      status: "injected",
-      memory: STANDARD_MEMORY_TEMPLATE,
+      status: "suppressed",
     });
+    expect(frozen).not.toBeNull();
     expect(await readTaskChildMemory(host, snapshot("new-child"), config, directory)).toEqual({ status: "suppressed" });
     await absent("new-child");
     await deleteV2SessionMemory(directory, "frozen-child");
@@ -345,40 +367,47 @@ describe("V2 session deletion lifecycle", () => {
     });
   });
 
-  test("parent deletion during child snapshot write suppresses capture and a concurrent child read", async () => {
+  test("parent deletion tombstones an in-flight child capture and removes its pending snapshot", async () => {
     const host = context(undefined, async (sessionID) => ({ id: sessionID, parentID: "parent" }));
     const config = { ...DEFAULT_CONFIG, memoryDir, injectInSubagents: true };
     const entered = deferred();
     const gate = deferred();
     for (const path of paths("parent")) await writeText(path, STANDARD_MEMORY_TEMPLATE);
-    const capture = readTaskChildMemory(host, snapshot("child"), config, directory, {
+    const capture = captureV2ChildMemoryAtCreation(host, { sessionID: "child", parentID: "parent" }, directory, {
       afterSnapshotWrite: async () => {
         entered.resolve();
         await gate.promise;
       },
     });
     let concurrent: ReturnType<typeof readTaskChildMemory> | undefined;
+    let deletion: Promise<void> | undefined;
     try {
       await bounded(entered.promise);
       expect(await readText(childStatePath("child", memoryDir))).toContain(JSON.stringify(STANDARD_MEMORY_TEMPLATE));
-      await bounded(deleteV2SessionMemory(directory, "parent"));
-      await absent("parent");
+      deletion = deleteV2SessionMemory(directory, "parent");
+      await bounded(
+        (async () => {
+          while (!isV2MemorySessionDeleted(directory, "child")) await new Promise((resolve) => setTimeout(resolve, 5));
+        })(),
+      );
+      expect(isV2MemorySessionDeleted(directory, "parent")).toBe(true);
       let settled = false;
       concurrent = readTaskChildMemory(host, snapshot("child"), config, directory).finally(() => {
         settled = true;
       });
-      await bounded(new Promise<void>((resolve) => setTimeout(resolve, 25)));
-      expect(settled).toBe(false);
+      expect(await bounded(concurrent)).toEqual({ status: "suppressed" });
+      expect(settled).toBe(true);
       gate.resolve();
-      expect(await bounded(Promise.all([capture, concurrent]))).toEqual([
-        { status: "suppressed" },
-        { status: "suppressed" },
-      ]);
+      expect(await bounded(capture)).toMatchObject({ status: "suppressed" });
+      await bounded(deletion);
+      await absent("parent");
       await absent("child");
       await absent("parent");
     } finally {
       gate.resolve();
-      await bounded(Promise.allSettled([capture, ...(concurrent ? [concurrent] : [])]));
+      await bounded(
+        Promise.allSettled([capture, ...(concurrent ? [concurrent] : []), ...(deletion ? [deletion] : [])]),
+      );
     }
   });
 

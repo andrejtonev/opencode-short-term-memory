@@ -5,6 +5,8 @@ import { join } from "node:path";
 import Root from "../src/index";
 import type { V2CommandDefinition, V2Context, V2SessionContext } from "../src/v2-adapter";
 import { createV2MemoryActions } from "../src/v2-memory-tools";
+import { createV2MemoryUpdater } from "../src/v2-memory-update";
+import { readV2CurrentHistory } from "../src/v2-current-history";
 import { createV2ContextInjection } from "../src/v2-context-injection";
 import * as MemoryUtils from "../src/memory-utils";
 import {
@@ -21,6 +23,7 @@ import {
 import { withV2MemoryMutation } from "../src/v2-mutation-coordination";
 import { resetV2MemoryPersistence } from "../src/v2-reset-persistence";
 import { deferred } from "./async-helpers";
+import { installV2NativeGenerationHarness } from "./v2-native-generation-harness";
 
 const model = { providerID: "offline", id: "test" };
 const memory = STANDARD_MEMORY_TEMPLATE.replace("### Decisions", "### Decisions\n- SAVED_MEMORY_SENTINEL");
@@ -92,7 +95,24 @@ function host(directory: string, records: unknown[]) {
       },
     },
   };
-  return { context, hooks, commands, prompts, setRecords: (values: unknown[]) => (durable = values) };
+  installV2NativeGenerationHarness(context as unknown as V2Context, {
+    clean: (input, signal) => context.generate.text(input, { signal }),
+    active: async () => ({ text: memory }),
+  });
+  return {
+    context,
+    hooks,
+    commands,
+    prompts,
+    action: (input: unknown) => (rpc as any).action(input),
+    setRecords: (values: unknown[]) => (durable = values),
+  };
+}
+
+async function refresh(h: ReturnType<typeof host>) {
+  const current = await readV2CurrentHistory(h.context as unknown as V2Context, "session");
+  if (current.status !== "ready") throw new Error(`history_${current.status}`);
+  return createV2MemoryUpdater(h.context as unknown as V2Context)({ sessionID: "session", ...current.history });
 }
 
 describe("V2 native context provenance and lifecycle", () => {
@@ -145,36 +165,26 @@ describe("V2 native context provenance and lifecycle", () => {
       { ...assistant("msg_pending", "UNFINISHED_SENTINEL"), time: { created: 5 } },
     ]);
     cleanup = await Root.setup(h.context as unknown as V2Context);
-    await h.hooks.get("context")!(snapshot([message("msg_pending", "assistant", "UNFINISHED_SENTINEL")]));
+    await refresh(h);
     expect(h.prompts).toHaveLength(1);
     expect(h.prompts[0]!.prompt).toContain("settled answer");
     expect(h.prompts[0]!.prompt).not.toContain("UNFINISHED_SENTINEL");
     expect(await readText(checkpointPathFor("session", memoryDir))).toBe("msg_answer\n");
   });
 
-  test("logs failed durable refresh and still injects saved memory", async () => {
+  test("primary context injects saved memory without depending on available durable history", async () => {
     const h = host(directory, []);
     h.context.session.context = async () => {
       throw new Error("offline history unavailable");
     };
     await writeText(memoryPathFor("session", memoryDir), memory);
     cleanup = await Root.setup(h.context as unknown as V2Context);
-    await h.hooks.get("prompt")!({ sessionID: "session", messageID: "msg_user" });
+    await h.hooks.get("prompt")!({ sessionID: "session", messageID: "msg_user", prompt: { text: "instruction" } });
     const input = snapshot([message("msg_user", "user", "instruction")]);
     await h.hooks.get("context")!(input);
     expect(h.prompts).toHaveLength(0);
     expect(JSON.stringify(input.system)).toContain("SAVED_MEMORY_SENTINEL");
-    const logs = (await readText(logPath(memoryDir)))
-      .trim()
-      .split("\n")
-      .map((line) => JSON.parse(line));
-    expect(logs).toContainEqual(
-      expect.objectContaining({
-        event: "v2_context_refresh_failed",
-        sessionID: "session",
-        reason: "history_error",
-      }),
-    );
+    expect(await readText(logPath(memoryDir))).not.toContain("v2_context_refresh_failed");
   });
 
   test.each(["reset", "dispose"] as const)("does not publish an old memory read after %s", async (operation) => {
@@ -242,10 +252,11 @@ describe("V2 native context provenance and lifecycle", () => {
     ]);
     const selectedModel = { providerID: "primary-provider", id: "primary-model", variant: "fast" };
     Object.assign(input, { model: selectedModel });
-    await h.hooks.get("prompt")!({ sessionID: "session", messageID: "msg_user" });
+    await h.hooks.get("prompt")!({ sessionID: "session", messageID: "msg_user", prompt: { text: "instruction" } });
+    await refresh(h);
     await h.hooks.get("context")!(input);
     expect(h.prompts).toHaveLength(1);
-    expect(h.prompts[0]!.model).toEqual(selectedModel);
+    expect(h.prompts[0]!.model).toBeUndefined();
     expect(h.prompts[0]!.prompt).toContain("HUMAN_INSTRUCTION");
     expect(h.prompts[0]!.prompt).toContain("VISIBLE_ANSWER");
     for (const sentinel of ["SYNTHETIC_SENTINEL", "SKILL_SENTINEL", "SHELL_SENTINEL"]) {
@@ -262,7 +273,7 @@ describe("V2 native context provenance and lifecycle", () => {
       idle("msg_reset"),
     ]);
     cleanup = await Root.setup(h.context as unknown as V2Context);
-    await h.hooks.get("prompt")!({ sessionID: "session", messageID: "msg_old" });
+    await h.hooks.get("prompt")!({ sessionID: "session", messageID: "msg_old", prompt: { text: "old instruction" } });
     expect(
       await createV2MemoryActions(h.context as unknown as V2Context).reset("session", { confirm: true }),
     ).toContain("reset: completed");
@@ -273,7 +284,8 @@ describe("V2 native context provenance and lifecycle", () => {
       user("msg_new", "POST_RESET_SENTINEL"),
       assistant("msg_new_answer", "new answer"),
     ]);
-    await h.hooks.get("prompt")!({ sessionID: "session", messageID: "msg_new" });
+    await h.hooks.get("prompt")!({ sessionID: "session", messageID: "msg_new", prompt: { text: "new instruction" } });
+    await refresh(h);
     const input = snapshot([
       message("msg_old", "user", "PRE_RESET_SENTINEL"),
       message("msg_new", "user", "POST_RESET_SENTINEL"),
@@ -303,8 +315,8 @@ describe("V2 native context provenance and lifecycle", () => {
     };
     await writeText(memoryPathFor("session", memoryDir), memory);
     cleanup = await Root.setup(h.context as unknown as V2Context);
-    await h.hooks.get("prompt")!({ sessionID: "session", messageID: "msg_user" });
-    const running = h.hooks.get("context")!(snapshot([message("msg_user", "user", "instruction")]));
+    await h.hooks.get("prompt")!({ sessionID: "session", messageID: "msg_user", prompt: { text: "instruction" } });
+    const running = refresh(h);
     await started.promise;
     const concurrent = snapshot([message("msg_user", "user", "instruction")]);
     try {
@@ -328,9 +340,9 @@ describe("V2 native context provenance and lifecycle", () => {
       return generation.promise;
     };
     cleanup = await Root.setup(h.context as unknown as V2Context);
-    const result = h.commands[0]!.execute({ sessionID: "session", prompt: { text: "update" } } as never).catch(
-      (error: Error) => error.message,
-    );
+    const result = h
+      .action({ requestID: "update-test", sessionID: "session", action: "update" })
+      .catch((error: Error) => error.message);
     await started.promise;
     await cleanup();
     cleanup = undefined;
@@ -362,10 +374,14 @@ describe("V2 native context provenance and lifecycle", () => {
     await writeText(paths[2]!, '{"version":1,"anchorID":"msg_original"}\n');
     const before = await Promise.all(paths.map(readRawFile));
     cleanup = await Root.setup(h.context as unknown as V2Context);
-    const result = h.commands[0]!.execute({
-      sessionID: "session",
-      prompt: { text: "reset confirm true" },
-    } as never).catch((error: Error) => error.message);
+    const result = h
+      .action({
+        requestID: "reset-test",
+        sessionID: "session",
+        action: "reset",
+        confirm: true,
+      })
+      .catch((error: Error) => error.message);
     await started.promise;
     await cleanup();
     cleanup = undefined;

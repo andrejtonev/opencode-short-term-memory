@@ -26,6 +26,7 @@ import { readV2CurrentHistory, type V2CurrentHistoryContext } from "../src/v2-cu
 import { resetV2MemoryPersistence } from "../src/v2-reset-persistence";
 import { deferred } from "./async-helpers";
 import { createV2GenerateHookHarness } from "./v2-generate-hook-harness";
+import { installV2NativeGenerationHarness } from "./v2-native-generation-harness";
 
 const VALID_MEMORY = `${MEMORY_HEADER}
 
@@ -138,7 +139,15 @@ function makeContext(
       },
     },
   };
-  return { context: value as unknown as V2Context, calls };
+  const context = value as unknown as V2Context;
+  const native = installV2NativeGenerationHarness(context, {
+    clean: (input, signal) => value.generate.text(input, { signal }),
+    active: async (input, signal, generation) => {
+      calls.active.push({ input, request: { signal } });
+      return options.active ? options.active(input, signal, generation) : { text: VALID_MEMORY };
+    },
+  });
+  return { context, calls, native };
 }
 
 function input(sessionID: string, messages: unknown[], model = { providerID: "provider", id: "model" }) {
@@ -255,8 +264,7 @@ describe("V2 fresh memory updater", () => {
     const log = await readText(logPath(memoryDir), "");
     expect(log).toContain('"event":"v2_generation_attempt_start"');
     expect(log).toContain('"event":"v2_generation_attempt_outcome"');
-    expect(log).toContain('"providerID":"provider"');
-    expect(log).toContain('"modelID":"model"');
+    expect(log).toContain('"memoryModelSelection":"host-default"');
     expect(log).toContain('"promptChars":');
     expect(log).toContain('"conversationChars":');
     expect(log).not.toContain(secret);
@@ -345,7 +353,7 @@ describe("V2 fresh memory updater", () => {
     expect((calls.clean[0] as { input: { prompt: string } }).input.prompt).not.toContain("agents_md_context");
   });
 
-  test("directly updates the reader's settled prefix with the exact current model variant", async () => {
+  test("updates the reader's settled prefix without overriding the clean host default", async () => {
     const model = { ...input("reader", []).model, variant: "current-variant" } as V2SessionContext["model"];
     const snapshot = await readV2CurrentHistory(
       historyHost(
@@ -378,8 +386,7 @@ describe("V2 fresh memory updater", () => {
     });
     expect(calls.clean).toHaveLength(1);
     expect(calls.active).toHaveLength(0);
-    expect(generated?.model).toBe(model);
-    expect(generated?.model).toEqual({ providerID: "provider", id: "model", variant: "current-variant" });
+    expect(generated?.model).toBeUndefined();
     expect(conversationBody(generated!.prompt).trim()).toBe(
       "USER:\nCURRENT_QUESTION\n\n---\n\nASSISTANT:\nCURRENT_ANSWER",
     );
@@ -512,15 +519,16 @@ describe("V2 fresh memory updater", () => {
     expect(await readRawFile(resetBoundaryPathFor("quoted-tools", memoryDir))).toBeNull();
   });
 
-  test("clean mode passes the exact current model to standalone generation", async () => {
+  test("clean mode omits a model override to match V1 host-default resolution", async () => {
     const model = { providerID: "exact-provider", id: "exact-model" };
-    const { context, calls } = makeContext(directory);
+    const { context, calls, native } = makeContext(directory);
     await createV2MemoryUpdater(context)(
       input("clean", [message("u1", "user", "Question"), message("a1", "assistant", "Answer")], model),
     );
     expect(calls.active).toHaveLength(0);
     expect(calls.clean).toHaveLength(1);
-    expect((calls.clean[0] as { input: { model: unknown } }).input.model).toBe(model);
+    expect((calls.clean[0] as { input: { model?: unknown } }).input.model).toBeUndefined();
+    expect(native.calls.create[0]?.input.model).toBeUndefined();
   });
 
   test("clean mode maps an explicit provider/model override without inheriting a variant", async () => {
@@ -580,31 +588,32 @@ describe("V2 fresh memory updater", () => {
       input("unavailable", [message("u1", "user", "Question"), message("a1", "assistant", "Answer")]),
     );
     expect(result).toMatchObject({ status: "error", reason: "operational_failure", detail: "model unavailable" });
-    expect(calls.clean).toHaveLength(1);
+    expect(calls.clean).toHaveLength(2);
     expect(await readText(memoryPathFor("unavailable", memoryDir))).toBe(existing);
     expect(await readText(checkpointPathFor("unavailable", memoryDir))).toBe("before\n");
   });
 
-  test("does not invoke active generation for an explicit model override", async () => {
+  test("honors an explicit active model override without changing the primary session", async () => {
     await writeText(
       join(directory, ".opencode", "stm.json"),
       JSON.stringify({ memoryDir, summarizerMode: "active", memoryModel: "provider/model" }),
     );
-    const { context, calls } = makeContext(directory);
+    const { context, calls, native } = makeContext(directory);
     const result = await createV2MemoryUpdater(context)(
       input("active-override", [message("u1", "user", "Question"), message("a1", "assistant", "Answer")]),
     );
     expect(result).toEqual({
-      status: "skipped",
-      reason: "active_model_override_unsupported",
-      checkpointedChunks: 0,
-      checkpointedMessages: 0,
+      status: "committed",
+      checkpointedChunks: 1,
+      checkpointedMessages: 2,
       persistedPartialFragments: 0,
     });
-    expect(calls.active).toHaveLength(0);
+    expect(calls.active).toHaveLength(1);
     expect(calls.clean).toHaveLength(0);
-    expect(await readRawFile(memoryPathFor("active-override", memoryDir))).toBeNull();
-    expect(await readRawFile(checkpointPathFor("active-override", memoryDir))).toBeNull();
+    expect(native.calls.create[0]?.input.model).toEqual({ providerID: "provider", id: "model" });
+    expect(native.calls.generate.at(-1)?.request.tools).toEqual({});
+    expect(native.sessions.size).toBe(0);
+    expect(await readText(checkpointPathFor("active-override", memoryDir))).toBe("a1\n");
   });
 
   test.each([
@@ -669,7 +678,10 @@ describe("V2 fresh memory updater", () => {
   test.each(["generation", "restored", "conflict", "failed"] as const)(
     "retains earlier checkpoint progress after a later chunk failure (%s)",
     async (failure) => {
-      await writeText(join(directory, ".opencode", "stm.json"), JSON.stringify({ memoryDir, maxDeltaMessages: 20 }));
+      await writeText(
+        join(directory, ".opencode", "stm.json"),
+        JSON.stringify({ memoryDir, maxDeltaMessages: 30, maxUpdateInputLength: 7990, sideSessionRetries: 0 }),
+      );
       let generation = 0;
       const { context, calls } = makeContext(directory, {
         clean: async () => {
@@ -689,7 +701,9 @@ describe("V2 fresh memory updater", () => {
         },
       })(
         input("later", [
-          ...Array.from({ length: 20 }, (_, index) => message(`u${index}`, "user", `Question-${index}`)),
+          ...Array.from({ length: 20 }, (_, index) =>
+            message(`u${index}`, "user", `Question-${index}${"x".repeat(376)}`),
+          ),
           message("a1", "assistant", "Answer"),
         ]),
       );
@@ -712,7 +726,7 @@ describe("V2 fresh memory updater", () => {
     },
   );
 
-  test("processes oversized entries as lossless continuation fragments", async () => {
+  test("truncates an oversized entry and checkpoints it once using the V1 marker", async () => {
     await writeText(join(directory, ".opencode", "stm.json"), JSON.stringify({ memoryDir, maxUpdateInputLength: 500 }));
     await writeText(checkpointPathFor("oversized", memoryDir), "before\n");
     const checkpointAtGeneration: string[] = [];
@@ -729,44 +743,29 @@ describe("V2 fresh memory updater", () => {
         message("answer", "assistant", "answered"),
       ]),
     );
-    expect(calls.clean.length).toBeGreaterThan(1);
+    expect(calls.clean).toHaveLength(2);
     const prompts = calls.clean.map((call) => (call as { input: { prompt: string } }).input.prompt);
-    expect(prompts.join("\n")).toContain("BEGIN_SENTINEL");
-    expect(prompts.join("\n")).toContain("MIDDLE_SENTINEL");
-    expect(prompts.join("\n")).toContain("END_SENTINEL");
-    const fragmentPrompts = prompts.filter((prompt) =>
-      conversationBody(prompt).includes("OVERSIZED_ENTRY_CONTINUATION"),
-    );
-    const normalPrompts = prompts.filter(
-      (prompt) => !conversationBody(prompt).includes("OVERSIZED_ENTRY_CONTINUATION"),
-    );
-    expect(fragmentPrompts.length).toBeGreaterThan(1);
+    const oversizedPrompt = prompts[0]!;
+    expect(oversizedPrompt).toContain("BEGIN_SENTINEL");
+    expect(oversizedPrompt).toContain("TRUNCATED_FOR_MAX_UPDATE_INPUT_LENGTH");
+    expect(oversizedPrompt).not.toContain("MIDDLE_SENTINEL");
+    expect(oversizedPrompt).not.toContain("END_SENTINEL");
     expect(result).toEqual({
       status: "committed",
       checkpointedChunks: 2,
       checkpointedMessages: 2,
-      persistedPartialFragments: fragmentPrompts.length - 1,
+      persistedPartialFragments: 0,
     });
-    expect(normalPrompts).toHaveLength(1);
-    expect(conversationBody(normalPrompts[0]!)).toContain("answered");
-    expect(conversationBody(normalPrompts[0]!)).not.toContain("OVERSIZED_ENTRY_CONTINUATION");
-    expect(prompts.findIndex((prompt) => prompt === normalPrompts[0])).toBe(fragmentPrompts.length);
-    expect(
-      checkpointAtGeneration.slice(0, fragmentPrompts.length).every((checkpoint) => checkpoint === "before\n"),
-    ).toBe(true);
-    expect(checkpointAtGeneration[fragmentPrompts.length]).toBe("large\n");
+    expect(conversationBody(prompts[1]!)).toContain("answered");
+    expect(checkpointAtGeneration).toEqual(["before\n", "large\n"]);
     expect(await readText(checkpointPathFor("oversized", memoryDir))).toBe("answer\n");
   });
 
-  test("does not advance checkpoint when a later oversized fragment fails", async () => {
+  test("does not advance checkpoint when the generation for a truncated entry fails", async () => {
     await writeText(join(directory, ".opencode", "stm.json"), JSON.stringify({ memoryDir, maxUpdateInputLength: 500 }));
     await writeText(checkpointPathFor("fragment-failure", memoryDir), "before\n");
-    let callsSeen = 0;
     const { context, calls } = makeContext(directory, {
-      clean: async () => {
-        callsSeen += 1;
-        return callsSeen === 1 ? { text: VALID_MEMORY } : { text: "malformed" };
-      },
+      clean: async () => ({ text: "malformed" }),
     });
     const result = await createV2MemoryUpdater(context)(
       input("fragment-failure", [
@@ -775,21 +774,21 @@ describe("V2 fresh memory updater", () => {
         message("answer", "assistant", "answered"),
       ]),
     );
-    expect(calls.clean.length).toBe(3);
+    expect(calls.clean).toHaveLength(2);
     expect(result).toEqual({
       status: "error",
       reason: "operational_failure",
       detail: "missing_memory_header",
       checkpointedChunks: 0,
       checkpointedMessages: 0,
-      persistedPartialFragments: 1,
+      persistedPartialFragments: 0,
     });
-    expect(await readText(memoryPathFor("fragment-failure", memoryDir))).toContain("Keep the instruction.");
+    expect(await readText(memoryPathFor("fragment-failure", memoryDir))).toBe(STANDARD_MEMORY_TEMPLATE);
     expect(await readText(checkpointPathFor("fragment-failure", memoryDir))).toBe("before\n");
   });
 
   test.each(["restored", "failed"] as const)(
-    "reports cumulative partial writes when the final oversized fragment checkpoint fails (%s)",
+    "restores a truncated-entry write when its checkpoint fails (%s)",
     async (rollback) => {
       await writeText(
         join(directory, ".opencode", "stm.json"),
@@ -808,7 +807,7 @@ describe("V2 fresh memory updater", () => {
           if (rollback === "failed") throw new Error("restore failure");
         },
       })(input("final-fragment", [message("before", "user", "old"), message("large", "assistant", "x".repeat(1100))]));
-      expect(calls.clean.length).toBeGreaterThan(1);
+      expect(calls.clean).toHaveLength(1);
       expect(result).toEqual({
         status: "error",
         reason: "operational_failure",
@@ -816,12 +815,12 @@ describe("V2 fresh memory updater", () => {
         rollback,
         checkpointedChunks: 0,
         checkpointedMessages: 0,
-        persistedPartialFragments: calls.clean.length - 1,
+        persistedPartialFragments: 0,
       });
       expect(await readText(checkpointPathFor("final-fragment", memoryDir))).toBe("before\n");
-      expect(await readText(memoryPathFor("final-fragment", memoryDir))).toContain(
-        `fragment-${generation - (rollback === "restored" ? 1 : 0)}`,
-      );
+      if (rollback === "restored")
+        expect(await readText(memoryPathFor("final-fragment", memoryDir))).toBe(STANDARD_MEMORY_TEMPLATE);
+      else expect(await readText(memoryPathFor("final-fragment", memoryDir))).toContain(`fragment-${generation}`);
     },
   );
 
@@ -865,8 +864,13 @@ describe("V2 fresh memory updater", () => {
   });
 
   test("applies the assistant gate to the bounded chunk", async () => {
-    await writeText(join(directory, ".opencode", "stm.json"), JSON.stringify({ memoryDir, maxDeltaMessages: 20 }));
-    const messages = Array.from({ length: 20 }, (_, index) => message(`u${index}`, "user", `user-${index}`));
+    await writeText(
+      join(directory, ".opencode", "stm.json"),
+      JSON.stringify({ memoryDir, maxDeltaMessages: 30, maxUpdateInputLength: 7990 }),
+    );
+    const messages = Array.from({ length: 20 }, (_, index) =>
+      message(`u${index}`, "user", `Question-${index}${"x".repeat(376)}`),
+    );
     messages.push(message("a20", "assistant", "answer outside bounded chunk"));
     const { context, calls } = makeContext(directory);
     expect(await createV2MemoryUpdater(context)(input("bounded-assistant", messages))).toEqual({
@@ -877,6 +881,37 @@ describe("V2 fresh memory updater", () => {
     });
     expect(calls.clean).toHaveLength(2);
     expect(await readText(checkpointPathFor("bounded-assistant", memoryDir))).toBe("a20\n");
+  });
+
+  test("maxDeltaMessages caps the whole recent raw history window before character chunking", async () => {
+    await writeText(
+      join(directory, ".opencode", "stm.json"),
+      JSON.stringify({ memoryDir, maxDeltaMessages: 20, maxUpdateInputLength: 500 }),
+    );
+    await writeText(checkpointPathFor("bounded-window", memoryDir), "m0\n");
+    const messages = Array.from({ length: 26 }, (_, index) =>
+      message(
+        `m${index}`,
+        index === 6 ? "tool" : index % 2 === 0 ? "user" : "assistant",
+        `entry-${index}-${"x".repeat(95)}`,
+      ),
+    );
+    const { context, calls } = makeContext(directory);
+    const result = await createV2MemoryUpdater(context)(input("bounded-window", messages));
+    const prompts = calls.clean.map((call) => (call as { input: { prompt: string } }).input.prompt);
+    const combined = prompts.join("\n");
+
+    expect(result).toMatchObject({
+      status: "committed",
+      checkpointedMessages: 19,
+      persistedPartialFragments: 0,
+    });
+    expect(calls.clean.length).toBeGreaterThan(1);
+    expect(combined).not.toContain("entry-6-");
+    expect(combined).toContain("entry-7-");
+    expect(combined).toContain("entry-25-");
+    expect(combined).not.toContain("entry-5-");
+    expect(await readText(checkpointPathFor("bounded-window", memoryDir))).toBe("m25\n");
   });
 
   test("builds the prompt from only entries after the checkpoint and excludes internal content", async () => {
@@ -917,6 +952,25 @@ describe("V2 fresh memory updater", () => {
     expect(conversation).not.toContain("private reasoning");
     expect(conversation).toContain("Part answer");
     expect(conversation).not.toContain("old memory");
+  });
+
+  test("locates a checkpoint on an excluded durable tool row before filtering visible messages", async () => {
+    await writeText(checkpointPathFor("tool-checkpoint", memoryDir), "tool-anchor\n");
+    const { context, calls } = makeContext(directory);
+    const result = await createV2MemoryUpdater(context)(
+      input("tool-checkpoint", [
+        message("before", "user", "before-tool-sentinel"),
+        message("tool-anchor", "tool", "excluded-tool-sentinel"),
+        message("after-user", "user", "after-tool-question"),
+        message("after-assistant", "assistant", "after-tool-answer"),
+      ]),
+    );
+    const prompt = (calls.clean[0] as { input: { prompt: string } }).input.prompt;
+    expect(result).toMatchObject({ status: "committed", checkpointedMessages: 2 });
+    expect(prompt).toContain("after-tool-question");
+    expect(prompt).toContain("after-tool-answer");
+    expect(prompt).not.toContain("before-tool-sentinel");
+    expect(prompt).not.toContain("excluded-tool-sentinel");
   });
 
   test.each([false, true])("collapseAssistantBursts=%s preserves the configured updater behavior", async (collapse) => {
@@ -1057,7 +1111,7 @@ describe("V2 fresh memory updater", () => {
       ]),
     );
     const captured = calls.clean[0] as { input: Record<string, unknown> };
-    expect(Object.keys(captured.input).sort()).toEqual(["model", "prompt"]);
+    expect(Object.keys(captured.input).sort()).toEqual(["prompt"]);
     expect(String(captured.input.prompt)).not.toContain("SYSTEM_SENTINEL");
     expect(String(captured.input.prompt)).not.toContain("TOOL_SENTINEL");
     expect(String(captured.input.prompt)).not.toContain("INTERNAL_SENTINEL");
@@ -1142,7 +1196,7 @@ describe("V2 fresh memory updater", () => {
     expect(results[2]).toEqual(results[0]!);
   });
 
-  test("explicit mutations wait for an updater, then automatic updates skip manual ownership", async () => {
+  test("explicit writes can run during generation and fence the later updater commit", async () => {
     const generated = deferred<void>();
     const generationGate = deferred<{ text: string }>();
     const mutationGate = deferred<void>();
@@ -1161,19 +1215,19 @@ describe("V2 fresh memory updater", () => {
     let mutationRan = false;
     const mutation = withV2MemoryMutation(directory, "coordinated", async () => {
       mutationRan = true;
-      expect(isV2MemoryUpdateInFlight(directory, "coordinated")).toBe(false);
-      expect(await readText(checkpointPathFor("coordinated", memoryDir))).toBe("a1\n");
+      expect(isV2MemoryUpdateInFlight(directory, "coordinated")).toBe(true);
+      expect(await readText(checkpointPathFor("coordinated", memoryDir))).toBe("");
       mutationEntered.resolve();
       await mutationGate.promise;
     });
-    expect(mutationRan).toBe(false);
-    generationGate.resolve({ text: VALID_MEMORY });
-    await update;
     await mutationEntered.promise;
+    expect(mutationRan).toBe(true);
     await updater(input("coordinated", [message("a2", "assistant", "New answer")]));
     expect(calls.clean).toHaveLength(1);
+    generationGate.resolve({ text: VALID_MEMORY });
     mutationGate.resolve();
     await mutation;
+    expect((await update).status).toBe("committed");
     await updater(input("coordinated", [message("a2", "assistant", "New answer")]));
     expect(calls.clean).toHaveLength(2);
     expect(isV2MemoryUpdateInFlight(directory, "coordinated")).toBe(false);
@@ -1231,7 +1285,7 @@ describe("V2 fresh memory updater", () => {
       checkpointedMessages: 0,
       persistedPartialFragments: 0,
     });
-    expect(calls.clean).toHaveLength(1);
+    expect(calls.clean).toHaveLength(2);
     expect(await readText(logPath(memoryDir))).toContain('"detail":"generation rejected"');
     CLEAN_SUMMARIZER_TIMEOUT.ms = 1;
     const timeoutEntered = deferred<void>();
@@ -1274,7 +1328,7 @@ describe("V2 fresh memory updater", () => {
     expect(calls.clean).toHaveLength(2);
   });
 
-  test("does not retry an arbitrary host error even when its message resembles validation", async () => {
+  test("retries an unclassified clean failure even when its message resembles validation", async () => {
     const { context, calls } = makeContext(directory, {
       clean: async () => {
         throw new Error("missing_memory_header");
@@ -1284,7 +1338,41 @@ describe("V2 fresh memory updater", () => {
       input("unknown-error", [message("u1", "user", "Q"), message("a1", "assistant", "A")]),
     );
     expect(result).toMatchObject({ status: "error", detail: "missing_memory_header" });
+    expect(calls.clean).toHaveLength(2);
+  });
+
+  test("active summarization makes one generation attempt regardless of sideSessionRetries", async () => {
+    await writeText(
+      join(directory, ".opencode", "stm.json"),
+      JSON.stringify({ memoryDir, summarizerMode: "active", sideSessionRetries: 5 }),
+    );
+    const { context, calls } = makeContext(directory, {
+      active: async () => {
+        throw new Error("active generation failed");
+      },
+    });
+    const result = await createV2MemoryUpdater(context)(
+      input("active-single-attempt", [message("u1", "user", "Q"), message("a1", "assistant", "A")]),
+    );
+    expect(result).toMatchObject({ status: "error", detail: "active generation failed" });
+    expect(calls.active).toHaveLength(1);
+    expect(calls.clean).toHaveLength(0);
+  });
+
+  test("the additional required-heading check does not retry or invoke fallback", async () => {
+    await writeText(
+      join(directory, ".opencode", "stm.json"),
+      JSON.stringify({ memoryDir, sideSessionRetries: 3, cleanFallbackToActiveSession: true }),
+    );
+    const { context, calls } = makeContext(directory, {
+      clean: async () => ({ text: VALID_MEMORY.replace("### User Instructions", "### Instructions") }),
+    });
+    const result = await createV2MemoryUpdater(context)(
+      input("missing-required-heading", [message("u1", "user", "Q"), message("a1", "assistant", "A")]),
+    );
+    expect(result).toMatchObject({ status: "error", detail: "missing_heading:User Instructions" });
     expect(calls.clean).toHaveLength(1);
+    expect(calls.active).toHaveLength(0);
   });
 
   test("retries the explicitly typed transient failure", async () => {
@@ -1345,7 +1433,7 @@ describe("V2 fresh memory updater", () => {
     });
   }
 
-  test("retries native V2 provider unavailability within the configured budget", async () => {
+  test("retries unclassified native clean generation errors within the V1 retry budget", async () => {
     for (const recovers of [true, false]) {
       let attempts = 0;
       const { context, calls } = makeContext(directory, {
@@ -1387,19 +1475,39 @@ describe("V2 fresh memory updater", () => {
     expect(calls.active).toHaveLength(1);
   });
 
-  test("does not use active fallback when an explicit memory model is configured", async () => {
+  test("retries empty clean output through the configured budget before one active fallback", async () => {
+    await writeText(
+      join(directory, ".opencode", "stm.json"),
+      JSON.stringify({ memoryDir, sideSessionRetries: 2, cleanFallbackToActiveSession: true }),
+    );
+    const { context, calls } = makeContext(directory, {
+      clean: async () => ({ text: "" }),
+      active: async () => ({ text: VALID_MEMORY }),
+    });
+    const result = await createV2MemoryUpdater(context)(
+      input("empty-clean-fallback", [message("u1", "user", "Q"), message("a1", "assistant", "A")]),
+    );
+    expect(result.status).toBe("committed");
+    expect(calls.clean).toHaveLength(3);
+    expect(calls.active).toHaveLength(1);
+  });
+
+  test("uses the same explicit model in active fallback after retryable clean failure", async () => {
     await writeText(
       join(directory, ".opencode", "stm.json"),
       JSON.stringify({ memoryDir, memoryModel: "provider/model", cleanFallbackToActiveSession: true }),
     );
-    const { context, calls } = makeContext(directory, { clean: async () => ({ text: "malformed" }) });
+    const { context, calls, native } = makeContext(directory, { clean: async () => ({ text: "malformed" }) });
     expect(
       await createV2MemoryUpdater(context)(
         input("fallback-explicit", [message("u1", "user", "Q"), message("a1", "assistant", "A")]),
       ),
-    ).toMatchObject({ status: "error", detail: "missing_memory_header" });
+    ).toMatchObject({ status: "committed" });
     expect(calls.clean).toHaveLength(2);
-    expect(calls.active).toHaveLength(0);
+    expect(calls.active).toHaveLength(1);
+    expect(native.calls.create.map(({ input }) => input.model)).toEqual(
+      Array(3).fill({ providerID: "provider", id: "model" }),
+    );
   });
 
   test("keeps a timed-out generation reserved while releasing mutation ownership", async () => {
@@ -1685,11 +1793,11 @@ describe("V2 fresh memory updater", () => {
         nestedInvocations += 1;
         queuedMutation = withV2MemoryMutation(directory, sessionID, () => {
           mutationRan = true;
-          expect(isV2MemoryUpdateInFlight(directory, sessionID)).toBe(false);
+          expect(isV2MemoryUpdateInFlight(directory, sessionID)).toBe(true);
         });
         const nestedInput = input(sessionID, [message("u1", "user", "Q"), message("a1", "assistant", "A")]);
         await nestedCallback?.(nestedInput);
-        expect(mutationRan).toBe(false);
+        expect(mutationRan).toBe(true);
         nestedSystemLength = nestedInput.system.length;
         nestedCheckpoint = await readText(checkpointPathFor(sessionID, memoryDir));
         return { text: VALID_MEMORY };
@@ -1706,10 +1814,12 @@ describe("V2 fresh memory updater", () => {
     };
     const cleanup = await Root.setup(base.context);
     expect(base.calls.rpc).toHaveLength(1);
-    expect(base.calls.command.map((definition) => definition.name)).toEqual(["stm"]);
+    expect(base.calls.command).toEqual([]);
     expect(hooks.map(({ name }) => name)).toEqual(["context", "compaction", "prompt"]);
     nestedCallback = hooks.find((hook) => hook.name === "context")?.callback;
-    await nestedCallback!(input("recursive", [message("u1", "user", "Q"), message("a1", "assistant", "A")]));
+    await createV2MemoryUpdater(base.context)(
+      input("recursive", [message("msg_u1", "user", "Q"), message("msg_a1", "assistant", "A")]),
+    );
     await queuedMutation;
     expect(mutationRan).toBe(true);
     expect(nestedInvocations).toBe(1);
@@ -1720,11 +1830,11 @@ describe("V2 fresh memory updater", () => {
     expect(nestedCheckpoint).toBe("");
     expect(await readText(checkpointPathFor("recursive", memoryDir))).toBe("msg_a1\n");
     await cleanup?.();
-    expect(base.calls.disposed).toEqual(["rpc", "command"]);
+    expect(base.calls.disposed).toEqual(["rpc"]);
   });
 
   test.each(["active", "clean"] as const)(
-    "combined setup in %s mode commits memory and checkpoint without injection by default",
+    "primary context in %s mode reads saved memory without running a generator",
     async (summarizerMode) => {
       await writeText(join(directory, ".opencode", "stm.json"), JSON.stringify({ memoryDir, summarizerMode }));
       const hooks: Array<{ name: string; callback: (value: unknown) => Promise<void> }> = [];
@@ -1744,22 +1854,17 @@ describe("V2 fresh memory updater", () => {
       const cleanup = await Root.setup(base.context);
       try {
         const sessionID = `setup-default-${summarizerMode}`;
+        await writeText(memoryPathFor(sessionID, memoryDir), VALID_MEMORY);
         const snapshot = input(sessionID, [message("msg_u1", "user", "Q"), message("msg_a1", "assistant", "A")]);
         const existing = { type: "text" as const, text: "preserved system" };
         const system = [existing];
         snapshot.system = system;
         await hooks.find((hook) => hook.name === "context")!.callback(snapshot);
 
-        expect(base.calls.active).toHaveLength(summarizerMode === "active" ? 1 : 0);
-        expect(base.calls.clean).toHaveLength(summarizerMode === "clean" ? 1 : 0);
-        if (summarizerMode === "clean") {
-          const generated = base.calls.clean[0] as { input: Record<string, unknown> };
-          expect(Object.keys(generated.input).sort()).toEqual(["model", "prompt"]);
-          expect(generated.input.model).toBe(snapshot.model);
-          expect(String(generated.input.prompt)).not.toContain(existing.text);
-        }
+        expect(base.calls.active).toHaveLength(0);
+        expect(base.calls.clean).toHaveLength(0);
         expect(await readText(memoryPathFor(sessionID, memoryDir))).toContain("Keep the instruction.");
-        expect(await readText(checkpointPathFor(sessionID, memoryDir))).toBe("msg_a1\n");
+        expect(await readText(checkpointPathFor(sessionID, memoryDir))).toBe("");
         expect(snapshot.system).toBe(system);
         expect(snapshot.system).toEqual([existing]);
         expect(snapshot.system[0]).toBe(existing);
@@ -1769,7 +1874,7 @@ describe("V2 fresh memory updater", () => {
     },
   );
 
-  test("combined setup updates before injection and compaction refreshes from durable history", async () => {
+  test("combined setup reads saved memory and compaction refreshes from durable history", async () => {
     const hooks: Array<{ name: string; callback: (value: unknown) => Promise<void> }> = [];
     await writeText(
       join(directory, ".opencode", "stm.json"),
@@ -1809,21 +1914,25 @@ describe("V2 fresh memory updater", () => {
     session.wait = async () => {
       throw new Error("session.wait must not be called during compaction");
     };
+    const registerGenerationHook = base.context.session.hook;
     (
       base.context.session as unknown as {
         hook: (name: string, callback: (value: unknown) => Promise<void>) => Promise<{ dispose: () => Promise<void> }>;
       }
     ).hook = async (name: string, callback: (value: unknown) => Promise<void>) => {
       hooks.push({ name, callback });
-      return { dispose: async () => undefined };
+      return registerGenerationHook(name as "generate", callback);
     };
     const cleanup = await Root.setup(base.context);
     expect(base.calls.rpc).toHaveLength(1);
-    expect(base.calls.command.map((definition) => definition.name)).toEqual(["stm"]);
+    expect(base.calls.command).toEqual([]);
     expect(hooks.map(({ name }) => name)).toEqual(["context", "compaction", "prompt"]);
     const contextHook = hooks.find((hook) => hook.name === "context")!;
     const compactionHook = hooks.find((hook) => hook.name === "compaction")!;
     const promptHook = hooks.find((hook) => hook.name === "prompt")!;
+    await createV2MemoryUpdater(base.context)(
+      input("setup", [message("msg_u1", "user", "Q"), message("msg_a1", "assistant", "A")]),
+    );
     await promptHook.callback({
       sessionID: "setup",
       messageID: "msg_u1",
@@ -1861,7 +1970,7 @@ describe("V2 fresh memory updater", () => {
     expect(compactionInput.system.some((part) => part.text.includes("[MEMORY_SYSTEM]"))).toBe(true);
     await cleanup?.();
     await cleanup?.();
-    expect(base.calls.disposed).toEqual(["rpc", "command"]);
+    expect(base.calls.disposed).toEqual(["rpc"]);
   });
 
   test("compaction keeps stored memory when durable history is unavailable", async () => {

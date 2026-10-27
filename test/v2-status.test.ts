@@ -5,11 +5,11 @@ import { cp, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { Host } from "@opencode/plugin/host";
-import type { CommandInvocation } from "@opencode/plugin/promise/command";
 import type { ToolContext } from "@opencode/plugin/promise/tool";
-import { createStatusCommand, createStatusDelivery, setupStatusCommand } from "../src/v2-status-command";
+import { createStatusActionHandler, createStatusDelivery, setupStatusCommand } from "../src/v2-status-command";
 import { createV2MemoryActions, createV2MemoryTools, readV2MemoryStatus } from "../src/v2-memory-tools";
 import type { V2MemoryCommandActions } from "../src/v2-memory-command";
+import { parseV2MemoryAction } from "../src/v2-memory-command";
 import { createV2Adapter, type V2Context } from "../src/v2-adapter";
 import { receiveStatus as receiveProductionStatus } from "../src/tui";
 import type { ReaderRuntime } from "../src/v2-text-reader";
@@ -32,17 +32,17 @@ import Root from "../src";
 import { memoryPathFor } from "../src/memory-utils";
 import { STATUS_MAX_CHARS, statusTargets, type StatusOffer, type StatusOutput } from "../src/v2-status-output";
 
-const invocation = (text = "status", sessionID = "session") =>
-  ({ sessionID, prompt: { text }, delivery: "queue" }) as CommandInvocation;
 const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+let nextRequestID = 0;
 const request = (run = async () => "status", mutating = false) => ({
+  requestID: `request_${++nextRequestID}`,
   sessionID: "session",
   title: "STM status",
   run,
   mutating,
 });
 
-test("command and tool use one fresh reader and only authoritative identity", async () => {
+test("menu action and tool use one fresh reader and the server-owned session", async () => {
   const directory = await mkdtemp(join(tmpdir(), "stm-status-test-"));
   try {
     await mkdir(`${directory}/.opencode`);
@@ -51,17 +51,11 @@ test("command and tool use one fresh reader and only authoritative identity", as
     const context = { location: { directory } } as V2Context;
     const [, tool] = createV2MemoryTools(context);
     let text = "";
-    const command = createStatusCommand(createV2MemoryActions(context), async (request) => {
+    const handleAction = createStatusActionHandler(createV2MemoryActions(context), async (request) => {
       expect(request.sessionID).toBe("session");
       text = await request.run();
     });
-    const input = invocation("");
-    Object.defineProperty(input, "delivery", {
-      get: () => {
-        throw new Error("unused delivery read");
-      },
-    });
-    await command.execute(input);
+    await handleAction({ requestID: "fresh_reader", sessionID: "session", action: "status" });
     const toolContext = new Proxy(
       { sessionID: "session" },
       {
@@ -76,29 +70,28 @@ test("command and tool use one fresh reader and only authoritative identity", as
     expect(text).toBe(await readV2MemoryStatus("session", directory));
     expect(text).toContain("enabled: false");
     await writeFile(config, JSON.stringify({ memoryDir: `${directory}/memory`, enabled: true }));
-    await command.execute(invocation(" STATUS "));
+    await handleAction({ requestID: "fresh_reader_2", sessionID: "session", action: "status" });
     expect(text).toContain("enabled: true");
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
 });
 
-test("invalid command identities/arguments/attachments fail before status or delivery", async () => {
+test("invalid action identities and missing destructive confirmation fail before delivery", async () => {
   let deliveries = 0;
-  const command = createStatusCommand({} as V2MemoryCommandActions, async () => {
+  const handleAction = createStatusActionHandler({} as V2MemoryCommandActions, async () => {
     deliveries++;
   });
-  for (const id of ["", " ", "../escape", "a/b"])
-    await expect(command.execute(invocation("status", id))).rejects.toThrow("sessionID");
-  for (const text of ["status extra", "reset confirm true extra", "unknown"]) {
-    await expect(command.execute(invocation(text))).rejects.toThrow("arguments");
-  }
-  for (const key of ["files", "agents", "skills"]) {
-    const input = invocation();
-    (input.prompt as unknown as Record<string, unknown>)[key] = [{}];
-    await expect(command.execute(input)).rejects.toThrow("attachments");
-  }
-  await expect(command.execute({ sessionID: "session" } as CommandInvocation)).rejects.toThrow("prompt");
+  for (const sessionID of ["", " ", "../escape", "a/b"])
+    await expect(handleAction({ requestID: "invalid_session", sessionID, action: "status" })).rejects.toThrow(
+      "sessionID",
+    );
+  await expect(handleAction({ requestID: "unconfirmed", sessionID: "session", action: "reset" })).rejects.toThrow(
+    "Explicit confirmation",
+  );
+  await expect(handleAction({ requestID: "unknown", sessionID: "session", action: "unknown" })).rejects.toThrow(
+    "Unknown STM action",
+  );
   expect(deliveries).toBe(0);
 });
 
@@ -171,8 +164,10 @@ test.each([1, 2])("synchronous offer throw on emission %i cleans admission and i
       return "reset completed";
     },
   } as unknown as V2MemoryCommandActions;
-  const command = createStatusCommand(actions, delivery.deliver);
-  const error = await command.execute(invocation("reset confirm true")).catch((error: Error) => error);
+  const handleAction = createStatusActionHandler(actions, delivery.deliver);
+  const reset = (requestID: string) =>
+    handleAction({ requestID, sessionID: "session", action: "reset", confirm: true });
+  const error = await reset("reset_1").catch((error: Error) => error);
   expect(error).toBeInstanceOf(Error);
   expect((error as Error).message).toContain("offer delivery failed");
   expect((error as Error).message).toContain("No action was run");
@@ -185,7 +180,7 @@ test.each([1, 2])("synchronous offer throw on emission %i cleans admission and i
   await pause(120);
   expect(emissions).toBe(throwOn);
   recovered = true;
-  await command.execute(invocation("reset confirm true"));
+  await reset("reset_2");
   expect(calls).toBe(1);
   expect(emissions).toBe(throwOn + 1);
   await pause(120);
@@ -193,7 +188,7 @@ test.each([1, 2])("synchronous offer throw on emission %i cleans admission and i
   delivery.dispose();
 });
 
-test("show template creation followed by output failure warns mutation may have completed", async () => {
+test("show of a missing file is read-only even when result delivery fails", async () => {
   const directory = await mkdtemp(join(tmpdir(), "stm-show-delivery-test-"));
   try {
     await mkdir(`${directory}/.opencode`);
@@ -209,20 +204,18 @@ test("show template creation followed by output failure warns mutation may have 
         throw new Error("output unavailable");
       }
     }, 100);
-    const command = createStatusCommand(
-      createV2MemoryActions({ location: { directory } } as V2Context),
-      delivery.deliver,
-    );
-    const result = command.execute(invocation("show"));
+    const actions = createV2MemoryActions({ location: { directory } } as V2Context);
+    const request = parseV2MemoryAction({ requestID: "show_missing", sessionID: "session", action: "show" }, actions);
+    const result = delivery.deliver(request);
     const outcome = result.catch((error: Error) => error);
     expect(existsSync(memoryPath)).toBe(false);
     await delivery.claim({ requestID: offer.requestID, sessionID: offer.sessionID, receiverID: "receiver" });
     const error = await outcome;
     expect((error as Error).message).toContain("STM show output delivery failed");
-    expect((error as Error).message).toContain("Mutation may have completed; no rollback is implied");
+    expect((error as Error).message).toContain("Action was started; it will not be rerun");
     expect(output.title).toBe("STM show");
-    expect(output.message.length).toBeGreaterThan(0);
-    expect(await readFile(memoryPath, "utf8")).toBe(output.message);
+    expect(output.message).toBe("No memory file exists yet.");
+    expect(existsSync(memoryPath)).toBe(false);
     delivery.dispose();
   } finally {
     await rm(directory, { recursive: true, force: true });
@@ -259,8 +252,16 @@ test.each(["reset confirm true", "setup confirm true", "update", "show"])(
       ]),
     ) as unknown as V2MemoryCommandActions;
     const delivery = createStatusDelivery(async () => undefined, 5);
-    const command = createStatusCommand(actions, delivery.deliver);
-    await expect(command.execute(invocation(text))).rejects.toThrow("No action was run");
+    const handleAction = createStatusActionHandler(actions, delivery.deliver);
+    const [action, confirmation] = text.split(" ");
+    await expect(
+      handleAction({
+        requestID: `no_receiver_${action}`,
+        sessionID: "session",
+        action,
+        ...(confirmation ? { confirm: true } : {}),
+      }),
+    ).rejects.toThrow("No action was run");
     expect(calls).toBe(0);
   },
 );
@@ -452,7 +453,7 @@ test("connected TUI route rejection gives server uncertain mutation delivery fai
 });
 
 test("server setup failures clean acquired resources and preserve original failure", async () => {
-  for (const stage of ["rpc", "command"]) {
+  for (const stage of ["rpc"]) {
     const disposed: string[] = [];
     const promptDisposals: string[] = [];
     const failure = new Error(stage);
@@ -477,11 +478,6 @@ test("server setup failures clean acquired resources and preserve original failu
           },
         }),
       },
-      command: {
-        transform: async () => {
-          throw failure;
-        },
-      },
       rpc: {
         register: async () => {
           if (stage === "rpc") throw failure;
@@ -501,41 +497,25 @@ test("server setup failures clean acquired resources and preserve original failu
       },
     } as unknown as V2Context;
     await expect(Root.setup(context)).rejects.toBe(failure);
-    expect(disposed).toEqual([
-      ...(stage === "command" ? ["rpc"] : []),
-      ...Array(8).fill("tool"),
-      "compaction",
-      "context",
-    ]);
+    expect(disposed).toEqual([...Array(8).fill("tool"), "compaction", "context"]);
     expect(promptDisposals).toEqual(["prompt"]);
   }
 });
 
-test("registered command/RPC disposal aborts pending output and is idempotent", async () => {
-  let command: ReturnType<typeof createStatusCommand> | undefined;
+test("registered action RPC disposal aborts pending admission and is idempotent", async () => {
   let rpcDisposals = 0;
-  let commandDisposals = 0;
+  let methods: Record<string, (input: unknown) => Promise<unknown>> = {};
   const context = {
     location: { directory: "/tmp", project: { id: "p", directory: "/tmp", canonical: "/tmp" } },
     options: {},
+    session: { get: async ({ sessionID }: { sessionID: string }) => ({ id: sessionID, title: "user session" }) },
     rpc: {
-      register: async () => ({
-        events: { emit: async () => undefined },
-        dispose: async () => {
-          rpcDisposals++;
-        },
-      }),
-    },
-    command: {
-      transform: async (callback: (editor: unknown) => void) => {
-        callback({
-          add: (value: typeof command) => {
-            command = value;
-          },
-        });
+      register: async (_definition: unknown, registered: Record<string, (input: unknown) => Promise<unknown>>) => {
+        methods = registered;
         return {
+          events: { emit: async () => undefined },
           dispose: async () => {
-            commandDisposals++;
+            rpcDisposals++;
           },
         };
       },
@@ -543,7 +523,7 @@ test("registered command/RPC disposal aborts pending output and is idempotent", 
   } as unknown as V2Context;
   const adapter = createV2Adapter(context);
   const off = await setupStatusCommand(context, adapter.runtime);
-  const result = command!.execute(invocation());
+  const result = methods.action!({ requestID: "dispose_pending", sessionID: "session", action: "status" });
   const outcome = result.catch((error: Error) => error);
   await pause(20);
   await off();
@@ -552,7 +532,6 @@ test("registered command/RPC disposal aborts pending output and is idempotent", 
   await adapter.dispose();
   expect((await outcome)?.message).toContain("disposed");
   expect(rpcDisposals).toBe(1);
-  expect(commandDisposals).toBe(1);
 });
 
 function tuiContext(failSecond = false) {
@@ -562,12 +541,17 @@ function tuiContext(failSecond = false) {
   const dialogs: any[] = [];
   let dismiss!: () => void;
   let cleared = 0;
+  let menuCommands: any[] = [];
   const location = { directory: "/project", workspaceID: "workspace" };
   let route = { type: "session", sessionID: "session" };
   const context = {
     location,
     renderer: { height: 45, width: 140, on() {}, off() {} },
-    keymap: { layer() {} },
+    keymap: {
+      layer(input: () => { commands: any[] }) {
+        menuCommands = input().commands;
+      },
+    },
     client: {
       rpc: () => ({
         events: {
@@ -588,11 +572,20 @@ function tuiContext(failSecond = false) {
           return { accepted: true };
         },
         cancel: async () => ({ accepted: true }),
+        action: async (input: unknown) => {
+          calls.push({ method: "action", input });
+          return { accepted: true };
+        },
       }),
     },
     ui: {
       router: { current: () => route },
       dialog: {
+        select: async () => undefined,
+        confirm: async () => true,
+        alert: async (input: unknown) => {
+          dialogs.push(input);
+        },
         show: (render: () => any, onClose: () => void) => {
           const view = render();
           dialogs.push({
@@ -614,6 +607,9 @@ function tuiContext(failSecond = false) {
     removed,
     calls,
     dialogs,
+    get menuCommands() {
+      return menuCommands;
+    },
     location,
     setRoute: (value: typeof route) => {
       route = value;

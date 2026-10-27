@@ -40,6 +40,98 @@ describe("V2 reminder cadence", () => {
     }
   });
 
+  test("decides prompt-time cadence by canonical message ID before durable admission", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "v2-cadence-prompt-"));
+    try {
+      const cadence = createV2ReminderCadence(context(directory), directory);
+      cadence.record({ sessionID: "session", messageID: "prompt-1" });
+      expect(await cadence.shouldInjectPrompt({ sessionID: "session", messageID: "prompt-1" }, 2, directory)).toBe(
+        false,
+      );
+      expect(await cadence.shouldInjectPrompt({ sessionID: "session", messageID: "prompt-1" }, 2, directory)).toBe(
+        false,
+      );
+      cadence.record({ sessionID: "session", messageID: "prompt-2" });
+      expect(await cadence.shouldInjectPrompt({ sessionID: "session", messageID: "prompt-2" }, 2, directory)).toBe(
+        true,
+      );
+      expect(await cadence.shouldInjectPrompt({ sessionID: "session", messageID: "prompt-2" }, 2, directory)).toBe(
+        true,
+      );
+      cadence.dispose();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("treats a verified empty reset anchor as a new cadence boundary", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "v2-cadence-empty-boundary-"));
+    try {
+      const cadence = createV2ReminderCadence(context(directory), directory);
+      cadence.record({ sessionID: "session", messageID: "before-reset" });
+      expect(await cadence.shouldInjectPrompt({ sessionID: "session", messageID: "before-reset" }, 2, directory)).toBe(
+        false,
+      );
+      await writeText(resetBoundaryPathFor("session", directory), JSON.stringify({ version: 1, anchorID: null }));
+      cadence.record({ sessionID: "session", messageID: "after-reset-1" });
+      expect(await cadence.shouldInjectPrompt({ sessionID: "session", messageID: "after-reset-1" }, 2, directory)).toBe(
+        false,
+      );
+      cadence.record({ sessionID: "session", messageID: "after-reset-2" });
+      expect(await cadence.shouldInjectPrompt({ sessionID: "session", messageID: "after-reset-2" }, 2, directory)).toBe(
+        true,
+      );
+      await writeText(resetBoundaryPathFor("session", directory), "not-json");
+      cadence.record({ sessionID: "session", messageID: "invalid-boundary" });
+      expect(
+        await cadence.shouldInjectPrompt({ sessionID: "session", messageID: "invalid-boundary" }, 1, directory),
+      ).toBe(false);
+      cadence.dispose();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("resets cadence on transport changes while preserving the current canonical candidate", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "v2-cadence-transport-"));
+    try {
+      const cadence = createV2ReminderCadence(context(directory), directory);
+      cadence.selectTransport("session", "message");
+      cadence.record({ sessionID: "session", messageID: "message-1" });
+      expect(await cadence.shouldInjectPrompt({ sessionID: "session", messageID: "message-1" }, 2, directory)).toBe(
+        false,
+      );
+
+      cadence.record({ sessionID: "session", messageID: "system-1" });
+      cadence.selectTransport("session", "system", [{ id: "system-1", role: "user" }]);
+      expect(await cadence.shouldInject(input([{ id: "system-1", role: "user" }]), 2, directory)).toBe(false);
+      cadence.record({ sessionID: "session", messageID: "system-2" });
+      expect(
+        await cadence.shouldInject(
+          input([
+            { id: "system-1", role: "user" },
+            { id: "system-2", role: "user" },
+          ]),
+          2,
+          directory,
+        ),
+      ).toBe(true);
+
+      cadence.record({ sessionID: "session", messageID: "message-2" });
+      cadence.selectTransport("session", "message", [{ id: "message-2", role: "user" }]);
+      expect(await cadence.shouldInjectPrompt({ sessionID: "session", messageID: "message-2" }, 2, directory)).toBe(
+        false,
+      );
+      cadence.record({ sessionID: "session", messageID: "message-3" });
+      expect(await cadence.shouldInjectPrompt({ sessionID: "session", messageID: "message-3" }, 2, directory)).toBe(
+        true,
+      );
+      cadence.dispose();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   test("does not count unadmitted, tool, or duplicate-text messages", async () => {
     const directory = await mkdtemp(join(tmpdir(), "v2-cadence-"));
     try {
@@ -83,6 +175,9 @@ describe("V2 reminder cadence", () => {
       ];
       expect(await cadence.shouldInject(input(messages), 1, directory)).toBe(true);
       expect(await cadence.shouldInject(input(messages), 1, directory)).toBe(true);
+      expect(await cadence.shouldInjectPrompt({ sessionID: "session", messageID: "msg_old" }, 1, directory)).toBe(
+        false,
+      );
       cadence.dispose();
       cadence.record({ sessionID: "session", messageID: "after-dispose" });
       expect(await cadence.shouldInject(input([{ id: "after-dispose", role: "user" }]), 1, directory)).toBe(false);

@@ -1,7 +1,7 @@
-import type { CommandDefinition } from "@opencode/plugin/promise/command";
 import type { V2Context, V2RuntimeContract } from "./v2-adapter";
 import { createV2MemoryActions } from "./v2-memory-tools";
-import { parseV2MemoryCommand, type V2MemoryCommandActions } from "./v2-memory-command";
+import { parseV2MemoryAction, type V2MemoryActionRequest, type V2MemoryCommandActions } from "./v2-memory-command";
+import { SIDE_SESSION_TITLE } from "./memory-utils";
 import {
   isStatusReceiver,
   STATUS_DELIVERY_MS,
@@ -13,7 +13,7 @@ import {
   type StatusReceiver,
 } from "./v2-status-output";
 
-type Request = ReturnType<typeof parseV2MemoryCommand>;
+type Request = V2MemoryActionRequest;
 
 export function createStatusDelivery(
   emit: (name: "offer" | "output" | "release", data: StatusOffer | StatusOutput | StatusReceiver) => Promise<void>,
@@ -42,7 +42,7 @@ export function createStatusDelivery(
     async deliver(request: Request): Promise<void> {
       if (disposed || pending || activeAction) throw new Error("STM command delivery disposed or busy; retry later.");
       const offer = {
-        requestID: crypto.randomUUID(),
+        requestID: request.requestID,
         sessionID: request.sessionID,
         expiresAt: Date.now() + deadlineMs,
       };
@@ -200,43 +200,76 @@ export function createStatusDelivery(
   };
 }
 
-export function createStatusCommand(actions: V2MemoryCommandActions, deliver: (request: Request) => Promise<void>) {
-  return {
-    name: "stm",
-    description:
-      "Short-term memory: status (default), show, logs, settings, update, setup confirm true, reset confirm true.",
-    async execute(input) {
-      await deliver(parseV2MemoryCommand(input, actions));
-    },
-  } satisfies CommandDefinition;
+export function createStatusActionHandler(
+  actions: V2MemoryCommandActions,
+  deliver: (request: Request) => Promise<void>,
+  authorizeSession: (sessionID: string) => Promise<void> = async () => undefined,
+  lifetimeSignal?: AbortSignal,
+) {
+  const seen = new Map<string, number>();
+  const retentionMs = STATUS_ACTION_MS + 2 * STATUS_DELIVERY_MS;
+  return async (input: unknown) => {
+    const request = parseV2MemoryAction(input, actions);
+    const now = Date.now();
+    for (const [requestID, time] of seen) if (now - time > retentionMs) seen.delete(requestID);
+    if (seen.has(request.requestID)) return { accepted: false };
+    if (seen.size >= 256) throw new Error("STM action receiver is busy; retry after a request expires.");
+    seen.set(request.requestID, now);
+    lifetimeSignal?.throwIfAborted();
+    await authorizeSession(request.sessionID);
+    lifetimeSignal?.throwIfAborted();
+    await deliver(request);
+    return { accepted: true };
+  };
 }
 
-export async function setupStatusCommand(context: V2Context, runtime: V2RuntimeContract, lifetimeSignal?: AbortSignal) {
+export async function setupStatusCommand(
+  context: V2Context,
+  _runtime: V2RuntimeContract,
+  lifetimeSignal?: AbortSignal,
+) {
   const lifetime = new AbortController();
   const signal = lifetimeSignal ? AbortSignal.any([lifetimeSignal, lifetime.signal]) : lifetime.signal;
-  const delivery = createStatusDelivery((name, data) => registration.events.emit(name, data));
-  const registration = await context.rpc.register(statusOutputDefinition, {
-    claim: (input) => delivery.claim(input),
-    acknowledge: async (input) => delivery.acknowledge(input),
-    cancel: async (input) => delivery.cancel(input),
+  let emitEvent:
+    | ((name: "offer" | "output" | "release", data: StatusOffer | StatusOutput | StatusReceiver) => Promise<void>)
+    | undefined;
+  const delivery = createStatusDelivery((name, data) => {
+    if (!emitEvent) throw new Error("STM action RPC is not registered.");
+    return emitEvent(name, data);
   });
   try {
-    await runtime.registerCommand({
-      name: "stm",
-      definition: createStatusCommand(createV2MemoryActions(context, signal), delivery.deliver),
+    const actions = createV2MemoryActions(context, signal);
+    const handleAction = createStatusActionHandler(
+      actions,
+      delivery.deliver,
+      async (sessionID) => {
+        const session = await context.session.get({ sessionID });
+        if (!session || session.id !== sessionID || session.title === SIDE_SESSION_TITLE) {
+          throw new Error("The selected session does not match this project or is an internal memory session.");
+        }
+      },
+      signal,
+    );
+    const registration = await context.rpc.register(statusOutputDefinition, {
+      action: (input) => handleAction(input),
+      claim: (input) => delivery.claim(input),
+      acknowledge: async (input) => delivery.acknowledge(input),
+      cancel: async (input) => delivery.cancel(input),
     });
+    emitEvent = async (name, data) => {
+      if (name === "offer") return await registration.events.emit("offer", data as StatusOffer);
+      if (name === "output") return await registration.events.emit("output", data as StatusOutput);
+      return await registration.events.emit("release", data as StatusReceiver);
+    };
+    let disposal: Promise<void> | undefined;
+    return () => {
+      lifetime.abort();
+      delivery.dispose();
+      return (disposal ??= registration.dispose());
+    };
   } catch (error) {
     lifetime.abort();
     delivery.dispose();
-    try {
-      await registration.dispose();
-    } catch {}
     throw error;
   }
-  let disposal: Promise<void> | undefined;
-  return () => {
-    lifetime.abort();
-    delivery.dispose();
-    return (disposal ??= registration.dispose());
-  };
 }

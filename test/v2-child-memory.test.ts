@@ -3,7 +3,13 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import type { V2Context } from "../src/v2-adapter";
-import { classifyV2Session, readTaskChildMemory, taskChildUpdaterSkip } from "../src/v2-child-memory";
+import {
+  captureV2ChildMemoryAtCreation,
+  classifyV2Session,
+  markV2ChildDcpInjectionPending,
+  readTaskChildMemory,
+  taskChildUpdaterSkip,
+} from "../src/v2-child-memory";
 import { createV2ContextInjection } from "../src/v2-context-injection";
 import { createV2MemoryActions } from "../src/v2-memory-tools";
 import {
@@ -24,7 +30,7 @@ const config = (memoryDir: string, maxMemoryLength = 10_000, injectInSubagents =
 function context(directory: string, record: Record<string, unknown>): V2Context {
   return {
     location: { directory, project: { id: "project", directory, canonical: directory } },
-    session: { get: async () => record },
+    session: { get: async () => record, context: async () => [{ id: "msg_anchor" }] },
   } as unknown as V2Context;
 }
 
@@ -35,14 +41,20 @@ describe("V2 task-child memory", () => {
   beforeEach(async () => {
     directory = await mkdtemp(join(tmpdir(), "stm-v2-child-memory-"));
     memoryDir = join(directory, "memory");
+    await writeText(join(directory, ".opencode", "stm.json"), JSON.stringify({ enabled: true, memoryDir }));
   });
 
   afterEach(async () => {
     await rm(directory, { recursive: true, force: true });
   });
 
+  async function captureChild(childID: string, parentID: string, host = context(directory, { id: childID, parentID })) {
+    return captureV2ChildMemoryAtCreation(host, { sessionID: childID, parentID }, directory);
+  }
+
   test("inherits task children but leaves omitted-parent primaries and explicit forks primary", async () => {
     await writeText(memoryPathFor("parent", memoryDir), MEMORY);
+    await captureChild("child", "parent");
     const child = await readTaskChildMemory(
       context(directory, { id: "child", parentID: "parent" }),
       { sessionID: "child" },
@@ -87,6 +99,7 @@ describe("V2 task-child memory", () => {
 
   test("freezes the first parent snapshot across updates and reloads", async () => {
     await writeText(memoryPathFor("parent", memoryDir), MEMORY);
+    await captureChild("child", "parent");
     const first = await readTaskChildMemory(
       context(directory, { id: "child", parentID: "parent" }),
       { sessionID: "child" },
@@ -144,24 +157,30 @@ describe("V2 task-child memory", () => {
 
   test("rejects a header buried in a parent prefix and oversized files without recapture", async () => {
     await writeText(memoryPathFor("parent", memoryDir), `untrusted prefix\n${MEMORY}`);
+    expect(await captureChild("buried", "parent")).toEqual({ status: "invalid-state" });
     expect(
       await readTaskChildMemory(
-        context(directory, { id: "child", parentID: "parent" }),
-        { sessionID: "child" },
+        context(directory, { id: "buried", parentID: "parent" }),
+        { sessionID: "buried" },
         config(memoryDir),
         directory,
       ),
-    ).toEqual({ status: "invalid-state" });
+    ).toEqual({ status: "missing-snapshot" });
 
     await writeText(memoryPathFor("parent", memoryDir), `${MEMORY}${"x".repeat(10_000)}`);
+    await writeText(
+      join(directory, ".opencode", "stm.json"),
+      JSON.stringify({ enabled: true, memoryDir, maxMemoryLength: 40 }),
+    );
+    expect(await captureChild("oversized-parent", "parent")).toEqual({ status: "invalid-state" });
     expect(
       await readTaskChildMemory(
-        context(directory, { id: "child", parentID: "parent" }),
-        { sessionID: "child" },
+        context(directory, { id: "oversized-parent", parentID: "parent" }),
+        { sessionID: "oversized-parent" },
         config(memoryDir, 40),
         directory,
       ),
-    ).toEqual({ status: "invalid-state" });
+    ).toEqual({ status: "missing-snapshot" });
 
     await writeText(join(memoryDir, "task-children", "child.json"), `${"x".repeat(5_000)}`);
     expect(
@@ -177,6 +196,7 @@ describe("V2 task-child memory", () => {
   test("accepts the canonical versioned memory prefix", async () => {
     const versioned = `${MEMORY_FORMAT_VERSION}\n${MEMORY}`;
     await writeText(memoryPathFor("parent", memoryDir), versioned);
+    await captureChild("child", "parent");
     const result = await readTaskChildMemory(
       context(directory, { id: "child", parentID: "parent" }),
       { sessionID: "child" },
@@ -189,6 +209,7 @@ describe("V2 task-child memory", () => {
   test("reset boundary permanently suppresses child injection", async () => {
     await writeText(memoryPathFor("parent", memoryDir), MEMORY);
     await writeText(resetBoundaryPathFor("child", memoryDir), '{"version":1,"anchorID":"a1"}\n');
+    expect(await captureChild("child", "parent")).toEqual({ status: "suppressed" });
     expect(
       await readTaskChildMemory(
         context(directory, { id: "child", parentID: "parent" }),
@@ -200,7 +221,13 @@ describe("V2 task-child memory", () => {
   });
 
   test("bounds persisted snapshots", async () => {
-    await writeText(memoryPathFor("parent", memoryDir), MEMORY);
+    const longMemory = `${MEMORY}\n${"x".repeat(500)}`;
+    await writeText(memoryPathFor("parent", memoryDir), longMemory);
+    await writeText(
+      join(directory, ".opencode", "stm.json"),
+      JSON.stringify({ enabled: true, memoryDir, maxMemoryLength: 200 }),
+    );
+    await captureChild("child", "parent");
     await readTaskChildMemory(
       context(directory, { id: "child", parentID: "parent" }),
       { sessionID: "child" },
@@ -208,20 +235,37 @@ describe("V2 task-child memory", () => {
       directory,
     );
     const saved = await readFile(join(memoryDir, "task-children", "child.json"), "utf8");
-    expect(JSON.parse(saved).memory.length).toBeLessThanOrEqual(40);
+    expect(JSON.parse(saved).memory.length).toBeLessThanOrEqual(200);
   });
 
-  test("uses the same frozen snapshot for fresh context arrays and honors injectInSubagents false", async () => {
+  test("delivers frozen child memory at startup, once after DCP, and on every compaction", async () => {
     await writeText(memoryPathFor("parent", memoryDir), MEMORY);
     const childContext = context(directory, { id: "child", parentID: "parent" });
+    await captureChild("child", "parent", childContext);
     const injection = createV2ContextInjection(childContext, directory);
     const first = { sessionID: "child", system: [] } as never;
     await injection(first);
     await writeText(memoryPathFor("parent", memoryDir), `${MEMORY}\nnew parent content`);
     const second = { sessionID: "child", system: [] } as never;
     await injection(second);
-    expect(second.system).toEqual(first.system);
+    expect(second.system).toEqual([]);
+    markV2ChildDcpInjectionPending(directory, "child");
+    const afterDcp = { sessionID: "child", system: [] } as never;
+    await injection(afterDcp);
+    expect(afterDcp.system).toEqual(first.system);
+    const afterDcpAgain = { sessionID: "child", system: [] } as never;
+    await injection(afterDcpAgain);
+    expect(afterDcpAgain.system).toEqual([]);
+    const compaction = createV2ContextInjection(childContext, directory, undefined, undefined, undefined, "compaction");
+    const compacted = { sessionID: "child", system: [] } as never;
+    await compaction(compacted);
+    expect(compacted.system).toEqual(first.system);
 
+    await writeText(
+      join(directory, ".opencode", "stm.json"),
+      JSON.stringify({ enabled: true, memoryDir, injectInSubagents: false }),
+    );
+    expect(await captureChild("disabled-child", "parent")).toEqual({ status: "disabled" });
     const disabled = await readTaskChildMemory(
       context(directory, { id: "disabled-child", parentID: "parent" }),
       { sessionID: "disabled-child" },

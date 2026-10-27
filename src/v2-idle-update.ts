@@ -1,5 +1,10 @@
 import type { V2Context } from "./v2-adapter";
-import { classifyV2Session } from "./v2-child-memory";
+import {
+  captureV2ChildMemoryAtCreation,
+  classifyV2Session,
+  forgetV2ChildSession,
+  resetV2ChildMemoryRuntime,
+} from "./v2-child-memory";
 import { readV2CurrentHistory } from "./v2-current-history";
 import { isV2MemoryUpdateInFlight } from "./v2-memory-update";
 import type { createV2MemoryUpdater } from "./v2-memory-update";
@@ -34,12 +39,30 @@ function sessionIDOf(event: EventRecord): string | undefined {
   return typeof value === "string" && value.trim() ? value : undefined;
 }
 
+function locationMatches(context: V2Context, event: EventRecord): boolean {
+  if (event.location === undefined) return true;
+  const location = record(event.location);
+  return Boolean(
+    location &&
+    location.directory === context.location.directory &&
+    location.workspaceID === context.location.workspaceID,
+  );
+}
+
 function eventType(event: EventRecord): string {
   return typeof event.type === "string" ? event.type : "";
 }
 
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error ?? "");
+}
+
+function safeID(value: string): boolean {
+  try {
+    return safeSessionID(value) === value;
+  } catch {
+    return false;
+  }
 }
 
 function bounded<T>(operation: (signal: AbortSignal) => Promise<T>, lifetimeSignal: AbortSignal, deadline: number) {
@@ -87,6 +110,7 @@ export function createV2IdleUpdateScheduler(
   const epochs = new Map<string, number>();
   const tasks = new Set<Promise<void>>();
   const disposed = new AbortController();
+  const childCaptureSignal = AbortSignal.any([lifetimeSignal, disposed.signal]);
   let iterator: AsyncIterator<unknown> | undefined;
 
   const valid = (state: SessionState, epoch: number): boolean =>
@@ -228,29 +252,65 @@ export function createV2IdleUpdateScheduler(
         const type = eventType(event);
         const sessionID = sessionIDOf(event);
         if (!sessionID) continue;
-        if (type === "session.deleted") {
-          if (safeSessionID(sessionID) !== sessionID) continue;
-          // Plugin subscription is already location-scoped; the public event location is optional.
-          if (event.location !== undefined) {
-            const location = record(event.location);
-            if (
-              !location ||
-              location.directory !== context.location.directory ||
-              location.workspaceID !== context.location.workspaceID
-            )
-              continue;
+        if (type === "session.created") {
+          if (!locationMatches(context, event) || !safeID(sessionID)) continue;
+          const data = record(event.data);
+          const parentID = data?.parentID;
+          if (typeof parentID !== "string" || !parentID.trim() || !safeID(parentID)) continue;
+          try {
+            const capture = captureV2ChildMemoryAtCreation(
+              context,
+              { sessionID, parentID, metadata: data?.metadata },
+              directory,
+              {},
+              childCaptureSignal,
+            );
+            track(
+              capture.then(async (result) => {
+                if (result.status === "invalid-state") {
+                  try {
+                    await logEvent(await readConfig(undefined, directory), "v2_child_snapshot_capture_failed", {
+                      sessionID,
+                      parentID,
+                    });
+                  } catch {}
+                }
+              }),
+            );
+          } catch (error: unknown) {
+            track(
+              (async () => {
+                try {
+                  await logEvent(await readConfig(undefined, directory), "v2_child_snapshot_capture_failed", {
+                    sessionID,
+                    parentID,
+                    error: errorText(error),
+                  });
+                } catch {}
+              })(),
+            );
           }
+          continue;
+        }
+        // Fork emits `session.created(parentID)` before this confirmation event.
+        // A forked event alone is too late to define the creation-time snapshot.
+        if (type === "session.forked") continue;
+        if (type === "session.deleted") {
+          if (!locationMatches(context, event) || !safeID(sessionID)) continue;
+          // Plugin subscription is already location-scoped; the public event location is optional.
           invalidate(sessionID);
           track(
-            deleteV2SessionMemory(directory, sessionID).catch(async (error) => {
-              try {
-                await logEvent(await readConfig(undefined, directory), "v2_session_deletion_error", {
-                  error: errorText(error),
-                });
-              } catch {
-                // Configuration/logging failure is intentionally not redirected to a global default log.
-              }
-            }),
+            deleteV2SessionMemory(directory, sessionID)
+              .catch(async (error) => {
+                try {
+                  await logEvent(await readConfig(undefined, directory), "v2_session_deletion_error", {
+                    error: errorText(error),
+                  });
+                } catch {
+                  // Configuration/logging failure is intentionally not redirected to a global default log.
+                }
+              })
+              .finally(() => forgetV2ChildSession(directory, sessionID)),
           );
           continue;
         }
@@ -309,6 +369,7 @@ export function createV2IdleUpdateScheduler(
         returned,
         new Promise<void>((resolve) => setTimeout(resolve, DISPOSE_DEADLINE_MS)),
       ]);
+      resetV2ChildMemoryRuntime(directory);
     },
   };
 }

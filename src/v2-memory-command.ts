@@ -1,59 +1,77 @@
-import type { CommandInvocation } from "@opencode/plugin/promise/command";
 import { safeSessionID } from "./memory-utils";
 import type { createV2MemoryActions } from "./v2-memory-tools";
 
 export type V2MemoryCommandActions = ReturnType<typeof createV2MemoryActions>;
-const USAGE = "Use: /stm [status|show|logs|settings|update|setup confirm true|reset confirm true].";
+export const V2_MEMORY_ACTIONS = ["show", "status", "logs", "update", "reset", "settings", "setup"] as const;
+export type V2MemoryAction = (typeof V2_MEMORY_ACTIONS)[number];
 
-// Parsing never invokes an action: even reads must wait for receiver admission.
-export function parseV2MemoryCommand(
-  input: CommandInvocation,
-  actions: V2MemoryCommandActions,
-): {
-  sessionID: string;
-  title: string;
-  mutating: boolean;
-  run: () => Promise<string>;
-} {
-  const sessionID = input.sessionID;
+export type V2MemoryActionInput = {
+  readonly requestID: string;
+  readonly sessionID: string;
+  readonly action: V2MemoryAction;
+  readonly confirm?: boolean;
+};
+
+export type V2MemoryActionRequest = {
+  readonly requestID: string;
+  readonly sessionID: string;
+  readonly title: string;
+  readonly mutating: boolean;
+  readonly run: () => Promise<string>;
+};
+
+function record(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === "object" ? (value as Record<string, unknown>) : undefined;
+}
+
+function isAction(value: unknown): value is V2MemoryAction {
+  return typeof value === "string" && (V2_MEMORY_ACTIONS as readonly string[]).includes(value);
+}
+
+/** Validate a TUI menu request before it can reserve a receiver or run a server action. */
+export function parseV2MemoryAction(input: unknown, actions: V2MemoryCommandActions): V2MemoryActionRequest {
+  const value = record(input);
+  if (!value) throw new Error("Invalid STM action request. No action was run.");
+
+  const { requestID, sessionID, action, confirm } = value;
+  if (typeof requestID !== "string" || !/^[a-zA-Z0-9_-]{1,128}$/.test(requestID)) {
+    throw new Error("STM action requestID must be nonempty and path-safe.");
+  }
   if (typeof sessionID !== "string" || !sessionID.trim() || safeSessionID(sessionID) !== sessionID) {
-    throw new Error("STM command sessionID must be nonempty and path-safe.");
+    throw new Error("STM action sessionID must be nonempty and path-safe.");
   }
-  if (!input.prompt || typeof input.prompt.text !== "string") throw new Error(`Invalid STM prompt. ${USAGE}`);
-  if (input.prompt.files?.length || input.prompt.agents?.length || input.prompt.skills?.length) {
-    throw new Error(`STM commands do not accept attachments. ${USAGE}`);
+  if (!isAction(action)) throw new Error("Unknown STM action. No action was run.");
+  if (confirm !== undefined && typeof confirm !== "boolean") {
+    throw new Error("STM action confirmation must be a boolean.");
   }
-  const tokens = input.prompt.text.trim().split(/\s+/);
-  const action = (tokens[0] || "status").toLowerCase();
-  if (action === "setup" || action === "reset") {
-    if (tokens.length === 1 || (tokens.length === 3 && tokens[1] === "confirm" && tokens[2] !== "true")) {
-      return {
-        sessionID,
-        title: `STM ${action}`,
-        mutating: false,
-        run: async () => `Refused: ${action} not run. Use /stm ${action} confirm true with exact literal confirmation.`,
-      };
+  if ((action === "reset" || action === "setup") && confirm !== true) {
+    throw new Error(`Explicit confirmation is required for STM ${action}. No action was run.`);
+  }
+
+  const run = async () => {
+    switch (action) {
+      case "show":
+        return await actions.show(sessionID);
+      case "status":
+        return await actions.status(sessionID);
+      case "logs":
+        return await actions.logs(sessionID);
+      case "update":
+        return await actions.update(sessionID);
+      case "reset":
+        return await actions.reset(sessionID, { confirm: true });
+      case "settings":
+        return await actions.settings(sessionID);
+      case "setup":
+        return await actions.setup(sessionID, { confirm: true });
     }
-    if (tokens.length !== 3 || tokens[1] !== "confirm" || tokens[2] !== "true") {
-      throw new Error(`Unexpected confirmation arguments. ${USAGE}`);
-    }
-    return {
-      sessionID,
-      title: `STM ${action}`,
-      mutating: true,
-      run: () => actions[action](sessionID, { confirm: true }),
-    };
-  }
-  if (
-    tokens.length !== 1 ||
-    !(action === "status" || action === "show" || action === "logs" || action === "settings" || action === "update")
-  ) {
-    throw new Error(`Unknown action or unexpected arguments. ${USAGE}`);
-  }
+  };
+
   return {
+    requestID,
     sessionID,
     title: `STM ${action}`,
-    mutating: action === "update" || action === "show",
-    run: () => actions[action](sessionID),
+    mutating: action === "update" || action === "reset" || action === "setup",
+    run,
   };
 }

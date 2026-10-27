@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createRequire } from "node:module";
@@ -9,10 +9,15 @@ import type { V2Context } from "../src/v2-adapter";
 import { createV2IdleUpdateScheduler } from "../src/v2-idle-update";
 import { tryAcquireV2MemoryUpdate } from "../src/v2-mutation-coordination";
 import { createV2MemoryUpdater } from "../src/v2-memory-update";
-import { memoryPathFor } from "../src/memory-utils";
+import { STANDARD_MEMORY_TEMPLATE, memoryPathFor } from "../src/memory-utils";
 import { deferred } from "./async-helpers";
+import { installV2NativeGenerationHarness } from "./v2-native-generation-harness";
 
-type Event = { type: string; data: { sessionID: string; reason?: string } };
+type Event = {
+  type: string;
+  data: { sessionID: string; reason?: string; parentID?: string; metadata?: unknown };
+  location?: { directory: string; workspaceID?: string };
+};
 
 const { Schema } = createRequire(import.meta.resolve("@opencode/schema/session"))("effect");
 const directories: string[] = [];
@@ -21,10 +26,10 @@ afterEach(async () => {
   await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })));
 });
 
-async function eventually(predicate: () => boolean, timeout = 1_000): Promise<void> {
+async function eventually(predicate: () => boolean | Promise<boolean>, timeout = 1_000): Promise<void> {
   const deadline = Date.now() + timeout;
-  while (!predicate() && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 5));
-  expect(predicate()).toBe(true);
+  while (!(await predicate()) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 5));
+  expect(await predicate()).toBe(true);
 }
 
 function eventSource() {
@@ -107,6 +112,39 @@ async function setup() {
 }
 
 describe("V2 idle update scheduler", () => {
+  test("captures child snapshots at observed session.created time", async () => {
+    const directory = await setup();
+    const source = eventSource();
+    const memoryDir = join(directory, ".opencode", "memory");
+    await mkdir(memoryDir, { recursive: true });
+    await writeFile(memoryPathFor("parent", memoryDir), STANDARD_MEMORY_TEMPLATE);
+    const base = makeContext(directory, source);
+    const scheduler = createV2IdleUpdateScheduler(
+      base,
+      directory,
+      async () => ({
+        status: "committed",
+        checkpointedChunks: 0,
+        checkpointedMessages: 0,
+        persistedPartialFragments: 0,
+      }),
+      new AbortController().signal,
+    );
+    try {
+      source.push({ type: "session.created", data: { sessionID: "child", parentID: "parent", metadata: {} } });
+      const path = join(memoryDir, "task-children", "child.json");
+      await eventually(() => Bun.file(path).exists());
+      expect(JSON.parse(await readFile(path, "utf8"))).toEqual({
+        version: 1,
+        sessionID: "child",
+        parentID: "parent",
+        memory: STANDARD_MEMORY_TEMPLATE,
+      });
+    } finally {
+      await scheduler.dispose();
+    }
+  });
+
   test("calls the updater for a native schema-encoded execution event with primary metadata omitting parentID", async () => {
     const directory = await setup();
     const source = eventSource();
@@ -167,32 +205,36 @@ describe("V2 idle update scheduler", () => {
     await mkdir(join(directory, ".opencode", "memory"), { recursive: true });
     await writeFile(memoryPathFor("session", join(directory, ".opencode", "memory")), original);
     const base = makeContext(directory, source);
-    const context = {
-      ...base,
-      generate: {
-        text: async () => {
-          generationStarted.resolve();
-          return generation.promise;
-        },
+    const context = { ...base } as unknown as V2Context;
+    const nativeHarness = installV2NativeGenerationHarness(context, {
+      clean: async (_input, _signal) => {
+        generationStarted.resolve();
+        return generation.promise;
       },
-    } as unknown as V2Context;
+    });
     const scheduler = createV2IdleUpdateScheduler(
       context,
       directory,
       createV2MemoryUpdater(context, directory),
       new AbortController().signal,
     );
-    source.push({ type: "session.execution.succeeded", data: { sessionID: "session" } });
-    await generationStarted.promise;
-    source.push({ type: "session.execution.started", data: { sessionID: "session" } });
-    generation.resolve({
-      text: "## Session Memory\n\n### User Instructions\n- late\n\n### Long Horizon Context\n- late\n\n### Decisions\n- late\n\n### Conclusions\n- late\n\n### Active References\n- late\n",
-    });
-    await new Promise((resolve) => setTimeout(resolve, 80));
-    expect(await Bun.file(memoryPathFor("session", join(directory, ".opencode", "memory"))).text()).toBe(original);
-    source.push({ type: "session.execution.succeeded", data: { sessionID: "session" } });
-    await scheduler.dispose();
-    expect(await Bun.file(memoryPathFor("session", join(directory, ".opencode", "memory"))).text()).toBe(original);
+    try {
+      source.push({ type: "session.execution.succeeded", data: { sessionID: "session" } });
+      await generationStarted.promise;
+      source.push({ type: "session.execution.started", data: { sessionID: "session" } });
+      generation.resolve({
+        text: "## Session Memory\n\n### User Instructions\n- late\n\n### Long Horizon Context\n- late\n\n### Decisions\n- late\n\n### Conclusions\n- late\n\n### Active References\n- late\n",
+      });
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      expect(await Bun.file(memoryPathFor("session", join(directory, ".opencode", "memory"))).text()).toBe(original);
+      source.push({ type: "session.execution.succeeded", data: { sessionID: "session" } });
+      await scheduler.dispose();
+      expect(await Bun.file(memoryPathFor("session", join(directory, ".opencode", "memory"))).text()).toBe(original);
+    } finally {
+      generation.resolve({ text: "" });
+      await scheduler.dispose();
+      await nativeHarness.dispose();
+    }
   });
 
   test("accepts exact native terminal events and ignores guessed aliases", async () => {

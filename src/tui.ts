@@ -6,38 +6,57 @@ import {
   isStatusReceiver,
   statusOutputDefinition,
   statusTargets,
+  type StatusActionRequest,
   type StatusLocation,
   type StatusOutput,
   type StatusReceiver,
 } from "./v2-status-output";
 import { loadReaderRuntime, renderV2TextReader, type ReaderRuntime, type V2ReaderHost } from "./v2-text-reader";
 import { setupV1Tui } from "./v1-tui";
+import { registerV2TuiMenu } from "./v2-tui-menu";
 export { setupV1Tui, type V1TuiContext } from "./v1-tui";
 
 export type StatusTuiContext = Pick<V2ReaderHost, "renderer" | "keymap"> & {
   client: {
-    rpc(definition: typeof statusOutputDefinition): {
-      [Method in "claim" | "acknowledge" | "cancel"]: (
-        input: StatusReceiver,
-        options?: { location?: StatusLocation; signal?: AbortSignal },
-      ) => Promise<unknown>;
-    } & {
-      events: {
-        on(
-          name: "offer" | "output" | "release",
-          handler: (event: { data: unknown; location?: StatusLocation }) => void | Promise<void>,
-          options?: { signal?: AbortSignal },
-        ): () => void;
-      };
-    };
+    rpc(definition: typeof statusOutputDefinition): StatusRpcClient;
   };
   location?: StatusLocation;
   ui: {
     router: { current(): { type: string; sessionID?: string } };
     dialog: {
+      select<Value>(options: {
+        title: string;
+        options: readonly { readonly title: string; readonly value: Value }[];
+      }): Promise<Value | undefined>;
+      confirm(options: {
+        title: string;
+        message: string;
+        label?: { confirm?: string; cancel?: string };
+      }): Promise<boolean | undefined>;
+      alert(options: { title: string; message: string }): Promise<void>;
       show(render: () => any, onClose?: () => void): void;
       set(options: { size: "large"; centered: boolean }): void;
     };
+  };
+};
+
+type StatusRpcClient = {
+  action: (
+    input: StatusActionRequest,
+    options?: { location?: StatusLocation; signal?: AbortSignal },
+  ) => Promise<unknown>;
+  claim: (input: StatusReceiver, options?: { location?: StatusLocation; signal?: AbortSignal }) => Promise<unknown>;
+  acknowledge: (
+    input: StatusReceiver,
+    options?: { location?: StatusLocation; signal?: AbortSignal },
+  ) => Promise<unknown>;
+  cancel: (input: StatusReceiver, options?: { location?: StatusLocation; signal?: AbortSignal }) => Promise<unknown>;
+  events: {
+    on(
+      name: "offer" | "output" | "release",
+      handler: (event: { data: unknown; location?: StatusLocation }) => void | Promise<void>,
+      options?: { signal?: AbortSignal },
+    ): () => void;
   };
 };
 
@@ -61,6 +80,7 @@ export function receiveStatus(context: StatusTuiContext, options: { loadRuntime?
     // Dialog has no public ownership handle. Never clear a replacement/unrelated dialog.
   };
   try {
+    registerV2TuiMenu(context, rpc.action, controller.signal);
     offs.push(
       rpc.events.on(
         "offer",
