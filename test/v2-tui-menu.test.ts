@@ -15,6 +15,7 @@ function host() {
   let confirmEffect: (() => void) | undefined;
   let invokeEffect: (() => void) | undefined;
   let command: { run(): Promise<void>; slash: { name: string }; palette: true } | undefined;
+  let keyboardMode: string | undefined;
   const controller = new AbortController();
 
   const context = {
@@ -22,8 +23,10 @@ function host() {
       return location;
     },
     keymap: {
-      layer(input: () => { commands: any[] }) {
-        command = input().commands[0] as typeof command;
+      layer(input: () => { mode?: string; commands: any[] }) {
+        const layer = input();
+        keyboardMode = layer.mode;
+        command = layer.commands[0] as typeof command;
       },
     },
     ui: {
@@ -56,6 +59,9 @@ function host() {
     selections,
     confirmations,
     alerts,
+    get keyboardMode() {
+      return keyboardMode;
+    },
     get command() {
       return command!;
     },
@@ -88,6 +94,9 @@ function host() {
 
 test("one native slash/palette command opens the seven V1 actions in the same order", async () => {
   const h = host();
+  // Native autocomplete masks base-mode commands; menu dispatch alone would
+  // miss this. The frozen-package keyboard gate verifies actual reachability.
+  expect(h.keyboardMode).toBe("global");
   expect(h.command.slash).toEqual({ name: "stm" });
   expect(h.command.palette).toBe(true);
   expect(V2_TUI_MENU_OPTIONS).toEqual([

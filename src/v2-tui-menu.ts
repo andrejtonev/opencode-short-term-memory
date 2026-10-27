@@ -164,7 +164,9 @@ export function registerV2TuiMenu(host: V2TuiMenuHost, invoke: ActionRpc, signal
   };
 
   host.keymap.layer(() => ({
-    mode: "base",
+    // Autocomplete enters its own keymap mode. Keep the slash command
+    // reachable there, matching OpenCode's native plugin menu commands.
+    mode: "global",
     enabled: () => !signal.aborted,
     commands: [
       {

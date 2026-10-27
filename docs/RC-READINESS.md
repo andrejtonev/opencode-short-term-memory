@@ -2,7 +2,21 @@
 
 Maintained and historical verification commands are mapped in [Acceptance Runners](ACCEPTANCE-RUNNERS.md). Review fixes require their own qualification; the frozen receipts below remain scoped to their named archives.
 
-## Latest Status: 2026-10-26, RC11 Published
+## Local candidate: 2026-10-27, RC12
+
+`1.4.0-rc.12` includes V2 feature parity with V1, native slash-menu
+reachability during autocomplete, and a fresh-install release gate. RC12 is
+prepared locally; no Git push or npm publication is part of this preparation.
+
+The Windows native gate installs exact candidate bytes using OpenCode's CLI
+through an isolated loopback npm registry. It requires automatic memory
+generation and injection, native keyboard commands/results, pending-provider
+reset fencing and post-reset boundaries. It neither replaces plugin hooks nor
+pre-creates STM config or memory. Deterministic-provider results do not qualify
+live free-model access or semantic memory quality. Frozen RC12 results are
+recorded separately after archive creation; RC11 receipts below remain unchanged.
+
+## Published Status: 2026-10-26, RC11
 
 `1.4.0-rc.11` packages the branch-review fixes since RC10, including lifecycle
 and reset fencing, atomic missing-file initialization, V1 active injection

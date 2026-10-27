@@ -1,6 +1,6 @@
 # V1/V2 feature parity
 
-V1 is the reference for STM features and user interaction. This document describes the development branch after the 2026-10-27 parity review. Published RC11 is unchanged; these changes are not published.
+V1 is the reference for STM features and user interaction. This document describes the RC12 development candidate after the 2026-10-27 parity review. Published RC11 is unchanged; RC12 is prepared locally.
 
 ## Shared policy, separate host integration
 
@@ -46,7 +46,7 @@ A native ConPTY run establishes one reachable `/stm` registration, command-API d
 The following remain qualification limits:
 
 - Live free-model access is provider/account dependent. Native tool/header attribution is restored, but deterministic provider checks do not prove that DeepSeek free access is restored for an account.
-- The fresh ConPTY slash-typing probe did not dispatch the menu despite a reachable `/stm` registration. Native command-API dispatch, menu selection, Show delivery and reader navigation passed; slash keyboard entry still needs an interactive check.
+- The earlier ConPTY slash probe exposed a base-mode registration bug: native autocomplete changes keyboard mode and hides base-mode commands. RC12 registers `/stm` globally, matching native plugin menus. The fresh frozen-package keyboard gate must qualify the correction; earlier command-API dispatch alone did not prove slash entry.
 - Automatic config creation currently accepts static npm package declarations. Explicit/virtual config sources, local plugin paths, ambiguous declarations, dynamic substitutions, symlinks and plugin-directory autodiscovery skip creation rather than guessing a destination. Existing settings and defaults still work.
 - The completed-compress bridge is tested independently of the external DCP package; full native V2 DCP-package compatibility remains unqualified.
 - Cross-generation reset-boundary migration and provider cache-hit behavior remain unqualified.
