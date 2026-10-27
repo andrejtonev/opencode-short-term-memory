@@ -1,5 +1,9 @@
 import { expect, test } from "bun:test";
-import { conversationDelta } from "../scripts/acceptance-memory-fixture.cjs";
+import {
+  conversationDelta,
+  assertGeneratedMemoryInjection,
+  assertOrdinaryConversationDelta,
+} from "../scripts/acceptance-memory-fixture.cjs";
 
 test("acceptance reads the actual delta after tag mentions and retained injected memory", () => {
   const text =
@@ -11,4 +15,36 @@ test("acceptance rejects missing delta data instead of passing an empty exclusio
   expect(() =>
     conversationDelta({ messages: [{ content: "<existing_memory> Policy mentions <conversation_update>" }] }),
   ).toThrow("no complete conversation data block");
+});
+
+test("earlier chat instructions cannot stand in for an injected generated memory", () => {
+  expect(() =>
+    assertGeneratedMemoryInjection(
+      { messages: [{ role: "user", content: "Remember ACCEPTANCE_FACT_OLD" }] },
+      "message",
+    ),
+  ).toThrow("missing generated memory injection");
+});
+
+test("acceptance verifies the transport of generated memory independently of ordinary history", () => {
+  const content = "[MEMORY_SYSTEM] ACCEPTANCE_MEMORY_LINE_000";
+  const body = { messages: [{ role: "user", content }] };
+  expect(() => assertGeneratedMemoryInjection(body, "message")).not.toThrow();
+  expect(() => assertGeneratedMemoryInjection(body, "system")).toThrow("Wrong memory injection transport");
+  expect(() => assertGeneratedMemoryInjection({ messages: [{ role: "system", content }] }, "system")).not.toThrow();
+});
+
+test("summary provenance permits V1 user-only updates while rejecting summarizer recursion", () => {
+  const body = (delta: string) => ({
+    messages: [
+      { content: `<existing_memory>\n</existing_memory>\n<conversation_update>\n${delta}\n</conversation_update>` },
+    ],
+  });
+  expect(() =>
+    assertOrdinaryConversationDelta(body("USER:\nRemember ACCEPTANCE_FACT_OLD for this conversation.")),
+  ).not.toThrow();
+  expect(() => assertOrdinaryConversationDelta(body("ASSISTANT:\nAcknowledged the user's instruction."))).not.toThrow();
+  expect(() =>
+    assertOrdinaryConversationDelta(body("ASSISTANT:\n## Session Memory\nACCEPTANCE_MEMORY_LINE_000")),
+  ).toThrow("owned-summary content");
 });

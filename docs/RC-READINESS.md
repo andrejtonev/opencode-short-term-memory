@@ -14,7 +14,9 @@ generation and injection, native keyboard commands/results, pending-provider
 reset fencing and post-reset boundaries. It neither replaces plugin hooks nor
 pre-creates STM config or memory. Deterministic-provider results do not qualify
 live free-model access or semantic memory quality. Frozen RC12 results are
-recorded separately after archive creation; RC11 receipts below remain unchanged.
+recorded in [RC12 Local Acceptance](RC12-LOCAL-ACCEPTANCE.md). Fresh package
+imports/declarations and all four native V1/V2 message/system workflows passed
+against the exact archive. RC11 receipts below remain unchanged.
 
 ## Published Status: 2026-10-26, RC11
 

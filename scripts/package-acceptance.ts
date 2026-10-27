@@ -100,7 +100,9 @@ try {
   async function run(label: string, args: string[], cwd: string, environment = env, allowNonzero = false) {
     const remaining = deadline - Date.now();
     assert.ok(remaining > 0, "Overall deadline exceeded");
-    const timeoutMs = Math.min(60_000, remaining);
+    // Empty-cache dependency installation competes with native host setup on
+    // Windows. Keep the overall deadline, but allow installation two minutes.
+    const timeoutMs = Math.min(args.includes("install") ? 120_000 : 60_000, remaining);
     const record = {
       label,
       args,
@@ -314,11 +316,11 @@ assert.equal(typeof tui.tui, "function");
 assert.equal(tui.tui, setupV1Tui);
 assert.equal(rpc, statusOutputDefinition);
 assert.equal(rpc.id, "stm.status-output");
-assert.deepEqual(Object.keys(rpc.methods).sort(), ["acknowledge", "cancel", "claim"]);
+assert.deepEqual(Object.keys(rpc.methods).sort(), ["acknowledge", "action", "cancel", "claim"]);
 assert.deepEqual(Object.keys(rpc.events).sort(), ["offer", "output", "release"]);
-for (const method of Object.values(rpc.methods)) {
+for (const [name, method] of Object.entries(rpc.methods)) {
   assert.equal(method.input.type, "object");
-  assert.deepEqual(method.input.required, ["requestID", "sessionID", "receiverID"]);
+  assert.deepEqual(method.input.required, name === "action" ? ["requestID", "sessionID", "action"] : ["requestID", "sessionID", "receiverID"]);
   assert.equal(method.output.properties.accepted.type, "boolean");
 }
 console.log(JSON.stringify({ gate: "public imports only, no hooks called", paths }));
@@ -430,6 +432,7 @@ const definition: Rpc.PortableDefinition = rpc;
 const sameDefinition: typeof rpc = statusOutputDefinition;
 const id: "stm.status-output" = rpc.id;
 const required: readonly ["requestID", "sessionID", "receiverID"] = rpc.methods.claim.input.required;
+const actionRequired: readonly ["requestID", "sessionID", "action"] = rpc.methods.action.input.required;
 const accepted: "boolean" = rpc.methods.acknowledge.output.properties.accepted.type;
 const cancel: false = rpc.methods.cancel.input.additionalProperties;
 const offer: "number" = rpc.events.offer.schema.properties.expiresAt.type;
@@ -437,7 +440,7 @@ const outputLimit: 16384 = rpc.events.output.schema.properties.message.maxLength
 const release: "string" = rpc.events.release.schema.properties.receiverID.type;
 const statusReceiver: StatusReceiver = { requestID: "r", sessionID: "s", receiverID: "t" };
 const statusOutput: StatusOutput = { ...statusReceiver, expiresAt: 1, message: "m", title: "t" };
-void [rootShape, serverShape, legacy, client, concreteClient, tuiShape, receiver, definition, sameDefinition, id, required, accepted, cancel, offer, outputLimit, release, statusOutput];
+void [rootShape, serverShape, legacy, client, concreteClient, tuiShape, receiver, definition, sameDefinition, id, required, actionRequired, accepted, cancel, offer, outputLimit, release, statusOutput];
 `,
   );
   await Bun.write(join(runtime, "tsconfig.json"), JSON.stringify(tsconfig, null, 2));

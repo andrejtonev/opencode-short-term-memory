@@ -37,6 +37,14 @@ Child startup/DCP delivery and compaction use their separate system-context poli
 
 ## Verification boundaries
 
+Frozen RC12 Windows acceptance now passes on V1 `1.18.35` and V2 `2.0.32` in
+both primary delivery modes, using fresh native installations and ordinary
+terminal chat. The native `/stm` autocomplete registration bug is fixed.
+See [RC12 Local Acceptance](RC12-LOCAL-ACCEPTANCE.md) for exact archive identity,
+verified workflows, captured-request checks and remaining limits. The records
+below describe the earlier development qualification and do not replace that
+frozen-artifact receipt.
+
 The final source suite passed **1,366 tests, with 4 skipped and 0 failures** (`bun test --isolate`). Build, type checking, changed-file formatting and whitespace checks passed. The tests cover both injection selectors, model combinations, command/action contracts, cancellation, stale writes, reset, child lifecycle and completed-compress handling. Shared V1/V2 contract tests compare Show, Logs and confirmed empty-history Reset using the actual implementations. The four skips concern Windows symlink privilege and Unix FIFO support.
 
 Isolated native OpenCode **2.0.32**, plugin API **2.0.8** checks establish session-generation isolation, explicit-model context transfer, cleanup, and synthetic-message ordering without extra inference. Whole development-bundle runs with a deterministic local provider establish automatic idle memory creation and delivery into the next primary request in both message and system modes. The clean summarizer excludes injected memory and does not recurse.
@@ -46,7 +54,7 @@ A native ConPTY run establishes one reachable `/stm` registration, command-API d
 The following remain qualification limits:
 
 - Live free-model access is provider/account dependent. Native tool/header attribution is restored, but deterministic provider checks do not prove that DeepSeek free access is restored for an account.
-- The earlier ConPTY slash probe exposed a base-mode registration bug: native autocomplete changes keyboard mode and hides base-mode commands. RC12 registers `/stm` globally, matching native plugin menus. The fresh frozen-package keyboard gate must qualify the correction; earlier command-API dispatch alone did not prove slash entry.
+- The earlier ConPTY slash probe exposed a base-mode registration bug: native autocomplete changes keyboard mode and hides base-mode commands. RC12 registers `/stm` globally, matching native plugin menus. The frozen-package keyboard runs now qualify the correction; earlier command-API dispatch alone did not prove slash entry.
 - Automatic config creation currently accepts static npm package declarations. Explicit/virtual config sources, local plugin paths, ambiguous declarations, dynamic substitutions, symlinks and plugin-directory autodiscovery skip creation rather than guessing a destination. Existing settings and defaults still work.
 - The completed-compress bridge is tested independently of the external DCP package; full native V2 DCP-package compatibility remains unqualified.
 - Cross-generation reset-boundary migration and provider cache-hit behavior remain unqualified.

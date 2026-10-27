@@ -10,7 +10,11 @@ const crypto = require("node:crypto");
 const assert = require("node:assert/strict");
 const { pathToFileURL } = require("node:url");
 const { terminalScreen } = require("./native-terminal-screen.cjs");
-const { conversationDelta } = require("./acceptance-memory-fixture.cjs");
+const {
+  conversationDelta,
+  assertGeneratedMemoryInjection,
+  assertOrdinaryConversationDelta,
+} = require("./acceptance-memory-fixture.cjs");
 const { cleanupOwnedChildren, applyCleanupVerdict, closeOwnedServer } = require("./windows-owned-process.cjs");
 
 const [generation, nativeArg, archiveArg, mode = "message", scope = "global"] = process.argv.slice(2);
@@ -501,13 +505,20 @@ async function main() {
   await startTerminal(session.id);
   const memoryPath = path.join(project, ".opencode", "memory", `session_${session.id}.md`);
   evidence.memoryPath = memoryPath;
-  assert.equal(fs.existsSync(memoryPath), false, "Test must start with no saved memory");
+  // V1 initializes an empty template when the native session is created; V2
+  // leaves storage absent. Neither is a generated memory or harness seed.
+  const initialMemory = fs.existsSync(memoryPath) ? fs.readFileSync(memoryPath) : undefined;
+  assert.ok(!initialMemory?.includes("ACCEPTANCE_FACT_OLD"), "Test started with generated memory");
+  evidence.initialMemory = initialMemory === undefined ? "missing" : "native empty template";
   await menu("show");
-  await wait(() => screen().includes("No memory file exists"), "missing-memory Show result through native delivery");
-  assert.equal(fs.existsSync(memoryPath), false);
+  await wait(
+    () => screen().includes(initialMemory === undefined ? "No memory file exists" : "None captured yet"),
+    "initial Show result through native delivery",
+  );
+  assert.deepEqual(fs.existsSync(memoryPath) ? fs.readFileSync(memoryPath) : undefined, initialMemory);
   assert.equal((await history(session.id)).length, 0);
   assert.equal(evidence.requests.length, 0);
-  check("typed /stm Show reaches native result without creating memory, history or inference");
+  check("typed /stm Show reaches native result without changing storage, history or inference");
   await closeDialog();
   await type("Remember ACCEPTANCE_FACT_OLD for this conversation.");
   await enter();
@@ -516,18 +527,15 @@ async function main() {
   await type("Continue using the remembered instruction.");
   await enter();
   await wait(() => evidence.requests.filter((row) => !row.summary).length === 2, "second ordinary provider request");
-  const primary = evidence.requests.filter((row) => !row.summary)[1].body.messages;
-  assert.ok(JSON.stringify(primary).includes("ACCEPTANCE_FACT_OLD"), "Primary request missing injected memory");
-  assert.equal(
-    primary.some((m) => m.role === "system" && JSON.stringify(m).includes("ACCEPTANCE_FACT_OLD")),
-    mode === "system",
-    "Wrong memory injection transport",
-  );
+  assertGeneratedMemoryInjection(evidence.requests.filter((row) => !row.summary)[1].body, mode);
   await wait(() => evidence.requests.filter((row) => row.summary).length >= 2, "second automatic summary");
   for (const row of evidence.requests.filter((row) => row.summary))
     assert.ok(!conversationDelta(row.body).includes("[MEMORY_SYSTEM]"), "Injected memory leaked into summarizer delta");
   check("memory reaches next ordinary request in selected mode and is excluded from summary delta");
   await sleep(1000);
+  // V1 can checkpoint a user-only delta and then its settled assistant reply.
+  // Validate provenance rather than assuming exactly one summary per turn.
+  for (const row of evidence.requests.filter((row) => row.summary)) assertOrdinaryConversationDelta(row.body);
   await menu("show");
   await wait(() => screen().includes("ACCEPTANCE_MEMORY_LINE_000"), "generated memory Show");
   send("\x1b[4~");
@@ -543,7 +551,14 @@ async function main() {
   assert.ok(!screen().includes("memory_update_committed"), "Logs displayed file contents");
   await closeDialog();
   await menu("settings");
-  await wait(() => screen().includes("STM settings") && screen().includes("memoryModel"), "Settings result");
+  await wait(
+    () =>
+      screen().includes("STM settings") &&
+      (generation === "v1"
+        ? screen().includes("memoryModel") && screen().includes("offline/test")
+        : screen().includes("configPaths") && screen().includes("stm.json")),
+    "Settings result",
+  );
   await closeDialog();
   await menu("status");
   await wait(() => screen().includes("STM status") && screen().includes(session.id), "Status result");
@@ -583,6 +598,7 @@ async function main() {
     "Post-reset summary reused pre-reset history",
   );
   check("future automatic generation resumes from reset boundary");
+  for (const row of evidence.requests.filter((row) => row.summary)) assertOrdinaryConversationDelta(row.body);
   assert.equal(crypto.createHash("sha256").update(fs.readFileSync(archive)).digest("hex"), evidence.archiveSha256);
   evidence.verdict = "PASS";
 }
