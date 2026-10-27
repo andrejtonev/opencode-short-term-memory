@@ -8,7 +8,7 @@ The net release overview is in [CHANGELOG.md](../CHANGELOG.md#unreleased). Fixes
 
 ## Follow-up verification and improvements
 
-All six findings below were confirmed and addressed in the working tree. The original findings describe the committed RC13 baseline; the changes have not been committed or packaged into a new release.
+All six findings below were confirmed and addressed in commit `db2c4c3`. The original findings describe the committed RC13 baseline. RC14 packages the follow-up improvements; its archive qualification is recorded in [RC14 Acceptance](RC14-LOCAL-ACCEPTANCE.md).
 
 | Finding                    | Verified improvement                                                                                                                                                                                                                                                               |
 | -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -84,4 +84,4 @@ The original review checkout passed **1,380 tests, four platform skips, zero fai
 
 An isolated Bun 1.3.13 short-timeout test also stalled without an event-loop keepalive; a timer-only preload let all 11 current-history tests pass. Treat this as harness liveness, not evidence of a product late-write defect.
 
-No confirmed high-priority lifecycle/persistence regression was found in the original reviewed core slices. These checks do not requalify the frozen RC13 archive, live providers, Linux/macOS native behavior, external DCP compatibility or actual provider cache reuse. Follow-up product and harness fixes are uncommitted; no push or publication was performed.
+No confirmed high-priority lifecycle/persistence regression was found in the original reviewed core slices. The review checks do not requalify the frozen RC13 archive, live providers, Linux/macOS native behavior, external DCP compatibility or actual provider cache reuse. Follow-up product and harness fixes are committed; release qualification is recorded separately.

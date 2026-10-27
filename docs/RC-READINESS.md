@@ -2,7 +2,11 @@
 
 Maintained and historical verification commands are mapped in [Acceptance Runners](ACCEPTANCE-RUNNERS.md). Review fixes require their own qualification; the frozen receipts below remain scoped to their named archives.
 
-## Local candidate: 2026-10-27, RC13
+## RC14 candidate: 2026-10-27
+
+`1.4.0-rc.14` includes the dev review improvements and isolated Azure Luna manual launchers. Exact archive identity and verification scope are recorded in [RC14 Acceptance](RC14-LOCAL-ACCEPTANCE.md). The default launchers use fresh RC14 profiles; earlier archives and receipts remain unchanged.
+
+## Historical local candidate: 2026-10-27, RC13
 
 `1.4.0-rc.13` fixes V2 clean-summary requests rejected by OpenCode's free-model service. It preselects native-format session IDs and preserves the native agent system instruction while excluding implicit project instructions and conversation history. Internal sessions remain fenced before creation.
 

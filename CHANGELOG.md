@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Net changes from `main` (v1.3.0) through the locally prepared RC13 candidate. The prerelease entries below retain their historical release details.
+Net changes from `main` (v1.3.0) through RC14. The prerelease entries below retain their historical release details.
 
 ### Added
 
@@ -29,6 +29,10 @@ Net changes from `main` (v1.3.0) through the locally prepared RC13 candidate. Th
 - **Memory and checkpoints stay consistent under races and write failures:** preserve concurrent external edits and existing empty files, reject stale generations, and roll back prepared memory if checkpoint persistence fails.
 - **Clean summaries cannot execute tools or recursively summarize themselves.** Exclude internal summary traffic from collection and bound cleanup waits while retaining orphan-session recovery.
 - **Provider failures retain actionable diagnostics**, including authentication and model restrictions, instead of appearing as empty summaries. Permanent failures stop retries and fallback; transient failures retain bounded recovery.
+
+## [1.4.0-rc.14] - 2026-10-27
+
+Includes the dev review improvements, V2 runtime diagnostics, shared native menu descriptions and isolated Azure Luna launchers. The default manual profiles are fresh RC14 directories. See [RC14 acceptance](docs/RC14-LOCAL-ACCEPTANCE.md) for exact archive identity and verification scope.
 
 ## [1.4.0-rc.11] - 2026-10-26
 
