@@ -1,6 +1,6 @@
 {
   "name": "@atonev/opencode-short-term-memory",
-  "version": "1.4.0-rc.14",
+  "version": "1.4.0-rc.15",
   "description": "OpenCode plugin for automatic structured session memory with generation-specific context delivery and manual memory tools.",
   "author": "andrejtonev <29177572+andrejtonev@users.noreply.github.com>",
   "license": "MIT",
@@ -47,6 +47,16 @@
   "files": [
     "dist/",
     "README.md",
+    "CHANGELOG.md",
+    "docs/README.md",
+    "docs/CONFIGURATION.md",
+    "docs/MEMORY-GENERATION.md",
+    "docs/MEMORY-DELIVERY.md",
+    "docs/COMMANDS.md",
+    "docs/CHILD-SESSIONS.md",
+    "docs/MEMORY-FILES.md",
+    "docs/FEATURE-MATRIX.md",
+    "docs/FEATURE-PARITY.md",
     "LICENSE",
     "stm.example.jsonc"
   ],

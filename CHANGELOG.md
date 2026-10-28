@@ -7,7 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Net changes from `main` (v1.3.0) through RC14. The prerelease entries below retain their historical release details.
+Planned release: **1.4.0**. This summary describes changes from 1.3; candidate-specific work and verification are recorded below.
+
+Net changes from `main` (v1.3.0) through RC15. The prerelease entries below retain their historical release details.
 
 ### Added
 
@@ -22,21 +24,26 @@ Net changes from `main` (v1.3.0) through RC14. The prerelease entries below reta
 - **Session-message delivery is now the default.** Tagged memory reminders preserve the current agent, model and tools. Periodic system-context delivery remains available through `enableLegacyPeriodicSystemTransform`; active summaries use message delivery.
 - **Logs returns the absolute log-file path**, keeping log contents out of dialogs and model prompts. Successful Update displays refreshed memory; deferred, failed and partially completed updates report their actual outcome.
 - **Child sessions receive a parent-memory startup snapshot**, with controlled restoration after compaction or DCP compression.
+- **Diagnostics protect private content:** logs retain metadata rather than prompts, injected memory or summary previews. Recognizable credential fields and inherited secrets are redacted from diagnostic errors and dumps. Compatible transitive security patches update `ip-address` and `toml`.
 
 ### Fixed
 
 - **Reset no longer replays the old conversation into cleared memory.** A persistent history boundary and stale-update fencing prevent background work from restoring pre-reset memory.
 - **Memory and checkpoints stay consistent under races and write failures:** preserve concurrent external edits and existing empty files, reject stale generations, and roll back prepared memory if checkpoint persistence fails.
-- **Clean summaries cannot execute tools or recursively summarize themselves.** Exclude internal summary traffic from collection and bound cleanup waits while retaining orphan-session recovery.
+- **Clean summaries exclude internal STM traffic**, with temporary-session ownership, execution protection and bounded cleanup that retains orphan-session recovery. They do not recursively update their own memory.
 - **Provider failures retain actionable diagnostics**, including authentication and model restrictions, instead of appearing as empty summaries. Permanent failures stop retries and fallback; transient failures retain bounded recovery.
+
+## [1.4.0-rc.15] - 2026-10-28
+
+Local candidate containing diagnostic security hardening, two compatible dependency patches and source-reviewed 1.4 user guides for both OpenCode generations. The user guides are included in the archive; private manual launchers remain ignored. RC14 passed user-reported manual testing on V1 and V2. RC15 is not published by this preparation; its archive and checks are recorded separately in [RC15 local acceptance](https://github.com/andrejtonev/opencode-short-term-memory/blob/dev/docs/RC15-LOCAL-ACCEPTANCE.md).
 
 ## [1.4.0-rc.14] - 2026-10-27
 
-Includes the dev review improvements, V2 runtime diagnostics and shared native menu descriptions. See [RC14 acceptance](docs/RC14-LOCAL-ACCEPTANCE.md) for exact archive identity and verification scope.
+Includes the dev review improvements, V2 runtime diagnostics and shared native menu descriptions. See [RC14 acceptance](https://github.com/andrejtonev/opencode-short-term-memory/blob/dev/docs/RC14-LOCAL-ACCEPTANCE.md) for exact archive identity and verification scope.
 
 ## [1.4.0-rc.11] - 2026-10-26
 
-Published under `rc` from release commit `64c2bc3e0887d5f7eeaa54e92a5a904e3fef2447` and local tag `v1.4.0-rc.11`, with `latest` left at `1.3.0`. Registry bytes match the validated frozen archive. RC11 includes the branch-review fixes below. Source and deterministic native-host checks are separate from exact-archive consumer checks and live-provider qualification; see [RC Readiness](docs/RC-READINESS.md). Git push was not part of this publication.
+Published under `rc` from release commit `64c2bc3e0887d5f7eeaa54e92a5a904e3fef2447` and local tag `v1.4.0-rc.11`, with `latest` left at `1.3.0`. Registry bytes match the validated frozen archive. RC11 includes the branch-review fixes below. Source and deterministic native-host checks are separate from exact-archive consumer checks and live-provider qualification; see [RC Readiness](https://github.com/andrejtonev/opencode-short-term-memory/blob/dev/docs/RC-READINESS.md). Git push was not part of this publication.
 
 ### Fixed
 
@@ -60,7 +67,7 @@ Published under `rc` from release commit `64c2bc3e0887d5f7eeaa54e92a5a904e3fef24
 
 ## [1.4.0-rc.10] - 2026-10-26
 
-Published under `rc` from release commit `473c2273051d0fb86df3c455732c5e142dae2b0b` and tag `v1.4.0-rc.10`, with `latest` left at `1.3.0`. The registry tarball matches the validated frozen archive byte for byte. Source checks passed 1,216 tests, with 3 skipped and 0 failed; fresh-consumer and native V1 reset/V2 dialog checks passed. Exact archive and host scope are recorded separately in [RC Readiness](docs/RC-READINESS.md).
+Published under `rc` from release commit `473c2273051d0fb86df3c455732c5e142dae2b0b` and tag `v1.4.0-rc.10`, with `latest` left at `1.3.0`. The registry tarball matches the validated frozen archive byte for byte. Source checks passed 1,216 tests, with 3 skipped and 0 failed; fresh-consumer and native V1 reset/V2 dialog checks passed. Exact archive and host scope are recorded separately in [RC Readiness](https://github.com/andrejtonev/opencode-short-term-memory/blob/dev/docs/RC-READINESS.md).
 
 ### Fixed
 
@@ -72,7 +79,7 @@ Published under `rc` from release commit `473c2273051d0fb86df3c455732c5e142dae2b
 
 ## [1.4.0-rc.9] - 2026-10-26
 
-Published under `rc` from release commit `8ba7c6c286eacadf697b3c19e320f6646ae53b90` and tag `v1.4.0-rc.9`, with `latest` left at `1.3.0`. Registry bytes matched the frozen validated archive. See [RC Readiness](docs/RC-READINESS.md) for exact artifact and host scope.
+Published under `rc` from release commit `8ba7c6c286eacadf697b3c19e320f6646ae53b90` and tag `v1.4.0-rc.9`, with `latest` left at `1.3.0`. Registry bytes matched the frozen validated archive. See [RC Readiness](https://github.com/andrejtonev/opencode-short-term-memory/blob/dev/docs/RC-READINESS.md) for exact artifact and host scope.
 
 ### Changed
 
@@ -92,7 +99,7 @@ Published under `rc` from release commit `8ba7c6c286eacadf697b3c19e320f6646ae53b
 
 ## [1.4.0-rc.8] - 2026-10-23
 
-Published under `rc` on 2026-10-23 from release commit `7d33df7e252d11a7517d9a7ec87f627d525be40a` and tag `v1.4.0-rc.8`, after local preparation on 2026-10-22. The registry tarball matched the frozen qualified archive byte for byte, with `latest` left at `1.3.0`. Exact RC8 archive qualification is recorded separately in [RC Readiness](docs/RC-READINESS.md).
+Published under `rc` on 2026-10-23 from release commit `7d33df7e252d11a7517d9a7ec87f627d525be40a` and tag `v1.4.0-rc.8`, after local preparation on 2026-10-22. The registry tarball matched the frozen qualified archive byte for byte, with `latest` left at `1.3.0`. Exact RC8 archive qualification is recorded separately in [RC Readiness](https://github.com/andrejtonev/opencode-short-term-memory/blob/dev/docs/RC-READINESS.md).
 
 ### Fixed
 
@@ -112,7 +119,7 @@ Published under `rc` on 2026-10-23 from release commit `7d33df7e252d11a7517d9a7e
 
 ## [1.4.0-rc.7] - 2026-10-21
 
-Published under `rc` on 2026-10-21 from committed fixes through `e644b30517cc27923ba7ce916e65423c8d9de828`, with `latest` left at `1.3.0`. The registry tarball matched the frozen qualified archive. RC7 artifact validation is recorded separately in [RC Readiness](docs/RC-READINESS.md); earlier RC6 results do not qualify this archive, and later source changes do not alter its published bytes.
+Published under `rc` on 2026-10-21 from committed fixes through `e644b30517cc27923ba7ce916e65423c8d9de828`, with `latest` left at `1.3.0`. The registry tarball matched the frozen qualified archive. RC7 artifact validation is recorded separately in [RC Readiness](https://github.com/andrejtonev/opencode-short-term-memory/blob/dev/docs/RC-READINESS.md); earlier RC6 results do not qualify this archive, and later source changes do not alter its published bytes.
 
 ### Fixed
 
@@ -134,7 +141,7 @@ Published under `rc` on 2026-10-21 from committed fixes through `e644b30517cc279
 
 ## [1.4.0-rc.6] - 2026-10-17
 
-Unpublished local candidate preparation, not published or stable, starting from source commit `1577d4f58fe751efb9717aeb91018206f1aece0d`. The final new RC6 artifact SHA-256 and exact-artifact qualification remain **pending**; see [RC Readiness](docs/RC-READINESS.md) for upcoming exact RC6 results.
+Unpublished local candidate preparation, not published or stable, starting from source commit `1577d4f58fe751efb9717aeb91018206f1aece0d`. The final new RC6 artifact SHA-256 and exact-artifact qualification remain **pending**; see [RC Readiness](https://github.com/andrejtonev/opencode-short-term-memory/blob/dev/docs/RC-READINESS.md) for upcoming exact RC6 results.
 
 ### Fixed
 
@@ -152,7 +159,7 @@ Unpublished local candidate preparation, not published or stable, starting from 
 
 ## [1.4.0-rc.5] - 2026-10-13
 
-RC5 preparation dated 2026-10-13, based on exact commit `cbf55e300c3c7f0b62e0be3e51b7dce55feb4c4c`. The exact artifact from source commit `aef359cd4e72d72d79d5dbe76c8b3ed8dfe9906d`, SHA-256 `d34558b13c38736315593f322bc6b5d7e16471c0301382ecc6549f73a5f69682`, received bounded qualification before publication, not stable-release qualification. The date records preparation, not publication; that prepublication evidence does not establish registry availability or semantic memory quality. See [RC Readiness](docs/RC-READINESS.md) for exact artifact evidence and limits.
+RC5 preparation dated 2026-10-13, based on exact commit `cbf55e300c3c7f0b62e0be3e51b7dce55feb4c4c`. The exact artifact from source commit `aef359cd4e72d72d79d5dbe76c8b3ed8dfe9906d`, SHA-256 `d34558b13c38736315593f322bc6b5d7e16471c0301382ecc6549f73a5f69682`, received bounded qualification before publication, not stable-release qualification. The date records preparation, not publication; that prepublication evidence does not establish registry availability or semantic memory quality. See [RC Readiness](https://github.com/andrejtonev/opencode-short-term-memory/blob/dev/docs/RC-READINESS.md) for exact artifact evidence and limits.
 
 Publication observed 2026-10-17: registry dist-tags report `rc: 1.4.0-rc.5` and `latest: 1.3.0`. RC5 is a published prerelease, not stable; this observation does not rerun or broaden its bounded qualification.
 
@@ -177,13 +184,13 @@ Unpublished prerelease candidate based on local dev commit `a3c22514967b7eca567c
 
 ### Known Limits
 
-- Registry/bootstrap, minimum-host compatibility, semantic quality, typed acceptance and committed manual coverage remain separately scoped release gates; see [RC Readiness](docs/RC-READINESS.md) for the retained evidence and gaps.
+- Registry/bootstrap, minimum-host compatibility, semantic quality, typed acceptance and committed manual coverage remain separately scoped release gates; see [RC Readiness](https://github.com/andrejtonev/opencode-short-term-memory/blob/dev/docs/RC-READINESS.md) for the retained evidence and gaps.
 
 ## [1.4.0-rc.3] - 2026-10-08
 
 Unpublished prerelease candidate for V2 parity and readiness improvements, not shipped in published `1.4.0-rc.2`. The bounded qualification recorded below applies only to the exact immutable candidate; no publication is established by this entry.
 
-The exact current candidate SHA-256 `1adcfdc1eefaa23704d7117f7f7321c40518f9312427d4723e55877f83a48212` passed bounded clean-consumer, native V1 and native V2 acceptance in 22.512, 49.725 and 52.736 seconds, respectively. The latest recorded local gate passed 897 tests and 4,074 assertions. These results qualify only the exact unpublished candidate and do not claim registry publication, semantic-model quality, universal host compatibility or generic V2 qualification; see [RC Readiness](docs/RC-READINESS.md) for retained evidence and limits. Prior exact candidate `1ca912...` and its bounded acceptance remain historical qualification, not evidence for these bytes. Paid V1 run `stm-paid-e2e-cNWSEN` remains 50/51; its serialization assertion was corrected and verified deterministically locally without a paid rerun or a claim of 51/51. The earlier 777-test result and native run `8b0960f9` remain historical evidence.
+The exact current candidate SHA-256 `1adcfdc1eefaa23704d7117f7f7321c40518f9312427d4723e55877f83a48212` passed bounded clean-consumer, native V1 and native V2 acceptance in 22.512, 49.725 and 52.736 seconds, respectively. The latest recorded local gate passed 897 tests and 4,074 assertions. These results qualify only the exact unpublished candidate and do not claim registry publication, semantic-model quality, universal host compatibility or generic V2 qualification; see [RC Readiness](https://github.com/andrejtonev/opencode-short-term-memory/blob/dev/docs/RC-READINESS.md) for retained evidence and limits. Prior exact candidate `1ca912...` and its bounded acceptance remain historical qualification, not evidence for these bytes. Paid V1 run `stm-paid-e2e-cNWSEN` remains 50/51; its serialization assertion was corrected and verified deterministically locally without a paid rerun or a claim of 51/51. The earlier 777-test result and native run `8b0960f9` remain historical evidence.
 
 ### Added
 
@@ -243,7 +250,7 @@ Prerelease candidate for additive V2 support alongside V1. The intended npm dist
 ### Known Limits
 
 - Use a trusted single-user server; RPC routing correlation is not user authorization or a multi-user isolation guarantee. Action completion timeouts, cancellation and delivery failures do not abort or roll back mutations; busy ownership remains until the action settles.
-- Installed-tarball native multi-chunk acceptance is adapter-mediated on V2 `2.0.12`; lifecycle acceptance uses wrappers on V1 `1.14.25` and V2 `2.0.8`/`2.0.12`. This does not establish direct loader/registry bootstrap, `plugin add` installation, unwrapped root compatibility or universal OpenCode 2.x support. See [RC Readiness](docs/RC-READINESS.md) for retained evidence and remaining release qualification.
+- Installed-tarball native multi-chunk acceptance is adapter-mediated on V2 `2.0.12`; lifecycle acceptance uses wrappers on V1 `1.14.25` and V2 `2.0.8`/`2.0.12`. This does not establish direct loader/registry bootstrap, `plugin add` installation, unwrapped root compatibility or universal OpenCode 2.x support. See [RC Readiness](https://github.com/andrejtonev/opencode-short-term-memory/blob/dev/docs/RC-READINESS.md) for retained evidence and remaining release qualification.
 
 ## [1.3.0] - 2026-06-24
 
@@ -251,14 +258,14 @@ Prerelease candidate for additive V2 support alongside V1. The intended npm dist
 
 - Orphan side-session cleanup runs at plugin startup: a `.opencode/memory/side-sessions.json` tracking file is consulted, a live scan supplements it for any "Session Memory Summarizer" sessions from older plugin versions, and every orphaned side session is deleted (with `client.session.delete`). Failed deletions are kept in the tracking file for the next startup; already-gone sessions are dropped to avoid leaks.
 - `AbortController` + 90 s default timeout (`CLEAN_SUMMARIZER_TIMEOUT.ms`) for the clean summarizer. On timeout the plugin calls `client.session.abort` to stop the server and throws a clear error.
-- Diagnostic `[STM-STARTUP] factory_returned_ms=…` line on stderr, gated by `STM_STARTUP_TIMING=1` or `OPENCODE_E2E=1`. The factory body no longer awaits heavy I/O — config load, default-config seed, log write, and orphan cleanup are deferred to a microtask so the plugin returns in <10 ms under a live opencode (e2e-verified 0.14–1.92 ms).
+- Diagnostic `[STM-STARTUP] factory_returned_ms=Ã¢â‚¬Â¦` line on stderr, gated by `STM_STARTUP_TIMING=1` or `OPENCODE_E2E=1`. The factory body no longer awaits heavy I/O Ã¢â‚¬â€ config load, default-config seed, log write, and orphan cleanup are deferred to a microtask so the plugin returns in <10 ms under a live opencode (e2e-verified 0.14Ã¢â‚¬â€œ1.92 ms).
 - End-to-end test suite (51 tests across 5 files) under `test/e2e/`: plugin wireup, `/stm` commands, event handling, direct hook coverage, and `includeAgentsMdOnFirstUpdate`. Harness spins up `opencode serve` against a temp project + temp `XDG_CONFIG_HOME`/`XDG_DATA_HOME` and symlinks the local source so the test never touches the developer's real config.
 - Unit-test coverage for chunking, retry/drain, message collection, compaction-drain timeout, direct hook wire (Tier 3), and the `includeAgentsMdOnFirstUpdate` config. Combined with the new e2e suite, the test count grew from 146 + 48 to 180 + 51 = 231 tests.
 - Unofficial-plugin disclaimer in `README.md`.
 
 ### Fixed
 
-- `bun run build` was inheriting the host's Node 14 runtime; the installed `rollup` uses `??=` (Node 15+) and failed to bundle. Switched the `build` script to use `bun --bun run …` so it always uses bun's own runtime.
+- `bun run build` was inheriting the host's Node 14 runtime; the installed `rollup` uses `??=` (Node 15+) and failed to bundle. Switched the `build` script to use `bun --bun run Ã¢â‚¬Â¦` so it always uses bun's own runtime.
 - `backgroundInitDone` flag was set before the background work actually completed, racing with concurrent `reloadConfigLocal()` calls. Set in `finally` after the work (or its error) completes.
 - Orphan tracking file no longer leaks entries on opencode 1.17.x, whose `client.session.delete` returns a generic `"Unexpected server error"` (`UnknownError`) for sessions that are already gone. Both `NotFoundError` and the generic message are now treated as "already gone".
 - Clean summarizer can no longer hang indefinitely; the 90 s `AbortController` timeout bounds every prompt and the matching `client.session.abort` stops the server-side generation.
@@ -268,11 +275,11 @@ Prerelease candidate for additive V2 support alongside V1. The intended npm dist
 ### Changed
 
 - Clean summarizer now uses the OpenCode SDK API instead of spawning external `opencode` binaries for side sessions.
-- Side sessions are created, prompted, and deleted via `client.session.create/prompt/delete` — no temp directories or shell processes.
+- Side sessions are created, prompted, and deleted via `client.session.create/prompt/delete` Ã¢â‚¬â€ no temp directories or shell processes.
 
 ### Removed
 
-- **Breaking:** Removed `opencodeExecutable` config option — no longer needed when using the SDK API.
+- **Breaking:** Removed `opencodeExecutable` config option Ã¢â‚¬â€ no longer needed when using the SDK API.
 - Removed binary discovery (`resolveCleanExecutable`), validation (`validateRuntimeConfig`), and output parsing utilities (`stripAnsi`, `parseJsonSummarizerOutput`).
 
 ## [1.1.1] - 2026-05-14

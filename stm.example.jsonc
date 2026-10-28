@@ -2,34 +2,36 @@
   // Session memory plugin on/off
   "enabled": true,
 
-  // Model used by the summarizer. V1 clean mode omits an empty override and lets the host resolve it.
-  // V2 uses the current session model when empty; an explicit override is unsupported in active mode.
+  // Model used by the summarizer (provider/model), in both V1 and V2.
+  // Blank clean mode uses the fresh session's host default; blank active uses the current session model.
+  // A valid explicit override applies in either mode.
   "memoryModel": "",
 
   // clean | active
   "summarizerMode": "clean",
 
-  // If true, eligible clean-mode failures may fall back to the active session after retries.
-  // V1 excludes classified permanent provider failures such as authentication/free-tier rejection.
-  // V2 permits only settled retryable clean failures (not explicit override, timeout, or cancellation).
+  // If true, eligible exhausted clean failures may fall back to active generation.
+  // Permanent provider failures do not retry or fall back.
+  // V2 also excludes timeout/cancellation and uses the remaining chunk deadline; overrides are retained.
   "cleanFallbackToActiveSession": false,
 
   // If true, include AGENTS.md content in the first memory update prompt per session
   "includeAgentsMdOnFirstUpdate": false,
 
-  // If true, inject parent memory into eligible task children.
-  // Parent-memory snapshots: V1 subagents at creation; V2 task children on first eligible read, gated by injection settings.
+  // If true, deliver a frozen parent-memory snapshot to eligible child sessions.
+  // Children do not summarize; observed child creation captures the snapshot in both generations.
   "injectInSubagents": true,
 
-  // Number of additional attempts (0 = no retry).
-  // V1 clean mode creates a fresh side session per attempt; permanent provider failures stop retries/fallback.
-  // V2 retries settled transient/malformed output in clean or active mode within one chunk deadline.
+  // Number of additional clean attempts (0 = no retry). Active mode does not use this retry loop.
+  // Clean attempts use fresh owned sessions; permanent provider failures stop retries.
+  // V2 shares one chunk deadline across retries and fallback.
   "sideSessionRetries": 1,
 
-  // V1 selects legacy system-transform transport; V2 gates all system injection.
+  // Select system/context delivery in clean mode; otherwise use session-message delivery.
+  // Active mode always uses session-message delivery, even when this selector is true.
   "enableLegacyPeriodicSystemTransform": false,
 
-  // Inject every N eligible user turns when delivery is enabled; V2 also requires the gate above.
+  // Deliver saved memory every N eligible user turns in either primary delivery mode.
   "remindEveryN": 4,
 
   // Target length for stored session memory markdown; a complete line plus metadata can exceed it.
@@ -38,7 +40,7 @@
   // Max conversation-content chars per update chunk; prompt overhead is not included.
   "maxUpdateInputLength": 20000,
 
-  // V1 look-back limit; V2 applies this limit per update chunk.
+  // Recent-history look-back limit in both generations; reset anchors are located before this limit.
   "maxDeltaMessages": 200,
 
   // Collapse consecutive visible assistant replies between user turns into the last reply.
@@ -48,8 +50,8 @@
   // Debounce for scheduled updates (ms)
   "debounceMs": 1200,
 
-  // V1 debug logs can include full prompts/memory/conversation; normal completion logs include text previews.
-  // V2 generation/injection debug logs contain metadata, but errors and existing logs may still be sensitive.
+  // Additional diagnostic metadata. New logs omit prompts, conversation and memory previews.
+  // Recognizable credentials are redacted; existing logs are not rewritten.
   "debug": false,
 
   // Max JSONL lines kept in .opencode/memory/session-memory.log

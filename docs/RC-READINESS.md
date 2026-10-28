@@ -2,7 +2,11 @@
 
 Maintained and historical verification commands are mapped in [Acceptance Runners](ACCEPTANCE-RUNNERS.md). Review fixes require their own qualification; the frozen receipts below remain scoped to their named archives.
 
-## RC14 candidate: 2026-10-27
+## RC15 local candidate: 2026-10-28
+
+`1.4.0-rc.15` contains presentation-only diagnostic hardening and compatible dependency patches, plus source-reviewed user documentation for the 1.4 release. User guides are included in the npm archive. Local launchers select fresh RC15 profiles and remain ignored. RC14 passed user-reported manual testing on both V1 and V2; that observation does not qualify RC15 or every feature/provider combination. RC15's exact archive and check scope are recorded in [RC15 Local Acceptance](RC15-LOCAL-ACCEPTANCE.md). No publication or Git push is part of this preparation.
+
+## Historical RC14 candidate: 2026-10-27
 
 `1.4.0-rc.14` includes the dev review improvements. Exact archive identity and verification scope are recorded in [RC14 Acceptance](RC14-LOCAL-ACCEPTANCE.md). Earlier archives and receipts remain unchanged.
 
