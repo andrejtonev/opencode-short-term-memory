@@ -1,3 +1,5 @@
+import { diagnosticErrorMessage, redactDiagnostic } from "./diagnostics";
+
 type ErrorRow = Record<string, unknown>;
 
 function row(value: unknown): ErrorRow | undefined {
@@ -69,7 +71,8 @@ function classifyProviderGenerationError(error: unknown, depth: number): MemoryG
 }
 
 export function generationErrorMessage(error: unknown): string {
-  return providerGenerationError(error)?.message ?? (error instanceof Error ? error.message : String(error ?? ""));
+  const classified = providerGenerationError(error);
+  return classified ? redactDiagnostic(classified.message) : diagnosticErrorMessage(error);
 }
 
 export function isPermanentGenerationError(error: unknown): boolean {

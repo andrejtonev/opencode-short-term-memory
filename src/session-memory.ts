@@ -1,3 +1,4 @@
+import { diagnosticErrorMessage } from "./diagnostics";
 import type {
   OpencodeConfig,
   Client,
@@ -551,7 +552,7 @@ export const SessionMemoryPlugin = async (
     s.timer = setTimeout(() => {
       s.timer = undefined;
       updateMemory(client, sessionID, reason, config, schedulingGeneration).catch(async (error) => {
-        globalState.lastError = (error as Error).message;
+        globalState.lastError = diagnosticErrorMessage(error);
         showToast(client, "Session Memory", "Summarization failed — check /stm logs for details.");
         await logEvent(config, "memory_update_uncaught_error", { sessionID, error: globalState.lastError });
       });

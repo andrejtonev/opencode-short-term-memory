@@ -1,3 +1,4 @@
+import { diagnosticErrorMessage } from "./diagnostics";
 import { lstat, readFile, realpath } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, join, parse, resolve, sep } from "node:path";
@@ -40,7 +41,7 @@ export async function bootstrapV2InstalledConfig(context: Context): Promise<Conf
       result = await bootstrapInstalledConfig([origin]);
     }
   } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error);
+    const detail = diagnosticErrorMessage(error);
     result = {
       status: "error",
       message: `Could not verify the native STM config origin (${detail}); existing settings and defaults remain available.`,
@@ -387,7 +388,7 @@ async function lstatIfExists(path: string): Promise<Result<Awaited<ReturnType<ty
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     if (code === "ENOENT" || code === "ENOTDIR") return ok(undefined);
-    return fail(`Could not inspect ${path}: ${error instanceof Error ? error.message : String(error)}`);
+    return fail(`Could not inspect ${path}: ${diagnosticErrorMessage(error)}`);
   }
 }
 

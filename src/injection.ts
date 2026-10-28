@@ -82,7 +82,6 @@ export async function deliverMemoryViaNoReply(
     await logEvent(config, "memory_inject_message", {
       sessionID,
       messageChars: injectedMessage.length,
-      injectedMessage,
     });
   }
 
@@ -151,7 +150,6 @@ export async function appendChildMemoryToSystem(
     await logEvent(config, "memory_inject_message", {
       sessionID,
       messageChars: injectedMessage.length,
-      injectedMessage,
     });
   }
   try {
@@ -238,7 +236,6 @@ export async function injectMemoryIntoSystemTransform(
     await logEvent(config, "memory_inject_message", {
       sessionID,
       messageChars: injectedSystemMessage.length,
-      injectedMessage: injectedSystemMessage,
     });
   }
   if (sessionStates.get(sessionID) !== s || (isDeliveryStillValid && !isDeliveryStillValid())) return;

@@ -2,6 +2,7 @@ import { mkdir, readFile, writeFile, appendFile, rm, stat, lstat, rename, open, 
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { parse } from "jsonc-parser";
+import { diagnosticJson } from "./diagnostics";
 import type { Client, OpencodePluginOrigin } from "./types";
 
 export type SessionMemoryConfig = {
@@ -1038,7 +1039,7 @@ export async function logEvent(config: SessionMemoryConfig, event: string, data:
   const path = logPath(config.memoryDir);
   await withPathWriteLock(path, async () => {
     await ensureDir(dirname(path));
-    await appendFile(path, JSON.stringify(entry) + "\n", "utf8");
+    await appendFile(path, diagnosticJson(entry) + "\n", "utf8");
     await trimLogUnlocked(path, config.logMaxLines);
   }).catch(() => {});
 }

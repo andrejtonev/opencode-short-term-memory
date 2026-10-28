@@ -1,3 +1,4 @@
+import { diagnosticErrorMessage } from "./diagnostics";
 import { resolve } from "node:path";
 import type { Info as ToolDefinition, ToolContext } from "@opencode/plugin/promise/tool";
 import { readConfigDiagnostics } from "./memory-utils";
@@ -185,7 +186,7 @@ async function resetMemory(
         try {
           return await readV2ResetAnchor(pluginContext, sessionID);
         } catch (error) {
-          refusal = `Refused to reset V2 short-term memory: ${error instanceof Error ? error.message : String(error)}.`;
+          refusal = `Refused to reset V2 short-term memory: ${diagnosticErrorMessage(error)}.`;
           throw error;
         }
       },

@@ -1,3 +1,4 @@
+import { diagnosticErrorMessage } from "./diagnostics";
 import type { Model } from "@opencode/schema/model";
 import type { V2Context } from "./v2-adapter";
 import { safeSessionID } from "./memory-utils";
@@ -252,7 +253,7 @@ export async function readV2CurrentHistory(
     // These independent reads are durable history, not an atomic model-facing snapshot.
     return project(sessionID, model, records);
   } catch (error) {
-    return { status: "error", sessionID, reason: error instanceof Error ? error.message : String(error) };
+    return { status: "error", sessionID, reason: diagnosticErrorMessage(error) };
   }
 }
 

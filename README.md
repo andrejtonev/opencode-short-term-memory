@@ -88,7 +88,7 @@ Enable the same STM package in the singular `plugin` array in `tui.json`, as wel
 
 V1 results are capped at 16,384 characters with a truncation notice. Paging shows the delivered text; inspect the saved file to read anything beyond the cap. A waiting result times out after 120 seconds. Dismissing the dialog or changing sessions abandons display but does not cancel an admitted server action; inspect persisted state before retrying. Displayed results remain readable until dismissed.
 
-V1 logs can contain full summarizer prompts when `debug: true`, including saved memory and conversation content. Normal completion events can also contain text previews. V2 generation/injection debug events contain metadata rather than prompt/response bodies, but operational errors and existing logs may still contain sensitive details. Path-only Logs changes how results are displayed, not what is stored in the file.
+On the current `dev` checkout, V1 and V2 diagnostics retain operation metadata and character counts rather than summarizer prompts, memory previews or injected content, including with `debug: true`. Credential fields and recognizable or inherited credentials are redacted from new diagnostic logs and errors. This hardening requires a future release: published RC14 and older packages/logs are unchanged, so review their logs before sharing. Saved memory and conversation content remain unchanged and may contain information you intentionally supplied.
 
 ## Configuration
 

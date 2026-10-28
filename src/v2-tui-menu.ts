@@ -1,3 +1,4 @@
+import { redactDiagnostic } from "./diagnostics";
 import type { StatusActionRequest, StatusLocation } from "./v2-status-output";
 import { MEMORY_MENU_OPTIONS } from "./memory-menu";
 
@@ -75,10 +76,10 @@ function isSameScope(host: V2TuiMenuHost, expected: Scope): boolean {
 }
 
 function errorText(error: unknown): string {
-  if (error instanceof Error) return error.message;
+  if (error instanceof Error) return redactDiagnostic(error.message);
   if (error !== null && typeof error === "object" && typeof (error as { message?: unknown }).message === "string")
-    return (error as { message: string }).message;
-  return String(error);
+    return redactDiagnostic((error as { message: string }).message);
+  return redactDiagnostic(String(error));
 }
 
 /** Register one native V2 `/stm` picker. Server actions remain admission-controlled by RPC. */

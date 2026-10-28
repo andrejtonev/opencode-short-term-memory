@@ -1,4 +1,5 @@
 import { createRuntimeState, type RuntimeState } from "./memory-utils";
+import { redactDiagnostic } from "./diagnostics";
 import type { V2Context } from "./v2-adapter";
 
 const states = new WeakMap<V2Context, RuntimeState>();
@@ -47,5 +48,5 @@ export function recordV2Telemetry(
     state.injectCharCount += typeof detail === "number" ? detail : 0;
     state.lastInjectAt = timestamp();
   } else if (event === "compact") state.compactCount++;
-  else state.lastError = String(detail ?? "unknown");
+  else state.lastError = redactDiagnostic(String(detail ?? "unknown"));
 }

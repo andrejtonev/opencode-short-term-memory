@@ -334,7 +334,6 @@ export async function runCleanOpencodeSummarizer(
     await logEvent(config, "side_session_summarize_done", {
       sessionID,
       resultChars: text.length,
-      resultPreview: text.slice(0, 120),
     });
 
     return text;
@@ -386,7 +385,6 @@ export async function runActiveSessionSummarizer(
     await logEvent(config, "active_session_summarizer_done", {
       sessionID,
       resultChars: trimmed.length,
-      resultPreview: trimmed.slice(0, 120),
     });
     return trimmed;
   } catch (error) {

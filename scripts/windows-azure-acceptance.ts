@@ -1267,5 +1267,5 @@ try {
   await writeFile(join(root, "terminal.ansi"), redact(terminalLog));
   await writeFile(join(root, "requests.json"), redact(JSON.stringify(requests, null, 2)));
   await writeFile(join(root, "evidence.json"), redact(JSON.stringify(result, null, 2)));
-  console.log(JSON.stringify(result));
+  console.log(redact(JSON.stringify(result)));
 }

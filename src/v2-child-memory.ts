@@ -1,3 +1,4 @@
+import { diagnosticErrorMessage } from "./diagnostics";
 import { constants } from "node:fs";
 import { lstat, mkdir, open, readdir, rm } from "node:fs/promises";
 import { join } from "node:path";
@@ -468,7 +469,7 @@ export async function classifyV2Session(context: V2Context, sessionID: string): 
     }
     return { kind: "metadata-error", detail: "invalid_parent_id" };
   } catch (error: unknown) {
-    return { kind: "metadata-error", detail: error instanceof Error ? error.message : String(error) };
+    return { kind: "metadata-error", detail: diagnosticErrorMessage(error) };
   }
 }
 

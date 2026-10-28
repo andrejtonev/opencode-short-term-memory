@@ -1,3 +1,4 @@
+import { diagnosticErrorMessage } from "./diagnostics";
 import type { SessionMemoryConfig } from "./memory-utils";
 import {
   STANDARD_MEMORY_TEMPLATE,
@@ -25,7 +26,7 @@ export type V2MemoryResetTestHooks = {
 type ResetConfig = Pick<SessionMemoryConfig, "memoryDir">;
 
 function causeMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error ?? "unknown error");
+  return diagnosticErrorMessage(error ?? "unknown error");
 }
 
 // This is process-local operation rollback, not crash- or cross-process ACID. The boundary

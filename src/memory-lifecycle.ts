@@ -109,7 +109,6 @@ export async function processMemoryChunks(
         sessionID,
         reason,
         promptChars: prompt.length,
-        prompt,
       });
     }
 
@@ -199,7 +198,6 @@ export async function processMemoryChunks(
         sessionID,
         reason,
         detail: "malformed_summarizer_output",
-        preview: next.slice(0, 240),
       });
       return wroteMemory;
     }

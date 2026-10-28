@@ -1,3 +1,4 @@
+import { diagnosticErrorMessage } from "./diagnostics";
 import { isAbsolute } from "node:path";
 import { MEMORY_MENU_OPTIONS } from "./memory-menu";
 import { openTextReader, type ReaderHost } from "./tui-text-reader";
@@ -162,7 +163,7 @@ export async function setupV1Tui<Node>(api: V1TuiContext<Node>, _options?: unkno
       if (disposed || generation !== currentGeneration || !sameTarget(api, location)) return;
       pending = undefined;
       clearTimeout(timer);
-      alert(`STM ${action} error`, error instanceof Error ? error.message : String(error), location);
+      alert(`STM ${action} error`, diagnosticErrorMessage(error), location);
     }
   };
   const select = (action: V1Action) => {

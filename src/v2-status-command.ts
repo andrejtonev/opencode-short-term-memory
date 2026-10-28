@@ -1,3 +1,4 @@
+import { diagnosticErrorMessage } from "./diagnostics";
 import type { V2Context, V2RuntimeContract } from "./v2-adapter";
 import { createV2MemoryActions } from "./v2-memory-tools";
 import { parseV2MemoryAction, type V2MemoryActionRequest, type V2MemoryCommandActions } from "./v2-memory-command";
@@ -113,7 +114,7 @@ export function createStatusDelivery(
         } catch (error) {
           if (settled || disposed) throw error;
           title += " error";
-          message = failure(`action failed: ${error instanceof Error ? error.message : String(error)}`, error).message;
+          message = failure(`action failed: ${diagnosticErrorMessage(error)}`, error).message;
         }
         if (settled || disposed || pending !== current) throw failure("output cancelled.");
         clearTimeout(timer);

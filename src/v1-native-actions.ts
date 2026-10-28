@@ -1,3 +1,4 @@
+import { diagnosticErrorMessage } from "./diagnostics";
 import { resolve } from "node:path";
 import { SIDE_SESSION_TITLE } from "./memory-utils";
 import type { Client } from "./types";
@@ -77,7 +78,7 @@ export function createV1ActionReceiver(options: {
       }
       message = await options.execute(request);
     } catch (error) {
-      message = `STM ${request.action} failed: ${error instanceof Error ? error.message : String(error)}`;
+      message = `STM ${request.action} failed: ${diagnosticErrorMessage(error)}`;
     } finally {
       active.delete(request.requestID);
       seen.set(request.requestID, Date.now());

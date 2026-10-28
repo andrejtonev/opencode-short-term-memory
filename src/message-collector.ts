@@ -1,3 +1,4 @@
+import { redactDiagnostic } from "./diagnostics";
 import {
   type SessionMemoryConfig,
   type RuntimeState,
@@ -21,6 +22,10 @@ import { getV1HistoryMessageID, historyAfterV1Reset, readV1ResetBoundary, sortV1
 type MessageReader = Pick<RuntimeContract, "readSessionMessages">;
 
 function caughtValueMessage(error: unknown): string {
+  return redactDiagnostic(rawCaughtValueMessage(error));
+}
+
+function rawCaughtValueMessage(error: unknown): string {
   if (typeof error === "string") return error;
   if (error === null || error === undefined) return "Unknown error";
 
