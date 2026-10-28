@@ -4,7 +4,7 @@ Maintained and historical verification commands are mapped in [Acceptance Runner
 
 ## RC14 candidate: 2026-10-27
 
-`1.4.0-rc.14` includes the dev review improvements and isolated Azure Luna manual launchers. Exact archive identity and verification scope are recorded in [RC14 Acceptance](RC14-LOCAL-ACCEPTANCE.md). The default launchers use fresh RC14 profiles; earlier archives and receipts remain unchanged.
+`1.4.0-rc.14` includes the dev review improvements. Exact archive identity and verification scope are recorded in [RC14 Acceptance](RC14-LOCAL-ACCEPTANCE.md). Earlier archives and receipts remain unchanged.
 
 ## Historical local candidate: 2026-10-27, RC13
 

@@ -15,7 +15,7 @@ Net changes from `main` (v1.3.0) through RC14. The prerelease entries below reta
 - **Native `/stm` menus in both versions:** inspect Status, Show, Settings and Logs without invoking the chat model; confirm Reset and optional Setup locally. Update invokes the memory model. V1 uses paged readers and V2 uses scrollable dialogs for long results; argument-based slash commands remain model-mediated.
 - **Dedicated `stm_memory_*` tools** for the seven memory actions, while retaining `short_term_memory` compatibility.
 - **Installation-scoped configuration:** automatically create a minimal `stm.json` for supported global or project installations, preserve existing settings, and expose configuration paths and bootstrap diagnostics. Setup remains optional.
-- **Isolated Windows launchers and release acceptance:** install frozen candidates into private V1/V2 environments for manual testing; verify archive consumers and native generation, injection, reset and UI behavior separately.
+- **Release acceptance:** verify frozen archive consumers and native generation, injection, reset and UI behavior separately in private V1/V2 environments.
 
 ### Changed
 
@@ -32,7 +32,7 @@ Net changes from `main` (v1.3.0) through RC14. The prerelease entries below reta
 
 ## [1.4.0-rc.14] - 2026-10-27
 
-Includes the dev review improvements, V2 runtime diagnostics, shared native menu descriptions and isolated Azure Luna launchers. The default manual profiles are fresh RC14 directories. See [RC14 acceptance](docs/RC14-LOCAL-ACCEPTANCE.md) for exact archive identity and verification scope.
+Includes the dev review improvements, V2 runtime diagnostics and shared native menu descriptions. See [RC14 acceptance](docs/RC14-LOCAL-ACCEPTANCE.md) for exact archive identity and verification scope.
 
 ## [1.4.0-rc.11] - 2026-10-26
 

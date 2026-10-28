@@ -1,6 +1,6 @@
 # RC14 acceptance
 
-`1.4.0-rc.14` packages the reviewed V1/V2 diagnostics, lifecycle and acceptance improvements, plus the isolated Azure Luna manual launchers. Registry publication is tracked separately from source and archive qualification.
+`1.4.0-rc.14` packages the reviewed V1/V2 diagnostics, lifecycle and acceptance improvements. Registry publication is tracked separately from source and archive qualification.
 
 ## Archive identity
 
@@ -26,6 +26,6 @@ Native Windows workflows passed against these exact bytes using the maintained d
 
 These checks cover native installation and first-use config creation, automatic generation and selected injection, exclusion of injected memory from summaries, native commands without inference, long-result keyboard navigation, pending-generation reset fencing and post-reset recovery. V2 also verifies native agent identity without implicit project instructions. The first V1 message attempt exceeded the installer's four-minute deadline before any functional checks; its isolated retry passed. Both attempts retain their separate receipts.
 
-The scripts default to Azure Luna, reading the inherited credential or the same Windows Credential Manager entry used by the VS Code launcher. V1 and V2 use generation-specific Azure settings, including supported reasoning-effort and output-limit parameters. Both fresh setup-only launches passed and installed the exact archive, with Azure Luna selected for chat and memory generation and message injection enabled. Default profiles are `C:\stm-manual\v1-rc14` and `C:\stm-manual\v2-rc14`; RC13 profiles are preserved. Setup-only verification sends no model prompts.
+Separate private manual setup checks installed the exact archive on both hosts with Azure Luna and message injection selected. Setup verification sent no model prompts. Personal launchers and provider setup documentation are maintained outside the repository.
 
 These checks do not establish live-provider access, semantic memory quality, actual cache reuse, Ubuntu/Lima behavior or external DCP-package compatibility. Previous RC13 receipts remain scoped to the frozen RC13 archive.

@@ -7,3 +7,9 @@ dist/
 *.tgz
 *.tar.gz
 package-lock.json
+
+# Private manual setup tools stay outside version control.
+scripts/start-isolated-*.ps1
+scripts/azure-manual-launcher.ps1
+scripts/isolated-manual*.cjs
+docs/ISOLATED-MANUAL-SETUP.md
