@@ -1295,31 +1295,28 @@ describe("V2 fresh memory updater", () => {
     });
     expect(calls.clean).toHaveLength(2);
     expect(await readText(logPath(memoryDir))).toContain('"detail":"generation rejected"');
-    CLEAN_SUMMARIZER_TIMEOUT.ms = 1;
-    const timeoutEntered = deferred<void>();
+    const timeoutMs = 250;
     const lateOperation = deferred<{ text: string }>();
     let timeoutCalls = 0;
     const timeoutContext = makeContext(directory, {
       clean: async () => {
         timeoutCalls += 1;
-        timeoutEntered.resolve();
         return lateOperation.promise;
       },
     });
-    const timeoutUpdate = createV2MemoryUpdater(timeoutContext.context)(
+    const timeoutUpdate = createV2MemoryUpdater(timeoutContext.context, undefined, { generationTimeoutMs: timeoutMs })(
       input("timeout", [message("u1", "user", "Q"), message("a1", "assistant", "A")]),
     );
-    await timeoutEntered.promise;
     await expect(timeoutUpdate).resolves.toEqual({
       status: "error",
       reason: "operational_failure",
-      detail: "summarizer_timeout:1ms",
+      detail: `summarizer_timeout:${timeoutMs}ms`,
       checkpointedChunks: 0,
       checkpointedMessages: 0,
       persistedPartialFragments: 0,
     });
     expect(timeoutCalls).toBe(1);
-    expect(await readText(logPath(memoryDir))).toContain('"detail":"summarizer_timeout:1ms"');
+    expect(await readText(logPath(memoryDir))).toContain(`"detail":"summarizer_timeout:${timeoutMs}ms"`);
     lateOperation.reject(new Error("late timeout rejection"));
     await Promise.resolve();
   });

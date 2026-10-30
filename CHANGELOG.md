@@ -7,9 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Planned release: **1.4.0**. This summary describes changes from 1.3; candidate-specific work and verification are recorded below.
+## [1.4.0] - 2026-10-30
 
-Net changes from `main` (v1.3.0) through RC15. The prerelease entries below retain their historical release details.
+Changes from 1.3.0, using RC15's runtime implementation. The stable package has its own version and validated archive; prerelease entries below retain their historical release details.
 
 ### Added
 
@@ -24,6 +24,7 @@ Net changes from `main` (v1.3.0) through RC15. The prerelease entries below reta
 - **Session-message delivery is now the default.** Tagged memory reminders preserve the current agent, model and tools. Periodic system-context delivery remains available through `enableLegacyPeriodicSystemTransform`; active summaries use message delivery.
 - **Logs returns the absolute log-file path**, keeping log contents out of dialogs and model prompts. Successful Update displays refreshed memory; deferred, failed and partially completed updates report their actual outcome.
 - **Child sessions receive a parent-memory startup snapshot**, with controlled restoration after compaction or DCP compression.
+- **Model selection follows OpenCode defaults:** blank `memoryModel` uses a fresh-session default in clean mode or the conversation model in active mode, replacing the hardcoded free model. Explicit overrides work in either mode.
 - **Diagnostics protect private content:** logs retain metadata rather than prompts, injected memory or summary previews. Recognizable credential fields and inherited secrets are redacted from diagnostic errors and dumps. Compatible transitive security patches update `ip-address` and `toml`.
 
 ### Fixed
@@ -35,7 +36,7 @@ Net changes from `main` (v1.3.0) through RC15. The prerelease entries below reta
 
 ## [1.4.0-rc.15] - 2026-10-28
 
-Local candidate containing diagnostic security hardening, two compatible dependency patches and source-reviewed 1.4 user guides for both OpenCode generations. The user guides are included in the archive; private manual launchers remain ignored. RC14 passed user-reported manual testing on V1 and V2. RC15 is not published by this preparation; its archive and checks are recorded separately in [RC15 local acceptance](https://github.com/andrejtonev/opencode-short-term-memory/blob/dev/docs/RC15-LOCAL-ACCEPTANCE.md).
+Published under `rc` on 2026-10-28 from `f3f780b`, with a byte-identical registry tarball verified. Contains diagnostic security hardening, two compatible dependency patches and source-reviewed 1.4 user guides for both OpenCode generations. User guides are packaged; private manual launchers remain ignored. RC14 passed user-reported manual testing on V1 and V2. Local preparation checks are recorded separately in [RC15 local acceptance](https://github.com/andrejtonev/opencode-short-term-memory/blob/main/docs/RC15-LOCAL-ACCEPTANCE.md).
 
 ## [1.4.0-rc.14] - 2026-10-27
 

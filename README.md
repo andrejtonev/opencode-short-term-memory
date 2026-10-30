@@ -26,17 +26,16 @@ OpenCode; STM generation consumes that model's usage allowance.
 
 ## Install
 
-These guides describe the 1.4 feature set. Choose an available 1.4-compatible
-package version from the [changelog](CHANGELOG.md), or use a prepared local
-package archive. Replace `<version>` below; the default npm version can have an
-older feature set.
+These guides describe 1.4. The examples pin `1.4.0` for reproducible installation;
+use `@latest` to select npm's current stable release. See the
+[changelog](CHANGELOG.md) for release history.
 
 **OpenCode V1:** run from your project for a local installation:
 
 ```sh
-opencode plugin '@atonev/opencode-short-term-memory@<version>' --force
+opencode plugin '@atonev/opencode-short-term-memory@1.4.0' --force
 # Or install globally:
-opencode plugin '@atonev/opencode-short-term-memory@<version>' --global --force
+opencode plugin '@atonev/opencode-short-term-memory@1.4.0' --global --force
 ```
 
 Enable the same package in the singular `plugin` arrays of server
@@ -45,7 +44,7 @@ Enable the same package in the singular `plugin` arrays of server
 **OpenCode V2:** the installation command is global:
 
 ```sh
-opencode plugin add '@atonev/opencode-short-term-memory@<version>'
+opencode plugin add '@atonev/opencode-short-term-memory@1.4.0'
 ```
 
 Enable the same package in the plural `plugins` arrays of global server

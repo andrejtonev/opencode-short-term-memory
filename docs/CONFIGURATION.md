@@ -7,15 +7,15 @@ companions; keep their package versions aligned.
 
 ## Install for your OpenCode generation
 
-Choose an available 1.4-compatible build from the [changelog](../CHANGELOG.md),
-or a prepared local package archive. Replace `<version>` in the examples below;
-an unversioned npm install can select an older feature set.
+The examples pin `1.4.0` for reproducible installation. Use `@latest` to select
+npm's current stable release, or a prepared local package archive for testing.
+See the [changelog](../CHANGELOG.md) for release history.
 
 For V1, run the local command from your project, or choose the global command:
 
 ```sh
-opencode plugin '@atonev/opencode-short-term-memory@<version>' --force
-opencode plugin '@atonev/opencode-short-term-memory@<version>' --global --force
+opencode plugin '@atonev/opencode-short-term-memory@1.4.0' --force
+opencode plugin '@atonev/opencode-short-term-memory@1.4.0' --global --force
 ```
 
 V1 uses the singular `plugin` array in `opencode.json`. Enable the same package
@@ -23,7 +23,7 @@ in `tui.json` to load the native `/stm` menu. Preserve other plugins in both fil
 
 ```json
 {
-  "plugin": ["@atonev/opencode-short-term-memory@<version>"]
+  "plugin": ["@atonev/opencode-short-term-memory@1.4.0"]
 }
 ```
 
@@ -35,7 +35,7 @@ it does not reset memory or overwrite STM settings.
 For V2, the native command installs globally and has no `--global` option:
 
 ```sh
-opencode plugin add '@atonev/opencode-short-term-memory@<version>'
+opencode plugin add '@atonev/opencode-short-term-memory@1.4.0'
 ```
 
 V2 uses the plural `plugins` array. Verify the same package is enabled in both
@@ -43,7 +43,7 @@ global server `opencode.json` and terminal UI `cli.json`, preserving other entri
 
 ```json
 {
-  "plugins": ["@atonev/opencode-short-term-memory@<version>"]
+  "plugins": ["@atonev/opencode-short-term-memory@1.4.0"]
 }
 ```
 

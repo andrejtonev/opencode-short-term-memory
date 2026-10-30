@@ -160,7 +160,10 @@ test("owned mock closure forces only its server connections and bounds a missing
 });
 
 test("native V2 finalization records cleanup failure and exits nonzero without targeting an exited PID", async () => {
-  const source = await readFile(join(import.meta.dir, "../scripts/v2-native-reader-acceptance.cjs"), "utf8");
+  const source = (await readFile(join(import.meta.dir, "../scripts/v2-native-reader-acceptance.cjs"), "utf8")).replace(
+    /\r\n/g,
+    "\n",
+  );
   const start = source.lastIndexOf("  } finally {") + "  } finally {".length;
   const end = source.lastIndexOf("\n  }\n})();");
   expect(end).toBeGreaterThan(start);

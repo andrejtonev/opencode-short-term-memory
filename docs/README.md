@@ -26,11 +26,11 @@ or that every host/provider has been qualified.
 
 The following records are in the repository rather than the packaged user guide:
 
-- [Release readiness](https://github.com/andrejtonev/opencode-short-term-memory/blob/dev/docs/RC-READINESS.md)
-- [Acceptance runners](https://github.com/andrejtonev/opencode-short-term-memory/blob/dev/docs/ACCEPTANCE-RUNNERS.md)
-- [Security audit](https://github.com/andrejtonev/opencode-short-term-memory/blob/dev/docs/SECURITY-AUDIT.md)
-- [Historical RC11 feature matrix](https://github.com/andrejtonev/opencode-short-term-memory/blob/dev/docs/archives/FEATURE-MATRIX-RC11.md)
-- [Earlier development parity review](https://github.com/andrejtonev/opencode-short-term-memory/blob/dev/docs/archives/DEVELOPMENT-PARITY-REVIEW.md)
+- [Release readiness](https://github.com/andrejtonev/opencode-short-term-memory/blob/main/docs/RC-READINESS.md)
+- [Acceptance runners](https://github.com/andrejtonev/opencode-short-term-memory/blob/main/docs/ACCEPTANCE-RUNNERS.md)
+- [Security audit](https://github.com/andrejtonev/opencode-short-term-memory/blob/main/docs/SECURITY-AUDIT.md)
+- [Historical RC11 feature matrix](https://github.com/andrejtonev/opencode-short-term-memory/blob/main/docs/archives/FEATURE-MATRIX-RC11.md)
+- [Earlier development parity review](https://github.com/andrejtonev/opencode-short-term-memory/blob/main/docs/archives/DEVELOPMENT-PARITY-REVIEW.md)
 
 Release records retain their original version, artifact identity and validation
 scope. Their results should not be treated as qualification of later packages.
